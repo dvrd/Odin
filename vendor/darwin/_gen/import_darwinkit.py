@@ -99,6 +99,9 @@ KNOWN_FIXES = [
 # Stand-in aliases which csgen emits for types of frameworks it was not told about:
 # framework -> (import alias, import path, {alias name: replacement})
 ALIAS_FIXES = {
+	"AVFoundation": ("CV", "vendor:darwin/CoreVideo", {
+		"CVPixelBufferRef": "CV.PixelBufferRef",
+	}),
 	"QuartzCore": ("MTL", "vendor:darwin/Metal", {
 		"MTLDevice":       "MTL.Device",
 		"MTLDrawable":     "MTL.Drawable",

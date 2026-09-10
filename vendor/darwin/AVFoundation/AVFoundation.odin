@@ -9,6 +9,7 @@ import CG "core:sys/darwin/CoreGraphics"
 import CM "vendor:darwin/CoreMedia"
 import NS "core:sys/darwin/Foundation"
 import AT "vendor:darwin/AudioToolbox"
+import CV "vendor:darwin/CoreVideo"
 
 id            :: ^intrinsics.objc_object
 SEL           :: ^intrinsics.objc_selector
@@ -28,7 +29,7 @@ foreign import lib {
 
 CVImageBufferRef     :: struct {}
 CVPixelBufferPoolRef :: struct {}
-CVPixelBufferRef     :: struct {}
+CVPixelBufferRef     :: CV.PixelBufferRef
 CIContext            :: struct {}
 CIImage              :: struct {}
 UTType               :: struct {}
