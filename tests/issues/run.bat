@@ -472,6 +472,37 @@ echo #assert(B == false)>> sb_link\root\main.odin
 
 @rem #########################################################################################################
 
+
+@rem Experimental executable cache: cold builds, hits, invalidation, and both flag spellings.
+@if "%ODIN_TESTS_NO_CLANG%" == "" (
+	clang -c "..\test_cached_foreign_libs.c" -o cached_foreign_libs_c.o || exit /b
+) else (
+	cl /nologo /c "..\test_cached_foreign_libs.c" /Fo:cached_foreign_libs_c.o || exit /b
+)
+lib /nologo /OUT:libcached_foreign_libs.a cached_foreign_libs_c.o || exit /b
+set ODIN_CACHE_DIR=%CD%\cached_test_home
+if exist "%ODIN_CACHE_DIR%" rmdir /S /Q "%ODIN_CACHE_DIR%"
+
+%ODIN% build "..\test_cached_foreign_libs.odin" -file -cached -show-debug-messages -out:cached_foreign_libs_app.exe > cached_test.log 2>&1 || exit /b
+%ODIN% build "..\test_cached_foreign_libs.odin" -file -cached -show-debug-messages -out:cached_foreign_libs_app.exe > cached_test.log 2>&1 || exit /b
+findstr /c:"try_copy_executable_from_cache" cached_test.log > nul || exit /b 1
+cached_foreign_libs_app.exe || exit /b
+
+%ODIN% build "..\test_cached_foreign_libs.odin" -file -cached -show-debug-messages -out:cached_foreign_libs_app.exe -o:speed > cached_test.log 2>&1 || exit /b
+findstr /c:"try_copy_executable_to_cache" cached_test.log > nul || exit /b 1
+%ODIN% build "..\test_cached_foreign_libs.odin" -file -cached -show-debug-messages -out:cached_foreign_libs_app.exe -o:speed > cached_test.log 2>&1 || exit /b
+findstr /c:"try_copy_executable_from_cache" cached_test.log > nul || exit /b 1
+
+%ODIN% build -cache "..\test_cached_foreign_libs.odin" -file -show-debug-messages -out:cached_foreign_libs_app.exe > cached_test.log 2>&1 || exit /b
+%ODIN% build -cache "..\test_cached_foreign_libs.odin" -file -show-debug-messages -out:cached_foreign_libs_app.exe > cached_test.log 2>&1 || exit /b
+findstr /c:"try_copy_executable_from_cache" cached_test.log > nul || exit /b 1
+%ODIN% run -cache "..\test_cached_foreign_libs.odin" -file || exit /b
+%ODIN% test -cache "..\test_cached_foreign_libs.odin" -file || exit /b
+%ODIN% clear-cache || exit /b
+if exist "%ODIN_CACHE_DIR%" exit /b 1
+set ODIN_CACHE_DIR=
+echo SUCCESSFUL 1/1
+
 @echo off
 
 popd

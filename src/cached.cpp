@@ -4,6 +4,16 @@ gb_internal GB_COMPARE_PROC(string_cmp) {
 	return string_compare(x, y);
 }
 
+// odin_cache_root: $ODIN_CACHE_DIR, one cache for every build. Empty when it
+// is not set; the cache then lives in `.odin-cache` beside the output.
+gb_internal String odin_cache_root(void) {
+	char const *dir = gb_get_env("ODIN_CACHE_DIR", permanent_allocator());
+	if (dir && *dir) {
+		return make_string_c(dir);
+	}
+	return {};
+}
+
 gb_internal bool recursively_delete_directory(String const &path) {
 	gbAllocator ha = heap_allocator();
 #if defined(GB_SYSTEM_WINDOWS)
@@ -120,6 +130,29 @@ gb_internal bool try_clear_cache(Array<String> const &args) {
 		}
 	}
 	String cache_dir = concatenate_strings(permanent_allocator(), dir, str_lit("/.odin-cache"));
+	// $ODIN_CACHE_DIR is the cache wherever the output goes.
+	String root = odin_cache_root();
+	if (root.len != 0) {
+		cache_dir = root;
+	}
+#if defined(GB_SYSTEM_WINDOWS)
+	String16 wdir = string_to_win32_path(temporary_allocator(), cache_dir);
+	DWORD attributes = GetFileAttributesW(cast(wchar_t *)wdir.text);
+	if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+		// A link in place of the cache is removed, never followed.
+		if (DeleteFileW(cast(wchar_t *)wdir.text)) {
+			return true;
+		}
+		return RemoveDirectoryW(cast(wchar_t *)wdir.text) != 0;
+	}
+#else
+	struct stat st = {};
+	char const *dir_c = alloc_cstring(temporary_allocator(), cache_dir);
+	if (lstat(dir_c, &st) == 0 && S_ISLNK(st.st_mode)) {
+		// A link in place of the cache is removed, never followed.
+		return unlink(dir_c) == 0;
+	}
+#endif
 	if (!path_is_directory(cache_dir)) {
 		return true;
 	}
@@ -152,7 +185,70 @@ gb_internal bool check_if_exists_directory_otherwise_create(String const &str) {
 #endif
 }
 
+// make_directory_recursive creates `path` and any missing parent directories.
+gb_internal void make_directory_recursive(String const &path) {
+	for (isize i = 1; i <= path.len; i++) {
+		if (i == path.len || path[i] == '/' || path[i] == '\\') {
+			(void)check_if_exists_directory_otherwise_create(substring(path, 0, i));
+		}
+	}
+}
+
+// cache_temp_path is `path` with a pid suffix, so concurrent compilers never write the same file.
+gb_internal String cache_temp_path(String const &path) {
+#if defined(GB_SYSTEM_WINDOWS)
+	long long pid = cast(long long)GetCurrentProcessId();
+#else
+	long long pid = cast(long long)getpid();
+#endif
+	gbString s = gb_string_make_length(permanent_allocator(), path.text, path.len);
+	s = gb_string_append_fmt(s, ".%lld.tmp", pid);
+	return make_string(cast(u8 *)s, gb_string_length(s));
+}
+
+// publish_file replaces `dest` with `tmp`, removing `tmp` on failure.
+//
+// Cache entries are written through a temp so `dest` never holds a partial file: a truncated
+// executable would still satisfy the manifest and be run on every later invocation.
+// gb_file_move cannot be used, as link()+unlink() fails when the destination exists.
+//
+// Each file is atomic, but an entry is several files with no entry-level lock:
+// concurrent same-entry builds interleave (last writer wins), do not run them concurrently.
+gb_internal bool publish_file(String const &tmp, String const &dest) {
+	char const *tmp_c = alloc_cstring(temporary_allocator(), tmp);
+#if defined(GB_SYSTEM_WINDOWS)
+	// MOVEFILE_REPLACE_EXISTING, so an existing entry is never unlinked before its replacement is
+	// in place -- a plain MoveFileW refuses the destination and deleting first opens a window
+	// where a concurrent build sees no entry at all.
+	String16 wtmp  = string_to_win32_path(temporary_allocator(), tmp);
+	String16 wdest = string_to_win32_path(temporary_allocator(), dest);
+	if (!MoveFileExW(cast(wchar_t *)wtmp.text, cast(wchar_t *)wdest.text, MOVEFILE_REPLACE_EXISTING)) {
+		gb_file_remove(tmp_c);
+		return false;
+	}
+	return true;
+#else
+	if (rename(tmp_c, alloc_cstring(temporary_allocator(), dest)) != 0) {
+		gb_file_remove(tmp_c);
+		return false;
+	}
+	return true;
+#endif
+}
+
+// Copies through a temporary so `to` never holds a partial file, and so the
+// entry and the output never share an inode.
+gb_internal bool cache_copy_file_direct(String from, String to);
 gb_internal bool cache_copy_file(String from, String to) {
+	String tmp = cache_temp_path(to);
+	if (!cache_copy_file_direct(from, tmp)) {
+		gb_file_remove(alloc_cstring(temporary_allocator(), tmp));
+		return false;
+	}
+	return publish_file(tmp, to);
+}
+
+gb_internal bool cache_copy_file_direct(String from, String to) {
 #if defined(GB_SYSTEM_WINDOWS)
 	String16 wfrom = string_to_win32_path(temporary_allocator(), from);
 	String16 wto   = string_to_win32_path(temporary_allocator(), to);
@@ -206,15 +302,20 @@ gb_internal bool cache_copy_file(String from, String to) {
 }
 
 gb_internal bool cache_write_file(String path, void const *data, isize size) {
-	char const *cpath = alloc_cstring(temporary_allocator(), path);
-	gb_file_remove(cpath);
+	// Written through a temporary: a manifest is either the old one or the new one.
+	String tmp = cache_temp_path(path);
+	char const *ctmp = alloc_cstring(temporary_allocator(), tmp);
 	gbFile f = {};
-	if (gb_file_open_mode(&f, gbFileMode_Write, cpath) != gbFileError_None) {
+	if (gb_file_open_mode(&f, gbFileMode_Write, ctmp) != gbFileError_None) {
 		return false;
 	}
 	bool ok = size == 0 || gb_file_write(&f, data, size);
 	gb_file_close(&f);
-	return ok;
+	if (!ok) {
+		gb_file_remove(ctmp);
+		return false;
+	}
+	return publish_file(tmp, path);
 }
 
 struct CacheOutput {
@@ -311,7 +412,11 @@ gb_internal bool cache_write_manifest(String path, Array<String> const &entries)
 	gbString s = gb_string_make(heap_allocator(), "");
 	defer (gb_string_free(s));
 	for (String const &e : entries) {
-		s = gb_string_append_fmt(s, "%td %.*s\n", e.len, LIT(e));
+		// Not one format call: that goes through a fixed 4096-byte buffer, and a
+		// longer entry (a large $PATH, a long -define:) would be dropped.
+		s = gb_string_append_fmt(s, "%td ", e.len);
+		s = gb_string_append_length(s, e.text, e.len);
+		s = gb_string_appendc(s, "\n");
 	}
 	return cache_write_file(path, s, gb_string_length(s));
 }
@@ -354,9 +459,15 @@ gb_internal bool try_copy_executable_from_cache(void) {
 }
 
 
-#if !defined(GB_SYSTEM_WINDOWS)
-extern char **environ;
-#endif
+// Static libs, object files and asm are baked into the binary; dynamic libs load at runtime.
+gb_internal bool foreign_lib_is_statically_linked(String const &path) {
+	if (has_asm_extension(path)) {
+		return true;
+	}
+	String ext = path_extension(path, false);
+	return str_eq_ignore_case(ext, "a") || str_eq_ignore_case(ext, "lib") ||
+	       str_eq_ignore_case(ext, "o") || str_eq_ignore_case(ext, "obj");
+}
 
 gb_internal Array<String> cache_gather_files(Checker *c) {
 	Parser *p = c->parser;
@@ -386,6 +497,38 @@ gb_internal Array<String> cache_gather_files(Checker *c) {
 			continue;
 		}
 		array_add(&files, cache->path);
+	}
+
+	// static foreign libs are baked in, so track them too
+	for (Entity *e : c->info.foreign_library_names) {
+		if (e->LibraryName.decl == nullptr) {
+			continue;
+		}
+		ast_node(imp, ForeignImportDecl, e->LibraryName.decl);
+		for (isize i = 0; i < e->LibraryName.paths.count; i++) {
+			String lib = string_trim_whitespace(e->LibraryName.paths[i]);
+			if (lib.len == 0 || !foreign_lib_is_statically_linked(lib)) {
+				continue;
+			}
+			// `system:` imports are names, not files
+			if (i < imp->filepaths.count) {
+				Ast *fp = imp->filepaths[i];
+				if (fp->tav.mode == Addressing_Constant &&
+				    fp->tav.value().kind == ExactValue_String &&
+				    string_starts_with(fp->tav.value().value_string, str_lit("system:"))) {
+					continue;
+				}
+			}
+			array_add(&files, lib);
+		}
+	}
+
+	// The compiler itself is an input: a new one can turn identical sources into a different
+	// executable. Its path feeds the cache key, so separate installs (a package manager's, a local
+	// build) never evict each other, and its mtime feeds the manifest, so upgrading in place does.
+	String exe = odin_exe_path();
+	if (exe.len != 0) {
+		array_add(&files, exe);
 	}
 
 	array_sort(files, string_cmp);
@@ -439,36 +582,41 @@ gb_internal Array<String> cache_gather_args(Array<String> const &args) {
 	return res;
 }
 
-gb_internal Array<String> cache_gather_envs() {
-	auto envs = array_make<String>(heap_allocator());
-	{
-	#if defined(GB_SYSTEM_WINDOWS)
-		wchar_t *strings = GetEnvironmentStringsW();
-		defer (FreeEnvironmentStringsW(strings));
+// Environment variables that can change the executable a build produces.
+//
+// An allowlist rather than the whole environment: PWD, OLDPWD, SHLVL and _ are all exported by
+// ordinary shells, so comparing everything means a `cd` or a subshell is enough to miss the cache.
+// These are every variable the compiler reads that reaches the output -- the rest only affect
+// diagnostics (TERM, NO_COLOR, ODIN_ERROR_POS_STYLE), temporary files (TMPDIR), or where the cache
+// itself lives. Windows SDK/MSVC paths also come from the environment; macOS SDK via xcrun.
+gb_global char const *CACHED_ENV_NAMES[] = {
+	"DEVELOPER_DIR",
+	"INCLUDE",
+	"LIB",
+	"ODIN_ANDROID_NDK",
+	"ODIN_ANDROID_NDK_TOOLCHAIN",
+	"ODIN_ANDROID_SDK",
+	"ODIN_CLANG_PATH",
+	"ODIN_ROOT",
+	"PATH",
+	"SDKROOT",
+	"UniversalCRTSdkDir",
+	"VCToolsInstallDir",
+	"WindowsSdkBinPath",
+	"WindowsSdkDir",
+	"WindowsSdkVerBinPath",
+	"WindowsSDKLibVersion",
+	"WindowsSDKVersion",
+};
 
-		wchar_t *curr_string = strings;
-		while (curr_string && *curr_string) {
-			String16 wstr = make_string16_c(cast(u16 *)curr_string);
-			curr_string += wstr.len+1;
-			String str = string16_to_string(temporary_allocator(), wstr);
-			if (string_starts_with(str, str_lit("CURR_DATE_TIME="))) {
-				continue;
-			}
-			array_add(&envs, str);
-		}
-	#else
-		char **curr_env = environ;
-		while (curr_env && *curr_env) {
-			String str = make_string_c(*curr_env++);
-			if (string_starts_with(str, str_lit("PROMPT="))) {
-				continue;
-			}
-			if (string_starts_with(str, str_lit("RPROMPT="))) {
-				continue;
-			}
-			array_add(&envs, str);
-		}
-	#endif
+gb_internal Array<String> cache_gather_envs() {
+	auto envs = array_make<String>(heap_allocator(), 0, gb_count_of(CACHED_ENV_NAMES));
+	for (char const *name : CACHED_ENV_NAMES) {
+		char const *value = gb_get_env(name, temporary_allocator());
+		gbString s = gb_string_make(temporary_allocator(), name);
+		s = gb_string_appendc(s, "=");
+		s = gb_string_appendc(s, value ? value : "");
+		array_add(&envs, make_string(cast(u8 *)s, gb_string_length(s)));
 	}
 	array_sort(envs, string_cmp);
 	return envs;
@@ -495,9 +643,14 @@ gb_internal bool try_cached_build(Checker *c, Array<String> const &args) {
 		crc = crc64_with_seed(a.text, a.len, crc);
 	}
 
-	String base_cache_dir = build_context.build_paths[BuildPath_Output].basename;
-	base_cache_dir = concatenate_strings(permanent_allocator(), base_cache_dir, str_lit("/.odin-cache"));
-	(void)check_if_exists_directory_otherwise_create(base_cache_dir);
+	String base_cache_dir = odin_cache_root();
+	if (base_cache_dir.len != 0) {
+		make_directory_recursive(base_cache_dir);
+	} else {
+		base_cache_dir = build_context.build_paths[BuildPath_Output].basename;
+		base_cache_dir = concatenate_strings(permanent_allocator(), base_cache_dir, str_lit("/.odin-cache"));
+		(void)check_if_exists_directory_otherwise_create(base_cache_dir);
+	}
 
 	gbString crc_str = gb_string_make_reserve(permanent_allocator(), 16);
 	crc_str = gb_string_append_fmt(crc_str, "%016llx", crc);

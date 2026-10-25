@@ -195,6 +195,7 @@ struct AstFile {
 	Array<Ast *> delayed_decls_queues[AstDelayQueue_COUNT];
 
 	std::atomic<isize> seen_load_directive_count;
+	std::atomic<isize> seen_foreign_import_count;
 
 #define PARSER_MAX_FIX_COUNT 6
 	isize    fix_count;
@@ -279,6 +280,7 @@ struct Parser {
 	std::atomic<isize>     total_line_count;
 
 	std::atomic<isize>     total_seen_load_directive_count;
+	std::atomic<isize>     total_seen_foreign_import_count;
 
 	WorkerTaskProc *       package_parsed_proc; // if set, a task for each package once its files are parsed
 };

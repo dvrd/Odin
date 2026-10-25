@@ -1185,7 +1185,16 @@ gb_global String const SEPARATOR_STRING =
 
 gb_global String const WASM_MODULE_NAME_SEPARATOR = str_lit("..");
 
+gb_internal String internal_odin_exe_path(void);
 gb_internal String internal_odin_root_dir(void);
+
+// odin_exe_path is the running compiler's own path, empty if it cannot be located.
+//
+// Deliberately independent of $ODIN_ROOT: that says where the core collections live, not which
+// compiler is running, so -cached still has to notice a new one when it is set.
+gb_internal String odin_exe_path(void) {
+	return internal_odin_exe_path();
+}
 
 gb_internal String odin_root_dir(void) {
 	if (global_module_path_set) {
@@ -1211,13 +1220,13 @@ gb_internal String odin_root_dir(void) {
 
 
 #if defined(GB_SYSTEM_WINDOWS)
-gb_internal String internal_odin_root_dir(void) {
-	String path = global_module_path;
-	isize len, i;
+gb_internal String internal_odin_exe_path(void) {
+	String path = {};
+	isize len;
 	wchar_t *text;
 
-	if (global_module_path_set) {
-		return global_module_path;
+	if (global_odin_exe_path.len != 0) {
+		return global_odin_exe_path;
 	}
 
 	auto path_buf = array_make<wchar_t>(heap_allocator(), 300);
@@ -1243,16 +1252,7 @@ gb_internal String internal_odin_root_dir(void) {
 	GetModuleFileNameW(nullptr, text, cast(int)len);
 	path = string16_to_string(heap_allocator(), make_string16(cast(u16 *)text, len));
 
-	for (i = path.len-1; i >= 0; i--) {
-		u8 c = path[i];
-		if (c == '/' || c == '\\') {
-			break;
-		}
-		path.len--;
-	}
-
-	global_module_path = path;
-	global_module_path_set = true;
+	global_odin_exe_path = path;
 
 
 	array_free(&path_buf);
@@ -1266,13 +1266,13 @@ gb_internal String internal_odin_root_dir(void) {
 
 gb_internal String path_to_fullpath(gbAllocator a, String s, bool *ok_);
 
-gb_internal String internal_odin_root_dir(void) {
-	String path = global_module_path;
-	isize len, i;
+gb_internal String internal_odin_exe_path(void) {
+	String path = {};
+	isize len;
 	u8 *text;
 
-	if (global_module_path_set) {
-		return global_module_path;
+	if (global_odin_exe_path.len != 0) {
+		return global_odin_exe_path;
 	}
 
 	auto path_buf = array_make<char>(heap_allocator(), 300);
@@ -1298,16 +1298,7 @@ gb_internal String internal_odin_root_dir(void) {
 
 	path = path_to_fullpath(heap_allocator(), make_string(text, len), nullptr);
 
-	for (i = path.len-1; i >= 0; i--) {
-		u8 c = path[i];
-		if (c == '/' || c == '\\') {
-			break;
-		}
-		path.len--;
-	}
-
-	global_module_path = path;
-	global_module_path_set = true;
+	global_odin_exe_path = path;
 
 	return path;
 }
@@ -1318,13 +1309,13 @@ gb_internal String internal_odin_root_dir(void) {
 
 gb_internal String path_to_fullpath(gbAllocator a, String s, bool *ok_);
 
-gb_internal String internal_odin_root_dir(void) {
-	String path = global_module_path;
-	isize len, i;
+gb_internal String internal_odin_exe_path(void) {
+	String path = {};
+	isize len;
 	u8 *text;
 
-	if (global_module_path_set) {
-		return global_module_path;
+	if (global_odin_exe_path.len != 0) {
+		return global_odin_exe_path;
 	}
 
 	auto path_buf = array_make<char>(heap_allocator(), 300);
@@ -1459,7 +1450,21 @@ gb_internal String internal_odin_root_dir(void) {
 	gb_memmove(text, &path_buf[0], len);
 
 	path = path_to_fullpath(heap_allocator(), make_string(text, len), nullptr);
-	for (i = path.len-1; i >= 0; i--) {
+	global_odin_exe_path = path;
+
+	return path;
+}
+#endif
+
+// internal_odin_root_dir is the directory holding the compiler, i.e. its path without the file
+// name. The truncation used to be repeated in each platform's lookup above.
+gb_internal String internal_odin_root_dir(void) {
+	if (global_module_path_set) {
+		return global_module_path;
+	}
+
+	String path = internal_odin_exe_path();
+	for (isize i = path.len-1; i >= 0; i--) {
 		u8 c = path[i];
 		if (c == '/' || c == '\\') {
 			break;
@@ -1469,10 +1474,8 @@ gb_internal String internal_odin_root_dir(void) {
 
 	global_module_path = path;
 	global_module_path_set = true;
-
 	return path;
 }
-#endif
 
 #if defined(GB_SYSTEM_WINDOWS)
 // `GetFullPathNameW` is only unsafe with threads while the current directory changes, which the compiler never does
