@@ -2921,6 +2921,15 @@ struct lbLLVMModulePassWorkerData {
 gb_internal WORKER_TASK_PROC(lb_llvm_module_pass_worker_proc) {
 	auto wd = cast(lbLLVMModulePassWorkerData *)data;
 
+	// Darwin arm64e signs the TLV thunk (IA, 0). LLVM emits blraaz only when
+	// the function has the ptrauth-calls string attribute.
+	if (build_context.metrics.os == TargetOs_darwin &&
+	    string_starts_with(build_context.metrics.target_triplet, str_lit("arm64e-"))) {
+		for (LLVMValueRef fn = LLVMGetFirstFunction(wd->m->mod); fn != nullptr; fn = LLVMGetNextFunction(fn)) {
+			lb_add_attribute_to_proc_with_string(wd->m, fn, str_lit("ptrauth-calls"), str_lit(""));
+		}
+	}
+
 	LLVMPassManagerRef module_pass_manager = LLVMCreatePassManager();
 	LLVMRunPassManager(module_pass_manager, wd->m->mod);
 

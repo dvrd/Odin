@@ -823,6 +823,12 @@ gb_global TargetMetrics target_darwin_arm64 = {
 	8, 8, 16, 16,
 	str_lit("arm64-apple-macosx"), // NOTE: Changes during initialization based on build flags.
 };
+gb_global TargetMetrics target_darwin_arm64e = {
+	TargetOs_darwin,
+	TargetArch_arm64,
+	8, 8, 16, 16,
+	str_lit("arm64e-apple-macosx"),
+};
 
 gb_global TargetMetrics target_freebsd_i386 = {
 	TargetOs_freebsd,
@@ -974,6 +980,7 @@ struct NamedTargetMetrics {
 gb_global NamedTargetMetrics named_targets[] = {
 	{ str_lit("darwin_amd64"),        &target_darwin_amd64   },
 	{ str_lit("darwin_arm64"),        &target_darwin_arm64   },
+	{ str_lit("darwin_arm64e"),       &target_darwin_arm64e  },
 
 	{ str_lit("linux_i386"),          &target_linux_i386     },
 	{ str_lit("linux_amd64"),         &target_linux_amd64    },
