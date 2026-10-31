@@ -419,6 +419,13 @@ _exec :: proc(op: ^Operation) {
 }
 
 @(private="package")
+_cancel :: proc(target: ^Operation) {
+	// Synchronous work already queued for delivery keeps its result.
+	if .Done in target._impl.flags do return
+	_remove(target)
+}
+
+@(private="package")
 _remove :: proc(target: ^Operation) {
 	assert(target != nil)
 
@@ -570,6 +577,12 @@ Queue_Identifier :: struct {
 
 handle_completed :: proc(op: ^Operation) {
 	debug("handling", op.type)
+	// A readiness event is not a completed I/O result. If cancellation was
+	// requested before handling it, detach without starting another syscall.
+	if op._cancel_requested && .Removed in op._impl.flags &&
+	   .Done not_in op._impl.flags && !op.cancelled {
+		timeout_and_delete(op)
+	}
 
 	result: Op_Result
 	#partial switch op.type {
@@ -615,7 +628,7 @@ handle_completed :: proc(op: ^Operation) {
 	}
 
 	maybe_callback :: proc(op: ^Operation) {
-		if .Removed not_in op._impl.flags {
+		if .Removed not_in op._impl.flags || op._cancel_requested {
 			debug("done", op.type, "calling back")
 			op.cb(op)
 		} else {
@@ -1233,6 +1246,9 @@ remove_link_timeout :: proc(op: ^Operation) {
 }
 
 timeout_and_delete :: proc(target: ^Operation) {
+	if target._cancel_requested && .Removed in target._impl.flags {
+		target.cancelled = true
+	}
 	filter: kq.Filter
 	ident: uintptr
 	switch target.type {

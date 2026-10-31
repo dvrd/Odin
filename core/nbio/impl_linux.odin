@@ -221,10 +221,11 @@ __tick :: proc(l: ^Event_Loop, timeout: time.Duration) -> General_Error {
 		l.now = time.now()
 		for _ in 0 ..< n {
 			completed := queue.pop_front(&l.completed)
-			if completed._impl.removal == nil {
-				completed.cb(completed)
-			} else if completed._impl.removal != (^Operation)(REMOVED) {
+			if completed._impl.removal != nil && completed._impl.removal != (^Operation)(REMOVED) {
 				completed._impl.removal._remove.target = nil
+			}
+			if completed._impl.removal == nil || completed._cancel_requested {
+				completed.cb(completed)
 			}
 			if !completed.detached {
 				pool.put(&l.operation_pool, completed)
@@ -315,7 +316,9 @@ __tick :: proc(l: ^Event_Loop, timeout: time.Duration) -> General_Error {
 					// Set the removal target to nil to indicate we've already done it.
 					unqueued._impl.removal._remove.target = nil
 				}
-				if !unqueued.detached {
+				if unqueued._cancel_requested {
+					handle_completed(unqueued, -i32(linux.Errno.ECANCELED))
+				} else if !unqueued.detached {
 					pool.put(&l.operation_pool, unqueued)
 				}
 				continue
@@ -434,6 +437,11 @@ _listen :: proc(socket: TCP_Socket, backlog := 1000) -> Listen_Error {
 }
 
 @(private="package")
+_cancel :: proc(target: ^Operation) {
+	_remove(target)
+}
+
+@(private="package")
 _remove :: proc(target: ^Operation) {
 	target := target
 	assert(target != nil)
@@ -495,6 +503,9 @@ REMOVED :: rawptr(max(uintptr)-1)
 
 handle_completed :: proc(op: ^Operation, res: i32) {
 	debug("handling", op.type, "result", int(res))
+	if op._cancel_requested && res == -i32(linux.Errno.ECANCELED) {
+		op.cancelled = true
+	}
 
 	switch op.type {
 	case .Accept:
@@ -545,15 +556,12 @@ handle_completed :: proc(op: ^Operation, res: i32) {
 	cleanup(op)
 
 	maybe_callback :: proc(op: ^Operation) {
-		if op._impl.removal == nil {
-			debug("done, calling back", op.type)
+		removal := op._impl.removal
+		if removal != nil && removal != (^Operation)(REMOVED) {
+			removal._remove.target = nil
+		}
+		if removal == nil || op._cancel_requested {
 			op.cb(op)
-		} else if op._impl.removal == (^Operation)(REMOVED) {
-			debug("done but was cancelled by remove", op.type)
-		} else {
-			debug("done but has removal pending", op.type)
-			// If the remove callback sees their target is nil, they know it is done already.
-			op._impl.removal._remove.target = nil
 		}
 	}
 
@@ -859,6 +867,10 @@ recv_callback :: proc(op: ^Operation, res: i32) -> bool {
 			}
 
 			if op.recv.received < total {
+				if op._cancel_requested {
+					op.cancelled = true
+					return true
+				}
 				recv_exec(op)
 				return false
 			}
@@ -938,6 +950,10 @@ send_callback :: proc(op: ^Operation, res: i32) -> bool {
 		}
 
 		if op.send.sent < total {
+			if op._cancel_requested {
+				op.cancelled = true
+				return true
+			}
 			assert(res > 0)
 			send_exec(op)
 			return false
@@ -974,6 +990,10 @@ write_callback :: proc(op: ^Operation, res: i32) -> bool {
 	op.write.written += int(res)
 
 	if op.write.all && op.write.written < len(op.write.buf) {
+		if op._cancel_requested {
+			op.cancelled = true
+			return true
+		}
 		write_exec(op)
 		return false
 	}
@@ -1013,6 +1033,10 @@ read_callback :: proc(op: ^Operation, res: i32) -> bool {
 	op.read.read += int(res)
 
 	if op.read.all && op.read.read < len(op.read.buf) {
+		if op._cancel_requested {
+			op.cancelled = true
+			return true
+		}
 		read_exec(op)
 		return false
 	}

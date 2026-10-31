@@ -351,7 +351,7 @@ __tick :: proc(l: ^Event_Loop, timeout: time.Duration) -> (err: General_Error) {
 	handle_completed :: proc(op: ^Operation) {
 		debug("handling", op.type)
 
-		if op._impl.timeout == (^Operation)(REMOVED) {
+		if op._impl.timeout == (^Operation)(REMOVED) && !op._cancel_requested {
 			debug(op.type, "was removed")
 
 			// Set an error, and call the internal callback.
@@ -364,6 +364,11 @@ __tick :: proc(l: ^Event_Loop, timeout: time.Duration) -> (err: General_Error) {
 				STATUS_REQUEST_ABORTED :: 0xC023000C
 				op._impl.over.Internal = (^win.c_ulong)(uintptr(STATUS_REQUEST_ABORTED))
 			}
+		}
+
+		if op._cancel_requested {
+			_, err := get_result(op._impl.over)
+			if err == .OPERATION_ABORTED do op.cancelled = true
 		}
 
 		result := Op_Result.Done
@@ -414,13 +419,13 @@ __tick :: proc(l: ^Event_Loop, timeout: time.Duration) -> (err: General_Error) {
 		cleanup(op)
 
 		maybe_callback :: proc(op: ^Operation) {
-			if op._impl.timeout == (^Operation)(REMOVED) {
+			if op._impl.timeout == (^Operation)(REMOVED) && !op._cancel_requested {
 				debug(op.type, "done but removed")
 			} else {
 				debug(op.type, "done")
 				op.cb(op)
 
-				if op._impl.timeout != nil {
+				if op._impl.timeout != nil && op._impl.timeout != (^Operation)(REMOVED) {
 					debug("cancelling timeout of", op.type)
 					op._impl.timeout.timeout._impl.target = nil
 					_remove(op._impl.timeout)
@@ -717,6 +722,11 @@ _create_socket :: proc(
 }
 
 @(private="package")
+_cancel :: proc(target: ^Operation) {
+	_remove(target)
+}
+
+@(private="package")
 _remove :: proc(target: ^Operation) {
 	debug("remove", target.type)
 
@@ -734,7 +744,10 @@ _remove :: proc(target: ^Operation) {
 	case .Timeout:
 		if avl.remove_value(&target.l.timeouts, target) {
 			debug("removed timeout directly")
-			if !target.detached {
+			if target._cancel_requested {
+				target.cancelled = true
+				queue.push_back(&target.l.completed, target)
+			} else if !target.detached {
 				pool.put(&target.l.operation_pool, target)
 			}
 		} else {
@@ -1199,6 +1212,11 @@ read_callback :: proc(op: ^Operation) -> Op_Result {
 	}
 
 	n, err := get_result(op._impl.over)
+	if op._cancel_requested && err == .OPERATION_ABORTED {
+		// Preserve any bytes reported with the final OS completion too.
+		op.read.read += n
+		return .Done
+	}
 	#partial switch err {
 	case .SUCCESS:
 	case .OPERATION_ABORTED:
@@ -1220,6 +1238,10 @@ read_callback :: proc(op: ^Operation) -> Op_Result {
 
 	op.read.read += n
 	if op.read.all && op.read.read < len(op.read.buf) {
+		if op._cancel_requested {
+			op.cancelled = true
+			return .Done
+		}
 		switch read_exec(op) {
 		case .Done:    return read_callback(op)
 		case .Pending: return .Pending
@@ -1276,6 +1298,11 @@ write_callback :: proc(op: ^Operation) -> Op_Result {
 	}
 
 	n, err := get_result(op._impl.over)
+	if op._cancel_requested && err == .OPERATION_ABORTED {
+		// Preserve any bytes reported with the final OS completion too.
+		op.write.written += n
+		return .Done
+	}
 	#partial switch err {
 	case .SUCCESS:
 	case .OPERATION_ABORTED:
@@ -1292,6 +1319,10 @@ write_callback :: proc(op: ^Operation) -> Op_Result {
 
 	op.write.written += n
 	if op.write.all && op.write.written < len(op.write.buf) {
+		if op._cancel_requested {
+			op.cancelled = true
+			return .Done
+		}
 		switch write_exec(op) {
 		case .Done:    return write_callback(op)
 		case .Pending: return .Pending
@@ -1371,6 +1402,11 @@ recv_callback :: proc(op: ^Operation) -> Op_Result {
 	}
 
 	n, err := wsa_get_result(win.SOCKET((^net.Socket)(&op.recv.socket)^), op._impl.over)
+	if op._cancel_requested && err == .OPERATION_ABORTED {
+		// Preserve any bytes reported with the final OS completion too.
+		op.recv.received += n
+		return .Done
+	}
 	#partial switch err {
 	case .SUCCESS:
 	case .OPERATION_ABORTED:
@@ -1407,6 +1443,10 @@ recv_callback :: proc(op: ^Operation) -> Op_Result {
 			}
 
 			if op.recv.received < total {
+				if op._cancel_requested {
+					op.cancelled = true
+					return .Done
+				}
 				switch recv_exec(op) {
 				case .Done:    return recv_callback(op)
 				case .Pending: return .Pending
@@ -1492,6 +1532,11 @@ send_callback :: proc(op: ^Operation) -> Op_Result {
 	}
 
 	n, err := wsa_get_result(win.SOCKET((^net.Socket)(&op.send.socket)^), op._impl.over)
+	if op._cancel_requested && err == .OPERATION_ABORTED {
+		// Preserve any bytes reported with the final OS completion too.
+		op.send.sent += n
+		return .Done
+	}
 	#partial switch err {
 	case .SUCCESS:
 	case .OPERATION_ABORTED:
@@ -1521,6 +1566,10 @@ send_callback :: proc(op: ^Operation) -> Op_Result {
 		}
 
 		if op.send.sent < total {
+			if op._cancel_requested {
+				op.cancelled = true
+				return .Done
+			}
 			switch send_exec(op) {
 			case .Done:    return send_callback(op)
 			case .Pending: return .Pending

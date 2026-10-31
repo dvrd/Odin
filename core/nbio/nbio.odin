@@ -43,6 +43,10 @@ Operation :: struct {
 	cb:              Callback,
 	user_data:       [MAX_USER_ARGUMENTS + 1]rawptr,
 	detached:        bool,
+	// Terminal cancellation result. Inspect before operation-specific errors;
+	// transferred byte counts remain valid. Never implies rollback.
+	cancelled: bool,
+	_cancel_requested: bool,
 	type:            Operation_Type,
 	using specifics: Specifics,
 
@@ -213,7 +217,35 @@ remove :: proc(target: ^Operation) {
 		panic("nbio.remove called on different thread")
 	}
 
+	target._cancel_requested = false
 	_remove(target)
+}
+
+/*
+Request cancellation while preserving the operation's terminal callback.
+Must be called on the owning event-loop thread, after exec and before callback.
+The callback runs in a later tick, once the OS no longer accesses the buffers.
+A completed operation can still succeed; cancellation does not undo I/O.
+For a cancelled result, cancelled is true and byte counts remain valid. Check
+cancelled before interpreting operation-specific errors.
+
+Supports accept, dial, recv, send, read, write, poll and timeout operations.
+Composite sendfile and close operations return Unsupported without changing them.
+Repeated requests before completion are harmless. Calling after a callback or
+remove is a use-after-free. The loop must keep running until completion.
+*/
+cancel :: proc(target: ^Operation) -> General_Error {
+	if target == nil do return nil
+	assert(target.l == &_tls_event_loop, "nbio.cancel called on different thread")
+	#partial switch target.type {
+	case .Accept, .Dial, .Recv, .Send, .Read, .Write, .Poll, .Timeout:
+	case: return .Unsupported
+	}
+	if !target._cancel_requested {
+		target._cancel_requested = true
+		_cancel(target)
+	}
+	return nil
 }
 
 /*

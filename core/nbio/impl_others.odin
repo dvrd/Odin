@@ -187,6 +187,13 @@ _exec :: proc(op: ^Operation) {
 	}
 }
 
+_cancel :: proc(target: ^Operation) {
+	if target.type == .Timeout && avl.remove_value(&target.l.timeouts, target) {
+		target.cancelled = true
+		queue.push_back(&target.l.completed, target)
+	}
+}
+
 _remove :: proc(target: ^Operation) {
 	#partial switch target.type {
 	case .Timeout:

@@ -193,6 +193,42 @@ the end of the current tick, because an operation is freed after it's callback
 is called. Thus you can set user data after an execution is queued, or call
 `remove`, removing subtle "race" conditions and simplifying control flow.
 
+**Cancellation and connection lifetimes**:
+
+`remove` withdraws an operation silently. `cancel` requests cancellation of a
+primitive operation and preserves its terminal callback. They serve different
+ownership models; neither undoes bytes already transferred. Check the returned
+error from `cancel` (composite sendfile and close operations are unsupported).
+
+After `cancel`, keep the buffers and callback state alive until completion.
+Inspect `Operation.cancelled` before operation-specific errors; transferred byte
+counts remain valid. A completed result can win a cancellation race. Repeated
+requests before completion are harmless. The operation pointer becomes invalid
+after its callback (or removal). Both cancellation APIs require the owning loop
+thread, and the application must continue ticking to receive completions.
+
+For managed TCP lifetimes, `TCP_Async_Connection` implements the independent
+`core:net.Async_Connection` contract. Initialize it with an existing connected
+socket and `tcp_async_connection_init`, then obtain the interface with
+`tcp_async_connection`. Initialization associates the socket with the current
+loop; success transfers ownership, failure leaves it with the caller.
+
+Submit reads and writes with `net.async_read` and `net.async_write`, using a
+caller-owned `net.Async_Operation` with a callback. Buffers and operation state
+must remain valid until callback. Submission errors reject the operation and
+produce no callback. The adapter allows one read and one write in flight and
+rejects additional operations with Operation_Pending. It allocates no OS thread
+per connection and uses the existing platform backend. Keep callbacks short;
+offload CPU-intensive work to workers and schedule results onto the owning loop.
+
+`net.async_cancel` delivers Cancelled when cancellation stops an operation.
+`net.async_close` rejects new I/O, cancels pending work, drains its callbacks,
+then closes the socket and delivers close completion. Interrupted work reports
+Closed; already-completed work can retain its original result. Free the adapter
+only in or after close completion. Do not use raw socket operations after
+ownership transfers. An absolute deadline belongs to each submitted operation;
+zero disables it. The blocking Connection/io.Stream APIs remain separate.
+
 **Why does the design of this package use callbacks?**
 
 Callbacks are the simplest interface an event loop can reasonably expose: "Run

@@ -6,10 +6,22 @@ Features:
 - Opening and closing of TCP and UDP sockets.
 - Sending to and receiving from these sockets.
 - DNS name lookup, using either the OS or our own resolver.
+- Blocking Connection callbacks, exact I/O helpers, and a TCP_Connection adapter.
+- Connection_Stream adapts a Connection to core:io, preserving detailed errors
+  in its last_error field. The caller owns the adapter and backing connection.
+
+Connection operations must be serialized. TCP_Connection implements absolute
+read/write deadlines on Darwin and Linux. For asynchronous networking, see
+core:nbio; Connection does not schedule operations on its event loop.
+
+Async_Connection is a separate callback contract with caller-owned operations
+and per-operation absolute deadlines. core:nbio provides a TCP adapter with one
+read and one write in flight, cancellation completion, and close that drains
+pending operations. Callbacks run on an application-driven owning event loop.
+See core:nbio for initialization, ownership and shutdown examples.
 
 Planned:
 - Nonblocking IO
-- `Connection` struct; A "fat socket" struct that remembers how you opened it, etc, instead of just being a handle.
 - IP Range structs, CIDR/class ranges, netmask calculator and associated helper procedures.
 - Use `context.temp_allocator` instead of stack-based arenas?  
 And check it's the default temp allocator or can give us 4 MiB worth of memory
