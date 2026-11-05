@@ -324,3 +324,7 @@ cmake-build*/
 CMakeLists.txt
 sandbox/
 __pycache__/
+
+# AI
+.cruft/
+reports/

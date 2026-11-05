@@ -786,3 +786,31 @@ when ODIN_OS != .Windows && ODIN_OS != .WASI {
 		testing.expect(t, !os.exists(tree))
 	}
 }
+
+@(test)
+environment_scratch_grows_for_large_keys_and_values :: proc(t: ^testing.T) {
+	when ODIN_OS == .Windows || ODIN_OS == .Darwin || ODIN_OS == .Linux || ODIN_OS == .FreeBSD || ODIN_OS == .OpenBSD || ODIN_OS == .NetBSD {
+		key := strings.repeat("ODIN_OS_SCRATCH_REGRESSION_", 200)
+		defer delete(key)
+		value := strings.repeat("value", 1800)
+		defer delete(value)
+		previous, present := os.lookup_env(key, context.allocator)
+		defer {
+			if present {
+				testing.expect_value(t, os.set_env(key, previous), nil)
+			} else {
+				testing.expect(t, os.unset_env(key))
+			}
+			delete(previous)
+		}
+
+		if err := os.set_env(key, value); err != nil {
+			testing.expect_value(t, err, nil)
+			return
+		}
+		got, found := os.lookup_env(key, context.allocator)
+		defer delete(got)
+		testing.expect(t, found)
+		testing.expect_value(t, got, value)
+	}
+}

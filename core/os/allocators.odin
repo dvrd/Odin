@@ -52,6 +52,9 @@ TEMP_ALLOCATOR_GUARD :: #force_inline proc(collisions: []runtime.Allocator, loc 
 	assert(good_arena != nil)
 	if good_arena.backing_allocator.procedure == nil {
 		good_arena.backing_allocator = heap_allocator()
+		// Most OS helpers need only a path or environment key. Grow for larger
+		// requests without reserving the user temp allocator's 4 MiB per thread.
+		good_arena.minimum_block_size = 4 * 1024
 	}
 	tmp := runtime.arena_temp_begin(good_arena, loc)
 	return { good_arena, runtime.arena_allocator(good_arena), tmp, loc }
