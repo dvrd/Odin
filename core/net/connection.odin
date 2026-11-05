@@ -21,6 +21,7 @@ Connection_Error_Kind :: enum {
 	Operation_Pending,
 	Invalid_Operation,
 	Close_Failed,
+	Protocol_Failed,
 }
 
 Connection_Error :: struct {
@@ -362,4 +363,13 @@ async_submit :: proc(conn: Async_Connection, op: ^Async_Operation, kind: Async_O
 	if op == nil || op.callback == nil do return {kind = .Invalid_Operation}
 	if op.pending do return {kind = .Operation_Pending}
 	return conn.submit(conn.data, op, kind, buffer, deadline)
+}
+
+// Runs callbacks on an application-owned event loop. schedule must enqueue a
+// callback for a later tick, never invoke it inline, and must accept work while
+// the loop is alive. It borrows callback state until invocation. Calls belong to
+// the loop's thread. Protocol adapters use this for buffered/local completions.
+Async_Executor :: struct {
+	data: rawptr,
+	schedule: proc(data: rawptr, callback: proc(rawptr), user_data: rawptr),
 }

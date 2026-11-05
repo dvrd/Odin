@@ -5,6 +5,7 @@ import "core:nbio"
 import "core:strings"
 import "core:testing"
 import "core:thread"
+import "core:sync"
 import "core:time"
 import "core:os"
 
@@ -246,17 +247,17 @@ wake_up :: proc(t: ^testing.T) {
 
 			hit: bool
 			thr := thread.create_and_start_with_poly_data2(nbio.current_thread_event_loop(), &hit, proc(l: ^nbio.Event_Loop, hit: ^bool) {
-				hit^ = true
+				sync.atomic_store(hit, true)
 				nbio.wake_up(l)
 			}, context)
 			defer thread.destroy(thr)
 
 			// A tick can return without progress; loop until the wake is observed.
 			// A lost wake would block here forever and trip the fail timeout.
-			for !hit {
+			for !sync.atomic_load(&hit) {
 				ev(t, nbio.tick(), nil)
 			}
-			e(t, hit)
+			e(t, sync.atomic_load(&hit))
 
 			nbio.remove(accept)
 			nbio.close(sock)

@@ -466,3 +466,18 @@ wake_up :: proc(l: ^Event_Loop) {
 	}
 	_wake_up(l)
 }
+
+// The loop must outlive scheduled callbacks. Invoke from its owning thread.
+async_executor :: proc(l: ^Event_Loop = nil) -> net.Async_Executor {
+	loop := l
+	if loop == nil do loop = current_thread_event_loop()
+	assert(loop != nil, "acquire the event loop before obtaining an executor")
+	return {data = loop, schedule = executor_schedule}
+}
+
+@(private)
+executor_schedule :: proc(data: rawptr, callback: proc(rawptr), user_data: rawptr) {
+	loop := cast(^Event_Loop)data
+	assert(loop == current_thread_event_loop(), "executor used from a different event loop")
+	next_tick_poly2(callback, user_data, proc(_: ^Operation, cb: proc(rawptr), p: rawptr) { cb(p) }, l=loop)
+}

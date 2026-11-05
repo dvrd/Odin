@@ -12,15 +12,39 @@ import    "core:sys/posix"
 import    "core:time"
 import kq "core:sys/kqueue"
 
+when ODIN_OS == .Darwin {
+	platform_kevent :: darwin_kevent
+} else {
+	platform_kevent :: kq.kevent
+}
+
 @(private="package")
 _FULLY_SUPPORTED :: true
 
+// One read or write knote for the life of a descriptor. `udata` points here, so
+// the record stays put until reap, after every in-flight result has been handled.
+// Closing the descriptor retires it; the next user of that number gets a new one.
+Interest :: struct {
+	ident:         uintptr,
+	filter:        kq.Filter,
+	head:          ^Operation,
+	closed:        bool,
+	dispatching:   bool,
+	retired_next:  ^Interest,
+}
+
 @(private="package")
 _Event_Loop :: struct {
-	// kqueue does not permit multiple {ident, filter} pairs in the kqueue.
-	// We have to keep record of what we currently have in the kqueue, and if we get an operation
-	// that would be the same (ident, filter) pair we need to bundle the operations under one kevent.
+	// Timer knotes, keyed by the operation pointer. Socket filters live in `interests`.
 	submitted: map[Queue_Identifier]^Operation,
+	// Live socket read/write knotes. One per (descriptor, filter).
+	interests: map[Queue_Identifier]^Interest,
+	// Interests whose op list is non-empty. A blocking tick waits on these.
+	interest_waiters: int,
+	// Closed interests removed from `interests` so the descriptor number can be registered again.
+	retired: ^Interest,
+	// Nested tick() from a callback must not free an Interest a result batch still holds.
+	tick_depth: int,
 	// Holds all events we want to flush. Flushing is done each tick at which point this is emptied.
 	pending:   [dynamic; QUEUE_SIZE]kq.KEvent,
 	// Holds what should be in `pending` but didn't fit.
@@ -46,6 +70,8 @@ _Operation :: struct {
 	// Linked list of operations that are bundled (same {ident, filter} pair) with this one.
 	next:   ^Operation,
 	prev:   ^Operation,
+	// Non-nil while the operation sits on an Interest chain.
+	interest: ^Interest,
 
 	flags:  Operation_Flags,
 	result: i64,
@@ -105,6 +131,7 @@ _Link_Timeout :: struct {}
 @(private="package")
 _init :: proc(l: ^Event_Loop, allocator: mem.Allocator) -> (rerr: General_Error) {
 	l.submitted.allocator = allocator
+	l.interests.allocator = allocator
 	l.overflow.data.allocator = allocator
 	l.completed.data.allocator = allocator
 
@@ -127,6 +154,16 @@ _init :: proc(l: ^Event_Loop, allocator: mem.Allocator) -> (rerr: General_Error)
 
 @(private="package")
 _destroy :: proc(l: ^Event_Loop) {
+	for _, slot in l.interests {
+		free(slot, l.allocator)
+	}
+	delete(l.interests)
+	for slot := l.retired; slot != nil; {
+		next := slot.retired_next
+		free(slot, l.allocator)
+		slot = next
+	}
+	l.retired = nil
 	delete(l.submitted)
 	queue.destroy(&l.overflow)
 	queue.destroy(&l.completed)
@@ -136,6 +173,13 @@ _destroy :: proc(l: ^Event_Loop) {
 @(private="package")
 __tick :: proc(l: ^Event_Loop, timeout: time.Duration) -> General_Error {
 	debug("tick")
+	l.tick_depth += 1
+	defer {
+		l.tick_depth -= 1
+		if l.tick_depth == 0 {
+			reap_closed_interests(l)
+		}
+	}
 
 	if n := queue.len(l.completed); n > 0 {
 		l.now = time.now()
@@ -160,7 +204,10 @@ __tick :: proc(l: ^Event_Loop, timeout: time.Duration) -> General_Error {
 
 	ts_backing: posix.timespec
 	ts_pointer: ^posix.timespec // nil means forever.
-	if queue.len(l.completed) == 0 && len(l.submitted) > 0 {
+	// A blocking wait would leave registrations sitting in `overflow` unsubmitted.
+	if queue.len(l.overflow) > 0 {
+		ts_pointer = &ts_backing
+	} else if queue.len(l.completed) == 0 && (len(l.submitted) > 0 || l.interest_waiters > 0) {
 		if timeout >= 0 {
 			debug("timeout", timeout)
 			ts_backing = {tv_sec=posix.time_t(timeout/time.Second), tv_nsec=c.long(timeout%time.Second)}
@@ -178,13 +225,29 @@ __tick :: proc(l: ^Event_Loop, timeout: time.Duration) -> General_Error {
 		results := kevent(l, results_buf[:], ts_pointer) or_return
 
 		clear(&l.pending)
-		for overflow in queue.pop_front_safe(&l.overflow) {
-			(append(&l.pending, overflow) != 0) or_break
+		for {
+			overflow, ok := queue.pop_front_safe(&l.overflow)
+			if !ok do break
+			if append(&l.pending, overflow) == 0 {
+				// Pending is full. Put the change back. The next kevent flushes
+				// pending, then this drain continues. Dropping it loses a registration.
+				_, err := queue.push_front(&l.overflow, overflow)
+				ensure(err == nil, "allocation failure")
+				break
+			}
 		}
 
 		l.now = time.now()
 
 		handle_results(l, results)
+
+		// Submit every change that did not fit before waiting again. Dropping one
+		// used to lose an EV_ADD, and EV_ONESHOT had already deleted that knote.
+		if len(l.pending) > 0 || queue.len(l.overflow) > 0 {
+			ts_backing = {}
+			ts_pointer = &ts_backing
+			continue
+		}
 
 		if len(results) < len(results_buf) {
 			break
@@ -202,7 +265,7 @@ __tick :: proc(l: ^Event_Loop, timeout: time.Duration) -> General_Error {
 
 	kevent :: proc(l: ^Event_Loop, buf: []kq.KEvent, ts: ^posix.timespec) -> ([]kq.KEvent, General_Error) {
 		for {
-			new_events, err := kq.kevent(l.kqueue, l.pending[:], buf, ts)
+			new_events, err := platform_kevent(l.kqueue, l.pending[:], buf, ts)
 			#partial switch err {
 			case nil:
 				assert(new_events >= 0)
@@ -229,6 +292,7 @@ __tick :: proc(l: ^Event_Loop, timeout: time.Duration) -> General_Error {
 
 		// Mark all operations that have an event returned as not `.For_Kernel`.
 		// We have to do this right away, or we may process an operation as if we think the kernel is responsible.
+		// Socket filters stay registered (EV_CLEAR). Only the op chain is detached from the kernel flag.
 		for &event in results {
 			if ODIN_OS != .Darwin {
 				// On the BSDs, a `.Delete` that results in an `.Error` does not keep the `.Delete` flag in the result.
@@ -243,6 +307,16 @@ __tick :: proc(l: ^Event_Loop, timeout: time.Duration) -> General_Error {
 			}
 
 			if event.filter == .User && event.ident == IDENT_WAKE_UP {
+				continue
+			}
+
+			if event.filter == .Read || event.filter == .Write {
+				slot := cast(^Interest)event.udata
+				if slot == nil do continue
+				for next := slot.head; next != nil; next = next._impl.next {
+					assert(.For_Kernel in next._impl.flags)
+					next._impl.flags -= {.For_Kernel}
+				}
 				continue
 			}
 
@@ -267,11 +341,11 @@ __tick :: proc(l: ^Event_Loop, timeout: time.Duration) -> General_Error {
 		// We have to do this after the previous loop so we know if the target op of a timeout was also completed.
 		// We have to do this before the next loop so we handle timeouts before their target ops. Otherwise the target could already be done.
 		for &event in results {
-			if .Delete in event.flags {
+			if event.filter != .Timer {
 				continue
 			}
-
-			if event.filter == .User && event.ident == IDENT_WAKE_UP {
+			// Timer deletes come back with nil udata. Dereferencing them faults.
+			if .Delete in event.flags || event.udata == nil {
 				continue
 			}
 
@@ -297,6 +371,11 @@ __tick :: proc(l: ^Event_Loop, timeout: time.Duration) -> General_Error {
 
 			if event.filter == .User && event.ident == IDENT_WAKE_UP {
 				debug("woken up")
+				continue
+			}
+
+			if event.filter == .Read || event.filter == .Write {
+				dispatch_interest(l, event)
 				continue
 			}
 
@@ -532,7 +611,7 @@ _wake_up :: proc(l: ^Event_Loop) {
 		},
 	}
 	t: posix.timespec
-	n, err := kq.kevent(l.kqueue, ev[:], nil, &t)
+	n, err := platform_kevent(l.kqueue, ev[:], nil, &t)
 	assert(err == nil)
 	assert(n == 0)
 }
@@ -643,6 +722,9 @@ handle_completed :: proc(op: ^Operation) {
 	} 
 
 	cleanup :: proc(op: ^Operation) {
+		if op._impl.interest != nil {
+			unlink_from_interest(op)
+		}
 		if .Has_Timeout in op._impl.flags {
 			remove_link_timeout(op)
 		}
@@ -762,10 +844,27 @@ poll_exec :: proc(op: ^Operation) -> Op_Result {
 		return .Done
 	}
 
+	// EV_CLEAR does not report a level that is already true. Poll does not try a
+	// socket call first, so check the current state before parking.
 	filter: kq.Filter
+	want: posix.Poll_Event
 	switch op.poll.event {
-	case .Receive: filter = .Read
-	case .Send:    filter = .Write
+	case .Receive:
+		filter = .Read
+		want = {.IN}
+	case .Send:
+		filter = .Write
+		want = {.OUT}
+	}
+	fd := posix.FD(net.any_socket_to_socket(op.poll.socket))
+	ready, bad := probe_socket(fd, want)
+	if ready && !bad {
+		// Already ready. A cleared knote will not report that level again.
+		// Poll must still complete on a later tick: exec asserts it stays pending.
+		op._impl.result = 1
+		_, err := queue.push_back(&op.l.completed, op)
+		ensure(err == nil, "allocation failure")
+		return .Pending
 	}
 
 	add_pending(op, filter, uintptr(net.any_socket_to_socket(op.poll.socket)))
@@ -790,7 +889,10 @@ close_exec :: proc(op: ^Operation) {
 
 	if posix.close(fd) != .OK {
 		op.close.err = FS_Error(posix.errno())
+		return
 	}
+	// close(2) drops the knotes. Retire our records so a reused number registers again.
+	note_fd_closed(op.l, uintptr(fd))
 }
 
 @(require_results)
@@ -1180,29 +1282,52 @@ add_pending :: proc(op: ^Operation, filter: kq.Filter, ident: uintptr) {
 	debug("adding pending", op.type)
 	assert(op._impl.next == nil)
 	assert(op._impl.prev == nil)
+	assert(op._impl.interest == nil)
 	op._impl.flags += {.For_Kernel}
 
-	_, val, just_inserted, err := map_entry(&op.l.submitted, Queue_Identifier{ ident = ident, filter = filter })
-	ensure(err == nil, "allocation failure")
-	if just_inserted {
-		val^ = op
-
-		append_pending(op.l, kq.KEvent {
+	l := op.l
+	key := Queue_Identifier{ident = ident, filter = filter}
+	slot := l.interests[key]
+	if slot == nil {
+		made, alloc_err := new(Interest, l.allocator)
+		ensure(alloc_err == nil, "allocation failure")
+		made.ident = ident
+		made.filter = filter
+		_, vp, _, err := map_entry(&l.interests, key)
+		ensure(err == nil, "allocation failure")
+		vp^ = made
+		attach_interest(l, made, op)
+		append_pending(l, kq.KEvent {
 			filter = filter,
 			ident  = ident,
-			flags  = {.Add, .Enable, .One_Shot},
-			udata  = op,
+			flags  = {.Add, .Enable, .Clear},
+			udata  = made,
 		})
-	} else {
-		debug("already have this operation on the kqueue, bundling it")
-
-		last := val^
-		for last._impl.next != nil {
-			last = last._impl.next
-		}
-		last._impl.next = op
-		op._impl.prev   = last
+		return
 	}
+
+	if slot.head == nil {
+		attach_interest(l, slot, op)
+		// A caller may have closed the old descriptor outside nbio. Its number
+		// can now name a new socket whose knote does not exist. Refresh with
+		// the same stable udata; EV_ADD also safely updates a live knote.
+		append_pending(l, kq.KEvent {
+			filter = filter,
+			ident  = ident,
+			flags  = {.Add, .Enable, .Clear},
+			udata  = slot,
+		})
+		return
+	}
+
+	debug("already have this filter on the kqueue, bundling it")
+	last := slot.head
+	for last._impl.next != nil {
+		last = last._impl.next
+	}
+	last._impl.next = op
+	op._impl.prev = last
+	op._impl.interest = slot
 }
 
 append_pending :: #force_inline proc(l: ^Event_Loop, ev: kq.KEvent) {
@@ -1321,65 +1446,163 @@ timeout_and_delete :: proc(target: ^Operation) {
 		return
 	}
 
-	// If there are other ops linked to this kevent, don't remove it.
-	if target._impl.next != nil || target._impl.prev != nil {
-		debug("removing target by pulling it out of the linked list, other ops depend on the kevent")
-		assert(filter != .Timer)
-
-		if target._impl.next != nil {
-			target._impl.next._impl.prev = target._impl.prev
-		}
-
-		if target._impl.prev != nil {
-			target._impl.prev._impl.next = target._impl.next
-		} else {
-			debug("target was the head of the list, updating map to point at new head")
-
-			_, vp, _, err := map_entry(&target.l.submitted, Queue_Identifier{ ident = ident, filter = filter })
-			ensure(err == nil, "allocation failure")
-			assert(vp^ == target)
-			vp^ = target._impl.next
-
-			ev := kq.KEvent{
-				filter = filter,
+	if filter == .Timer {
+		// Timers stay one-shot. The fired knote is already gone; drop the map entry.
+		if .For_Kernel in target._impl.flags {
+			debug("adding delete event")
+			_, dval := delete_key(&target.l.submitted, Queue_Identifier{ident = ident, filter = filter})
+			assert(dval != nil)
+			append_pending(target.l, kq.KEvent{
 				ident  = ident,
-				flags  = {.Add, .Enable, .One_Shot},
-				udata  = target._impl.next,
-			}
-			if append(&target.l.pending, ev) == 0 {
-				warn("just removed the head operation of a list of multiple, and the queue is full, have to force this update through inefficiently")
-				// This has to happen the next time we submit or we could have udata pointing wrong.
-				// Very inefficient but probably never hit.
-
-				// Makes kevent return a receipt for our addition, so we don't take any new events from it.
-				// This forces .Error to be added and data being 0 means it's added.
-				ev.flags += {.Receipt}
-
-				timeout: posix.timespec
-				n, err := kq.kevent(target.l.kqueue, ([^]kq.KEvent)(&ev)[:1], ([^]kq.KEvent)(&ev)[:1], &timeout)
-				assert(n   == 1)
-				assert(err == nil)
-
-				// The receipt flag makes this occur on the event.
-				assert(.Error in ev.flags)
-				assert(ev.data == 0)
-			}
+				filter = filter,
+				flags  = {.Delete, .Disable, .One_Shot},
+			})
 		}
-
-	} else if .For_Kernel in target._impl.flags {
-		debug("adding delete event")
-
-		_, dval := delete_key(&target.l.submitted, Queue_Identifier{ ident = ident, filter = filter })
-		assert(dval != nil)
-
-		append_pending(target.l, kq.KEvent{
-			ident  = ident,
-			filter = filter,
-			flags  = {.Delete, .Disable, .One_Shot},
-		})
-	} else {
-		debug("remove without delete event, because target is not in kernel")
+		return
 	}
+
+	// The socket knote stays until close. Only this operation leaves the chain.
+	unlink_from_interest(target)
+}
+
+attach_interest :: proc(l: ^Event_Loop, slot: ^Interest, op: ^Operation) {
+	assert(slot.head == nil)
+	slot.head = op
+	op._impl.interest = slot
+	op._impl.next = nil
+	op._impl.prev = nil
+	l.interest_waiters += 1
+}
+
+unlink_from_interest :: proc(target: ^Operation) {
+	slot := target._impl.interest
+	target._impl.interest = nil
+	target._impl.flags -= {.For_Kernel}
+	if slot == nil {
+		target._impl.next = nil
+		target._impl.prev = nil
+		return
+	}
+
+	if target._impl.next != nil {
+		target._impl.next._impl.prev = target._impl.prev
+	}
+	if target._impl.prev != nil {
+		target._impl.prev._impl.next = target._impl.next
+	} else {
+		assert(slot.head == target)
+		slot.head = target._impl.next
+		if slot.head == nil {
+			target.l.interest_waiters -= 1
+			assert(target.l.interest_waiters >= 0)
+		}
+	}
+	target._impl.next = nil
+	target._impl.prev = nil
+}
+
+dispatch_interest :: proc(l: ^Event_Loop, event: kq.KEvent) {
+	slot := cast(^Interest)event.udata
+	if slot == nil do return
+
+	slot.dispatching = true
+	defer slot.dispatching = false
+
+	head := slot.head
+	slot.head = nil
+	if head != nil {
+		l.interest_waiters -= 1
+		assert(l.interest_waiters >= 0)
+	}
+
+	// `udata` stays the Interest. The knote remains registered (EV_CLEAR).
+	for curr, next := head, head != nil ? head._impl.next : nil; curr != nil; curr, next = next, next == nil ? nil : next._impl.next {
+		if .Error in event.flags do curr._impl.flags += {.Error}
+		if .EOF in event.flags do curr._impl.flags += {.EOF}
+		curr._impl.result = event.data
+		curr._impl.prev = nil
+		curr._impl.next = nil
+		curr._impl.interest = nil
+		handle_completed(curr)
+	}
+}
+
+note_fd_closed :: proc(l: ^Event_Loop, ident: uintptr) {
+	filters := [?]kq.Filter{.Read, .Write}
+	for filter in filters {
+		key := Queue_Identifier{ident = ident, filter = filter}
+		slot, found := l.interests[key]
+		if !found || slot == nil do continue
+		delete_key(&l.interests, key)
+		slot.closed = true
+		slot.retired_next = l.retired
+		l.retired = slot
+	}
+	drop_fd_changes(l, ident)
+}
+
+drop_fd_changes :: proc(l: ^Event_Loop, ident: uintptr) {
+	dst := 0
+	for src in 0 ..< len(l.pending) {
+		ev := l.pending[src]
+		if ev.ident == ident && (ev.filter == .Read || ev.filter == .Write) do continue
+		if dst != src {
+			l.pending[dst] = ev
+		}
+		dst += 1
+	}
+	for len(l.pending) > dst {
+		pop(&l.pending)
+	}
+
+	if queue.len(l.overflow) == 0 do return
+
+	kept: queue.Queue(kq.KEvent)
+	kept.data.allocator = l.allocator
+	for {
+		ev, ok := queue.pop_front_safe(&l.overflow)
+		if !ok do break
+		if ev.ident == ident && (ev.filter == .Read || ev.filter == .Write) do continue
+		_, err := queue.append(&kept, ev)
+		ensure(err == nil, "allocation failure")
+	}
+	queue.destroy(&l.overflow)
+	l.overflow = kept
+}
+
+reap_closed_interests :: proc(l: ^Event_Loop) {
+	prev: ^Interest
+	slot := l.retired
+	for slot != nil {
+		next := slot.retired_next
+		if slot.head == nil && !slot.dispatching {
+			if prev == nil {
+				l.retired = next
+			} else {
+				prev.retired_next = next
+			}
+			free(slot, l.allocator)
+		} else {
+			prev = slot
+		}
+		slot = next
+	}
+}
+
+probe_socket :: proc(fd: posix.FD, want: posix.Poll_Event) -> (ready: bool, bad: bool) {
+	pfd := posix.pollfd {
+		fd     = fd,
+		events = want,
+	}
+	for {
+		n := posix.poll(&pfd, 1, 0)
+		if n == 0 do return false, false
+		if n > 0 do break
+		if posix.errno() != .EINTR do return false, true
+	}
+	if .NVAL in pfd.revents do return false, true
+	if .HUP in pfd.revents || .ERR in pfd.revents do return true, false
+	return (want & pfd.revents) != {}, false
 }
 
 @(require_results)

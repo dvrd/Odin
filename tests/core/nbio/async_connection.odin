@@ -4,6 +4,8 @@ import "core:nbio"
 import "core:net"
 import "core:testing"
 import "core:time"
+import "core:thread"
+import "core:sync"
 
 async_test_pair :: proc(t: ^testing.T) -> (client, peer: net.TCP_Socket, ok: bool) {
 	listener, listen_err := net.listen_tcp({net.IP4_Loopback, 0})
@@ -252,4 +254,115 @@ async_connections_share_one_loop :: proc(t: ^testing.T) {
 		ev(t, closed, N)
 		for client in clients do net.close(client)
 	}
+}
+
+@(test)
+executor_defers_local_completion :: proc(t: ^testing.T) {
+	if event_loop_guard(t) {
+		calls := 0
+		executor := nbio.async_executor()
+		executor.schedule(executor.data, proc(data: rawptr) {
+			count := cast(^int)data
+			count^ += 1
+		}, &calls)
+		ev(t, calls, 0)
+		ev(t, nbio.run(), nil)
+		ev(t, calls, 1)
+	}
+}
+
+@(test)
+async_connection_reuses_io_record_inside_completion :: proc(t: ^testing.T) {
+	if event_loop_guard(t) {
+		testing.set_fail_timeout(t, 5*time.Second)
+		client, peer, ok := async_test_pair(t)
+		if !ok do return
+		defer net.close(client)
+		tcp: nbio.TCP_Async_Connection
+		ev(t, nbio.tcp_async_connection_init(&tcp, peer), nil)
+		State :: struct {
+			t: ^testing.T,
+			conn: net.Async_Connection,
+			close_op: net.Async_Operation,
+			buffer: [1]u8,
+			phase: int,
+			closed: bool,
+		}
+		state := State{t=t, conn=nbio.tcp_async_connection(&tcp)}
+		state.close_op = {user_data=&state, callback=proc(op: ^net.Async_Operation) {
+			s := cast(^State)op.user_data
+			ev(s.t, s.phase, 2)
+			ev(s.t, op.result.err.kind, .None)
+			s.closed = true
+		}}
+		op := net.Async_Operation{user_data=&state, callback=proc(op: ^net.Async_Operation) {
+			s := cast(^State)op.user_data
+			e(s.t, !op.pending)
+			ev(s.t, op.result.err.kind, .None)
+			ev(s.t, op.result.count, 1)
+			if s.phase == 0 {
+				ev(s.t, op.kind, .Read)
+				ev(s.t, s.buffer[0], u8(7))
+				s.phase = 1
+				ev(s.t, net.async_write(s.conn, op, s.buffer[:]).kind, .None)
+			} else {
+				ev(s.t, op.kind, .Write)
+				s.phase = 2
+				ev(s.t, net.async_close(s.conn, &s.close_op).kind, .None)
+			}
+		}}
+		_, send_err := net.send_tcp(client, []u8{7})
+		ev(t, send_err, nil)
+		ev(t, net.async_read(state.conn, &op, state.buffer[:]).kind, .None)
+		ev(t, nbio.run(), nil)
+		e(t, state.closed)
+		response: [1]u8
+		n, recv_err := net.recv_tcp(client, response[:])
+		ev(t, recv_err, nil)
+		ev(t, n, 1)
+		ev(t, response[0], u8(7))
+	}
+}
+
+@(test)
+cross_thread_exec_publishes_each_operation_once :: proc(t: ^testing.T) {
+ if event_loop_guard(t) {
+  testing.set_fail_timeout(t, 5*time.Second)
+  N :: 512
+  State :: struct { calls: int }
+  Item :: struct { op: ^nbio.Operation, state: ^State, seen: bool }
+  state: State
+  items: [N]Item
+  for &item in items {
+   item.state = &state
+   item.op = nbio.prep_next_tick(proc(op: ^nbio.Operation) {
+    item := cast(^Item)op.user_data[0]
+    assert(!item.seen)
+    item.seen = true
+    item.state.calls += 1
+   })
+   item.op.user_data[0] = &item
+  }
+  start: sync.Sema
+  producers: [4]^thread.Thread
+  for &producer, index in producers {
+   producer = thread.create_and_start_with_poly_data3(&items, index, &start, proc(items: ^[N]Item, index: int, start: ^sync.Sema) {
+    assert(sync.sema_wait_with_timeout(start, 2*time.Second))
+    for i := index; i < N; i += 4 {
+     // The owner may recycle op immediately after publication. Only exec's
+     // captured loop pointer may be used after its enqueue succeeds.
+     nbio.exec(items[i].op)
+    }
+   })
+  }
+  sync.post(&start, len(producers))
+  deadline := time.time_add(time.now(), 2*time.Second)
+  for state.calls < N {
+   assert(time.diff(time.now(), deadline) > 0)
+   ev(t, nbio.tick(0), nil)
+  }
+  for producer in producers do thread.destroy(producer)
+  for item in items do e(t, item.seen)
+  ev(t, state.calls, N)
+ }
 }

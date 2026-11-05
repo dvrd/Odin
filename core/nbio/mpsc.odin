@@ -34,7 +34,8 @@ mpsc_enqueue :: proc(mpscq: ^Multi_Producer_Single_Consumer, obj: rawptr) -> boo
 	}
 
 	head := sync.atomic_add_explicit(&mpscq.head, 1, .Relaxed)
-	assert(mpscq.buffer[head & mpscq.mask] == nil)
+	// The consumer can atomically clear this slot concurrently. Check the
+	// exchange result below instead of racing it with a plain assertion load.
 	rv := sync.atomic_exchange_explicit(&mpscq.buffer[head & mpscq.mask], obj, .Release)
 	assert(rv == nil)
 	return true
