@@ -1,0 +1,597 @@
+package tls
+
+import "core:crypto"
+import "core:crypto/x509"
+import "core:mem"
+import trans "core:net"
+import "core:net"
+import "core:time"
+
+// Connection configuration and state
+
+// Borrowed, immutable configuration. The name, roots, and certificates must
+// outlive Conn. Use Root_Pool to load a platform PEM bundle; keep the pool alive.
+Config :: struct {
+	server_name:       string,
+	root_cas:          []^x509.Certificate,
+	// Zero uses ten seconds. Negative durations are invalid.
+	// On wrapped transports this temporarily replaces, then clears deadlines.
+	// A custom transport without deadline callbacks must bound its own I/O;
+	// explicitly requesting a nonzero timeout requires callback support.
+	handshake_timeout: time.Duration,
+}
+
+Client_Error :: enum {
+	None,
+	Nil_Connection,
+	Already_Initialized,
+	Invalid_Transport,
+	Missing_Server_Name,
+	Invalid_Server_Name,
+	Missing_Trust_Roots,
+	Invalid_Trust_Root,
+	Invalid_Timeout,
+}
+
+Conn_Phase :: enum {
+	Uninitialized,
+	Handshake_Pending,
+	Awaiting_Server_Hello,
+	Hello_Retry_Received,
+	Server_Hello_Received,
+	Handshake_Keys_Ready,
+	Server_Finished_Received, // Received, not yet verified/authenticated.
+	Established,
+	Failed,
+	Closed,
+}
+
+// Caller-owned; do not copy or mutate an initialized Conn.
+// A full handshake must succeed before application I/O is exposed.
+Conn :: struct {
+	transport:                    trans.Connection,
+	// The asynchronous driver queues control writes instead of blocking.
+	defer_key_updates:            bool,
+	config:                       Config,
+	phase:                        Conn_Phase,
+	// Internal handshake material. Only the handshake message (no record
+	// header) participates in transcript authentication.
+	client_hello:                 [MAX_CLIENT_HELLO_SIZE]u8,
+	client_hello_size:            int,
+	x25519_private_key:           [32]u8,
+	client_hello_error:           Client_Hello_Send_Error,
+	server_hello:                 [MAX_SERVER_HELLO_SIZE]u8,
+	server_hello_size:            int,
+	server_parameters:            Server_Hello,
+	shared_secret:                [32]u8,
+	server_hello_error:           Server_Hello_Read_Error,
+	handshake_secrets:            Handshake_Secrets,
+	handshake_send:               Record_Protection,
+	handshake_receive:            Record_Protection,
+	handshake_keys_error:         Handshake_Keys_Error,
+	handshake_record_error:       Handshake_Record_Read_Error,
+	// Framing only; message semantics and peer authentication follow later.
+	server_handshake_header:      [4]u8,
+	server_handshake_header_used: int,
+	server_handshake_remaining:   int,
+	server_handshake_type:        u8,
+	application:                  Application_State,
+	handshake_error:              Handshake_Error,
+	handshake_complete:           bool,
+	// Used only by dial; client may wrap any caller-supplied transport.
+	tcp:                          trans.TCP_Connection,
+	retry_transcript:             [MAX_RETRY_TRANSCRIPT_SIZE]u8,
+	retry_transcript_size:        int,
+	retry_client_hello:           [MAX_RETRY_CLIENT_HELLO_SIZE]u8,
+	retry_client_hello_size:      int,
+}
+
+config_validate :: proc(config: Config) -> Client_Error {
+	if config.handshake_timeout < 0 {
+		return .Invalid_Timeout
+	}
+
+	if len(config.server_name) == 0 {
+		return .Missing_Server_Name
+	}
+
+	if !server_name_valid(config.server_name) {
+		return .Invalid_Server_Name
+	}
+
+	if len(config.root_cas) == 0 {
+		return .Missing_Trust_Roots
+	}
+
+	for root in config.root_cas {
+		if root == nil do return .Invalid_Trust_Root
+	}
+	return .None
+}
+
+// Like Go's tls.Client, wrapping performs no network I/O.
+// Ownership of the transport transfers only on success. On failure the caller
+// retains it. A closed Conn cannot be reinitialized accidentally.
+client :: proc(conn: ^Conn, underlying: trans.Connection, config: Config) -> Client_Error {
+	if conn == nil do return .Nil_Connection
+
+	if conn.phase != .Uninitialized {
+		return .Already_Initialized
+	}
+
+	if !trans.connection_valid(underlying) do return .Invalid_Transport
+
+	if err := config_validate(config); err != .None {
+		return err
+	}
+
+	conn^ = {
+		transport = underlying,
+		config    = config,
+		phase     = .Handshake_Pending,
+	}
+	return .None
+}
+
+// Connection establishment and inspection
+
+Dial_Error_Kind :: enum {
+	None,
+	Invalid_State,
+	Invalid_Config,
+	TCP_Dial_Failed,
+	Handshake_Failed,
+}
+
+Dial_Error :: struct {
+	kind:      Dial_Error_Kind,
+	config:    Client_Error,
+	network:   net.Network_Error,
+	handshake: Handshake_Error,
+}
+
+// Like Go's tls.Dial, this opens TCP and authenticates TLS before returning.
+// An empty server_name is inferred from host. DNS/TCP connection establishment
+// uses core:net's dial behavior; handshake_timeout bounds the TLS phase only.
+// conn must stay at the same address until closed and must not be copied.
+dial :: proc(conn: ^Conn, host: string, port: int, config: Config) -> Dial_Error {
+	if conn == nil || conn.phase != .Uninitialized {
+		return {kind = .Invalid_State}
+	}
+
+	settings := config
+	if settings.server_name == "" {
+		settings.server_name = host
+	}
+
+	if err := config_validate(settings); err != .None {
+		return {kind = .Invalid_Config, config = err}
+	}
+
+	socket, dial_err := net.dial_tcp(host, port)
+	if dial_err != nil {
+		return {kind = .TCP_Dial_Failed, network = dial_err}
+	}
+
+	// client overwrites Conn, so install the socket after wrapping its stable
+	// embedded adapter address. No transport I/O happens inside client.
+	underlying := trans.tcp_connection(&conn.tcp)
+	if err := client(conn, underlying, settings); err != .None {
+		net.close(socket)
+		return {kind = .Invalid_Config, config = err}
+	}
+
+	conn.tcp = {
+		socket = socket,
+	}
+	if err := handshake(conn); err.kind != .None {
+		close(conn)
+		return {kind = .Handshake_Failed, handshake = err}
+	}
+
+	return {}
+}
+
+Connection_State :: struct {
+	handshake_complete: bool,
+	version:            u16,
+	cipher_suite:       Cipher_Suite,
+	server_name:        string,
+}
+
+connection_state :: proc(conn: ^Conn) -> Connection_State {
+	if conn == nil do return {}
+
+	return {
+		handshake_complete = conn.handshake_complete,
+		version = conn.server_parameters.version,
+		cipher_suite = conn.server_parameters.cipher_suite,
+		server_name = conn.config.server_name,
+	}
+}
+
+// Connection deadlines
+
+// Zero clears a deadline. Like read/write, callers must serialize these
+// operations; this client does not yet support concurrent connection access.
+set_read_deadline :: proc(conn: ^Conn, deadline: time.Time) -> trans.Connection_Error {
+	if conn == nil || conn.phase == .Uninitialized {
+		return {kind = .Invalid_Connection}
+	}
+
+	if conn.phase == .Closed do return {kind = .Closed}
+
+	return trans.set_read_deadline(conn.transport, deadline)
+}
+
+set_write_deadline :: proc(conn: ^Conn, deadline: time.Time) -> trans.Connection_Error {
+	if conn == nil || conn.phase == .Uninitialized {
+		return {kind = .Invalid_Connection}
+	}
+
+	if conn.phase == .Closed do return {kind = .Closed}
+
+	return trans.set_write_deadline(conn.transport, deadline)
+}
+
+set_deadline :: proc(conn: ^Conn, deadline: time.Time) -> trans.Connection_Error {
+	if conn == nil || conn.phase == .Uninitialized {
+		return {kind = .Invalid_Connection}
+	}
+
+	if conn.phase == .Closed do return {kind = .Closed}
+
+	return trans.set_deadline(conn.transport, deadline)
+}
+
+// Immediate connection shutdown
+
+// Releases a connection without sending close_notify. Use after protocol/I/O
+// failure when a graceful write cannot safely complete within a deadline.
+abort :: proc(conn: ^Conn) -> IO_Error {
+	if conn == nil || conn.phase == .Uninitialized {
+		return {kind = .Invalid_State}
+	}
+
+	if conn.phase == .Closed do return {}
+
+	conn.phase = .Closed
+	application_clear(&conn.application)
+	handshake_keys_clear(conn)
+	if err := conn.transport.close(conn.transport.data); err.kind != .None {
+		return {kind = .Transport_Close_Failed, transport = err}
+	}
+
+	return {}
+}
+
+
+// Asynchronous connection operations
+
+// Caller-owned until callback, which is always deferred. A zero deadline in
+// async_handshake uses Config.handshake_timeout (ten seconds by default).
+Async_Handshake_Operation :: struct {
+	callback:  proc(op: ^Async_Handshake_Operation),
+	user_data: rawptr,
+	pending:   bool,
+	err:       net.Connection_Error,
+	result:    Handshake_Error,
+}
+
+// Owned by the executor's thread. Do not copy; retain at a stable address until
+// async close completes. Config and trust roots borrow caller storage. The
+// executor, transport and allocator must outlive all callbacks. Complete the
+// explicit handshake before submitting application reads or writes.
+Async_Conn :: struct {
+	protocol:                                                          Conn,
+	transport:                                                         net.Async_Connection,
+	executor:                                                          net.Async_Executor,
+	allocator:                                                         mem.Allocator,
+	initialized, queued, closing, transport_closing, transport_closed: bool,
+	notify_allowed, notify_sent:                                       bool,
+	failure:                                                           net.Connection_Error,
+	io_error:                                                          IO_Error,
+	close_error:                                                       net.Connection_Error,
+	handshake_op:                                                      ^Async_Handshake_Operation,
+	handshake_deadline:                                                time.Time,
+	flight:                                                            []u8,
+	flight_used:                                                       int,
+	hello:                                                             [MAX_HELLO_RETRY_REQUEST_SIZE]u8,
+	hello_used, ignored_ccs:                                           int,
+	finishing:                                                         bool,
+	secrets:                                                           Application_Secrets,
+	read_op, write_op, close_op:                                       ^net.Async_Operation,
+	read_buffer, write_buffer:                                         []u8,
+	read_deadline, write_deadline:                                     time.Time,
+	read_cancel, write_cancel:                                         bool,
+	rx, tx, shutdown:                                                  net.Async_Operation,
+	rx_wire:                                                           [RECORD_HEADER_SIZE + MAX_CIPHERTEXT_SIZE]u8,
+	rx_plain:                                                          [MAX_CIPHERTEXT_SIZE]u8,
+	rx_used, rx_expected:                                              int,
+	rx_error:                                                          net.Connection_Error,
+	tx_wire:                                                           [RECORD_HEADER_SIZE + MAX_CIPHERTEXT_SIZE]u8,
+	tx_size, tx_plain_count:                                           int,
+	tx_kind:                                                           Async_Send_Kind,
+	tx_done:                                                           bool,
+}
+
+@(private)
+Async_Send_Kind :: enum {
+	None,
+	Hello,
+	Retry,
+	Finished,
+	Data,
+	Key_Update,
+	Notify,
+}
+
+// Wraps without I/O. Success transfers transport ownership; failure leaves it
+// with the caller. Roots and allocator are explicit, as in the blocking client.
+async_client :: proc(
+	conn: ^Async_Conn,
+	underlying: net.Async_Connection,
+	executor: net.Async_Executor,
+	config: Config,
+	allocator := context.allocator,
+) -> Client_Error {
+	if conn == nil do return .Nil_Connection
+	if conn.initialized do return .Already_Initialized
+	if underlying.submit == nil || underlying.cancel == nil || executor.schedule == nil do return .Invalid_Transport
+	if err := config_validate(config); err != .None do return err
+	conn^ = {
+		initialized = true,
+		transport = underlying,
+		executor = executor,
+		allocator = allocator,
+		protocol = {config = config, phase = .Handshake_Pending, defer_key_updates = true},
+	}
+	conn.rx = {
+		callback  = async_receive_done,
+		user_data = conn,
+	}
+	conn.tx = {
+		callback  = async_send_done,
+		user_data = conn,
+	}
+	conn.shutdown = {
+		callback  = async_shutdown_done,
+		user_data = conn,
+	}
+	return .None
+}
+
+// The handshake occupies its own operation. Read/write submissions are rejected
+// until it succeeds. Cancellation is terminal for a partially exchanged handshake.
+async_handshake :: proc(
+	conn: ^Async_Conn,
+	op: ^Async_Handshake_Operation,
+	deadline := time.Time{},
+) -> net.Connection_Error {
+	if conn == nil || !conn.initialized do return {kind = .Invalid_Connection}
+	if op == nil || op.callback == nil do return {kind = .Invalid_Operation}
+	if conn.closing || conn.transport_closed do return {kind = .Closed}
+	if op.pending || conn.handshake_op != nil do return {kind = .Operation_Pending}
+	if conn.protocol.phase != .Handshake_Pending && conn.protocol.phase != .Established do return {kind = .Protocol_Failed}
+	op.pending, op.err, op.result = true, {}, {}
+	conn.handshake_op = op
+	timeout := conn.protocol.config.handshake_timeout
+	if timeout == 0 do timeout = 10 * time.Second
+	conn.handshake_deadline = time.time_add(time.now(), timeout)
+	if deadline != (time.Time{}) && time.diff(deadline, conn.handshake_deadline) > 0 do conn.handshake_deadline = deadline
+	async_queue(conn)
+	return {}
+}
+
+async_cancel_handshake :: proc(conn: ^Async_Conn) -> net.Connection_Error {
+	if conn == nil || !conn.initialized do return {kind = .Invalid_Connection}
+	if conn.handshake_op == nil || conn.protocol.phase == .Established do return {}
+	async_terminal(conn, {kind = .Cancelled}, {})
+	return {}
+}
+
+// Exposes the same application byte-stream contract as asynchronous TCP.
+// Handshake/authentication errors remain available in async_failure.
+async_connection :: proc(conn: ^Async_Conn) -> net.Async_Connection {
+	if conn == nil || !conn.initialized do return {}
+	return {data = conn, submit = async_submit, cancel = async_cancel}
+}
+
+async_failure :: proc(conn: ^Async_Conn) -> IO_Error {
+	if conn == nil do return {kind = .Invalid_State}
+	return conn.io_error
+}
+
+@(private)
+async_submit :: proc(
+	data: rawptr,
+	op: ^net.Async_Operation,
+	kind: net.Async_Operation_Kind,
+	buffer: []u8,
+	deadline: time.Time,
+) -> net.Connection_Error {
+	conn := cast(^Async_Conn)data
+	if conn.closing || conn.transport_closed && kind != .Close do return {kind = .Closed}
+	if kind != .Close {
+		if conn.failure.kind != .None do return conn.failure
+		if conn.protocol.phase != .Established do return {kind = .Invalid_Connection}
+	}
+	switch kind {
+	case .Read:
+		if conn.read_op != nil do return {kind = .Operation_Pending}
+		conn.read_op, conn.read_buffer, conn.read_deadline, conn.read_cancel =
+			op, buffer, deadline, false
+	case .Write:
+		if conn.write_op != nil do return {kind = .Operation_Pending}
+		conn.write_op, conn.write_buffer, conn.write_deadline, conn.write_cancel =
+			op, buffer, deadline, false
+	case .Close:
+		conn.close_op = op
+		conn.closing = true
+		// An interrupted TLS write can leave a partial record on the wire.
+		// Only idle, healthy writers can safely send close_notify.
+		conn.notify_allowed =
+			conn.protocol.phase == .Established &&
+			conn.failure.kind == .None &&
+			!conn.tx.pending &&
+			!conn.tx_done
+	}
+	op.kind, op.pending, op.result, op._owner = kind, true, {}, conn
+	async_queue(conn)
+	return {}
+}
+
+@(private)
+async_cancel :: proc(data: rawptr, op: ^net.Async_Operation) -> net.Connection_Error {
+	conn := cast(^Async_Conn)data
+	if !op.pending do return {}
+	if op._owner != conn || op.kind == .Close do return {kind = .Invalid_Operation}
+	if op == conn.read_op {
+		conn.read_cancel = true
+		if conn.rx.pending do net.async_cancel(conn.transport, &conn.rx)
+	} else if op == conn.write_op {
+		conn.write_cancel = true
+		if conn.tx.pending && conn.tx_kind == .Data do net.async_cancel(conn.transport, &conn.tx)
+	} else {
+		return {kind = .Invalid_Operation}
+	}
+	async_queue(conn)
+	return {}
+}
+
+@(private)
+async_queue :: proc(conn: ^Async_Conn) {
+	if !conn.queued {
+		conn.queued = true
+		conn.executor.schedule(conn.executor.data, async_pump, conn)
+	}
+}
+
+@(private)
+async_pump :: proc(data: rawptr) {
+	conn := cast(^Async_Conn)data
+	conn.queued = false
+	allocator := context.allocator
+	context.allocator = conn.allocator
+	defer context.allocator = allocator
+	if conn.tx_done {
+		conn.tx_done = false
+		async_send_process(conn)
+	}
+	if conn.closing || conn.failure.kind != .None {
+		async_shutdown_drive(conn)
+		return // close callback can free conn
+	}
+	if conn.protocol.phase != .Established {
+		if conn.handshake_op != nil do async_handshake_drive(conn)
+	} else {
+		if conn.handshake_op != nil do async_handshake_complete(conn, {})
+		if !conn.closing && conn.failure.kind == .None do async_application_drive(conn)
+	}
+}
+
+@(private)
+async_terminal :: proc(conn: ^Async_Conn, error: net.Connection_Error, details: IO_Error) {
+	if conn.failure.kind == .None {
+		conn.failure = error
+		conn.io_error = details
+		if conn.handshake_op != nil && conn.protocol.handshake_error.kind == .None {
+			conn.protocol.handshake_error = {
+				kind      = .Server_Flight_Read_Failed,
+				transport = error,
+			}
+		}
+		conn.protocol.phase = .Failed
+	}
+	async_queue(conn)
+}
+
+@(private)
+async_emit :: proc(
+	conn: ^Async_Conn,
+	kind: net.Async_Operation_Kind,
+	error: net.Connection_Error,
+) {
+	op := conn.read_op if kind == .Read else conn.write_op
+	if op == nil do return
+	if kind == .Read {
+		conn.read_op = nil; conn.read_buffer = nil
+	} else {
+		conn.write_op = nil; conn.write_buffer = nil
+	}
+	op.result.err, op.pending, op._owner = error, false, nil
+	op.callback(op)
+}
+
+@(private)
+async_handshake_complete :: proc(conn: ^Async_Conn, error: net.Connection_Error) {
+	op := conn.handshake_op
+	if op == nil do return
+	conn.handshake_op = nil
+	op.pending, op.err, op.result = false, error, conn.protocol.handshake_error
+	op.callback(op)
+}
+
+@(private)
+async_shutdown_drive :: proc(conn: ^Async_Conn) {
+	if conn.rx.pending do net.async_cancel(conn.transport, &conn.rx)
+	if conn.tx.pending {
+		if conn.tx_kind != .Notify do net.async_cancel(conn.transport, &conn.tx)
+		return
+	}
+	if conn.rx.pending do return
+	error := conn.failure
+	if conn.closing do error = {
+		kind = .Closed,
+	}
+	async_handshake_complete(conn, error)
+	async_emit(conn, .Read, error)
+	async_emit(conn, .Write, error)
+	if conn.closing && conn.notify_allowed && !conn.notify_sent && conn.failure.kind == .None {
+		size, seal_error := record_seal(
+			&conn.protocol.application.send,
+			conn.tx_wire[:],
+			.Alert,
+			[]u8{1, 0},
+		)
+		conn.notify_allowed = false
+		if seal_error == .None {
+			async_send_start(conn, .Notify, size, time.time_add(time.now(), time.Second))
+			return
+		}
+	}
+	if !conn.transport_closing {
+		conn.transport_closing = true
+		error := net.async_close(conn.transport, &conn.shutdown)
+		if error.kind != .None {
+			conn.close_error = error; conn.transport_closed = true
+		}
+	}
+	if !conn.transport_closed || conn.queued do return
+	application_clear(&conn.protocol.application)
+	handshake_keys_clear(&conn.protocol)
+	crypto.zero_explicit(&conn.secrets, size_of(conn.secrets))
+	crypto.zero_explicit(&conn.rx_wire, size_of(conn.rx_wire))
+	crypto.zero_explicit(&conn.tx_wire, size_of(conn.tx_wire))
+	crypto.zero_explicit(&conn.rx_plain, size_of(conn.rx_plain))
+	if conn.flight != nil {
+		crypto.zero_explicit(raw_data(conn.flight), len(conn.flight))
+		delete(conn.flight, conn.allocator); conn.flight = nil
+	}
+	if conn.close_op != nil {
+		op := conn.close_op
+		conn.close_op = nil
+		conn.protocol.phase = .Closed
+		op.pending, op._owner, op.result.err = false, nil, conn.close_error
+		op.callback(op)
+		// conn and op may have been freed by callback.
+	}
+}
+
+@(private)
+async_shutdown_done :: proc(op: ^net.Async_Operation) {
+	conn := cast(^Async_Conn)op.user_data
+	conn.transport_closed = true
+	if conn.close_error.kind == .None do conn.close_error = op.result.err
+	async_queue(conn)
+}
