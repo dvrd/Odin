@@ -73,7 +73,10 @@ connections that borrow it have closed.
 
 The client supports cookie-only HelloRetryRequest, fragmented handshake messages,
 record buffering, key updates, authenticated shutdown and truncation detection.
-TLS 1.2, server mode, client certificates, ALPN, session resumption and 0-RTT
+Client [ALPN](ALPN.md) offers/selections are bounded and shared by blocking and
+asynchronous handshakes. Read authenticated selection through `connection_state`
+or `async_connection_state`; Surf currently permits only HTTP/1.1 offers.
+TLS 1.2, server mode, client certificates, session resumption and 0-RTT
 are not implemented. Certificate policy and revocation capabilities follow
 `core:crypto/x509`.
 

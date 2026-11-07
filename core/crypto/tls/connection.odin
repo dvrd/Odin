@@ -19,6 +19,9 @@ Config :: struct {
 	// A custom transport without deadline callbacks must bound its own I/O;
 	// explicitly requesting a nonzero timeout requires callback support.
 	handshake_timeout: time.Duration,
+	// Ordered opaque names, borrowed and immutable through the full handshake
+	// (including async completion). Zero offers preserve legacy behavior.
+	alpn_protocols: []string,
 }
 
 Client_Error :: enum {
@@ -31,6 +34,7 @@ Client_Error :: enum {
 	Missing_Trust_Roots,
 	Invalid_Trust_Root,
 	Invalid_Timeout,
+	Invalid_ALPN,
 }
 
 Conn_Phase :: enum {
@@ -78,6 +82,9 @@ Conn :: struct {
 	application:                  Application_State,
 	handshake_error:              Handshake_Error,
 	handshake_complete:           bool,
+	// Owns the negotiated name; exposed only by authenticated connection_state.
+	alpn_selected:                [MAX_ALPN_PROTOCOL_SIZE]u8,
+	alpn_selected_size:           int,
 	// Used only by dial; client may wrap any caller-supplied transport.
 	tcp:                          trans.TCP_Connection,
 	retry_transcript:             [MAX_RETRY_TRANSCRIPT_SIZE]u8,
@@ -106,6 +113,7 @@ config_validate :: proc(config: Config) -> Client_Error {
 	for root in config.root_cas {
 		if root == nil do return .Invalid_Trust_Root
 	}
+	if _, valid := alpn_protocols_size(config.alpn_protocols); !valid {return .Invalid_ALPN}
 	return .None
 }
 
@@ -197,16 +205,24 @@ Connection_State :: struct {
 	version:            u16,
 	cipher_suite:       Cipher_Suite,
 	server_name:        string,
+	// Borrows fixed Conn storage until failure/close; empty before authentication
+	// and when the server omits ALPN. Does not borrow the server flight.
+	negotiated_protocol: string,
 }
 
 connection_state :: proc(conn: ^Conn) -> Connection_State {
 	if conn == nil do return {}
 
+	protocol: string
+	if conn.phase == .Established && conn.handshake_complete {
+		protocol = string(conn.alpn_selected[:conn.alpn_selected_size])
+	}
 	return {
 		handshake_complete = conn.handshake_complete,
 		version = conn.server_parameters.version,
 		cipher_suite = conn.server_parameters.cipher_suite,
 		server_name = conn.config.server_name,
+		negotiated_protocol = protocol,
 	}
 }
 
@@ -256,6 +272,7 @@ abort :: proc(conn: ^Conn) -> IO_Error {
 	if conn.phase == .Closed do return {}
 
 	conn.phase = .Closed
+	alpn_clear(conn)
 	application_clear(&conn.application)
 	handshake_keys_clear(conn)
 	if err := conn.transport.close(conn.transport.data); err.kind != .None {
@@ -313,6 +330,13 @@ Async_Conn :: struct {
 	tx_size, tx_plain_count:                                           int,
 	tx_kind:                                                           Async_Send_Kind,
 	tx_done:                                                           bool,
+}
+
+// Shares the authenticated state view without exposing the async driver's
+// embedded protocol or borrowing its transient server-flight allocation.
+async_connection_state :: proc(conn: ^Async_Conn) -> Connection_State {
+	if conn == nil {return {}}
+	return connection_state(&conn.protocol)
 }
 
 @(private)
@@ -502,6 +526,7 @@ async_terminal :: proc(conn: ^Async_Conn, error: net.Connection_Error, details: 
 			}
 		}
 		conn.protocol.phase = .Failed
+		alpn_clear(&conn.protocol)
 	}
 	async_queue(conn)
 }
@@ -568,6 +593,7 @@ async_shutdown_drive :: proc(conn: ^Async_Conn) {
 		}
 	}
 	if !conn.transport_closed || conn.queued do return
+	alpn_clear(&conn.protocol)
 	application_clear(&conn.protocol.application)
 	handshake_keys_clear(&conn.protocol)
 	crypto.zero_explicit(&conn.secrets, size_of(conn.secrets))

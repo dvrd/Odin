@@ -29,6 +29,7 @@ Handshake_Error_Kind :: enum {
 	Finished_Write_Failed,
 	Deadline_Failed,
 	Allocation_Failed,
+	Invalid_ALPN,
 }
 
 Handshake_Error :: struct {
@@ -48,7 +49,7 @@ Handshake_Error :: struct {
 // Authenticate the server, verify Finished, then send our Finished before
 // allowing application bytes. Repeated successful calls perform no I/O.
 // This blocking client currently supports certificate authentication without
-// client certificates, PSKs, early data, or negotiated ALPN.
+// client certificates, PSKs or early data.
 handshake :: proc(conn: ^Conn) -> Handshake_Error {
 	return handshake_until_internal(conn, {})
 }
@@ -230,14 +231,18 @@ handshake_server_flight_verify :: proc(conn: ^Conn, flight: []u8) -> ([32]u8, Ha
 		return {}, handshake_fail(conn, message_err)
 	}
 
-	if err := encrypted_extensions_validate(encrypted_extensions, conn.config.server_name);
-	   err.kind != .None {
-		return {}, handshake_fail(conn, err)
-	}
+	selected, extension_error := encrypted_extensions_decode(encrypted_extensions, conn.config.server_name, conn.config.alpn_protocols)
+	if extension_error.kind != .None {return {},handshake_fail(conn,extension_error)}
 
 	sha2.update(&transcript, encrypted_extensions)
 	if cert_error := handshake_flight_certificates_verify(conn, flight, &at, &transcript); cert_error.kind != .None do return {}, cert_error
-	return handshake_flight_finished_verify(conn, flight, &at, &transcript)
+	hash, finished_error := handshake_flight_finished_verify(conn, flight, &at, &transcript)
+	if finished_error.kind != .None {return {},finished_error}
+	// The flight buffer is released by the async driver before Finished is sent.
+	// Retain a bounded owned copy, still hidden until authentication completes.
+	copy(conn.alpn_selected[:],selected)
+	conn.alpn_selected_size=len(selected)
+	return hash,{}
 }
 
 handshake_flight_certificates_verify :: proc(
@@ -401,6 +406,7 @@ handshake_sni_offered :: proc(server_name: string) -> bool {
 
 handshake_fail :: proc(conn: ^Conn, err: Handshake_Error) -> Handshake_Error {
 	conn.phase = .Failed
+	alpn_clear(conn)
 	conn.handshake_error = err
 	handshake_keys_clear(conn)
 	application_clear(&conn.application)
@@ -438,57 +444,67 @@ handshake_next_message :: proc(
 	return message, {}
 }
 
-// With no ALPN or other EncryptedExtensions capabilities offered, only the
-// optional empty SNI acknowledgment is legal. Key-exchange extensions belong
-// in ServerHello and cannot be repeated here.
+// Legacy no-ALPN validation keeps its exported signature and rejects unsolicited
+// protocol selections. The shared decoder also handles configured offers.
 encrypted_extensions_validate :: proc(message: []u8, server_name: string) -> Handshake_Error {
+	_, error := encrypted_extensions_decode(message,server_name,nil)
+	return error
+}
+
+@(private)
+encrypted_extensions_decode :: proc(message: []u8, server_name: string, offers: []string) -> (selected: []u8, error: Handshake_Error) {
 	if len(message) < 6 {
-		return {kind = .Malformed_Message}
+		return nil,{kind = .Malformed_Message}
 	}
 
 	extensions_size := cast(int)message[4] << 8 | cast(int)message[5]
 	if extensions_size != len(message) - 6 {
-		return {kind = .Malformed_Message}
+		return nil,{kind = .Malformed_Message}
 	}
 
 	at := 6
-	name_seen, groups_seen: bool
+	name_seen, groups_seen, alpn_seen: bool
 	for at < len(message) {
 		if len(message) - at < 4 {
-			return {kind = .Malformed_Message}
+			return nil,{kind = .Malformed_Message}
 		}
 
 		kind := cast(u16)message[at] << 8 | cast(u16)message[at + 1]
 		size := cast(int)message[at + 2] << 8 | cast(int)message[at + 3]
 		at += 4
 		if size > len(message) - at {
-			return {kind = .Malformed_Message}
+			return nil,{kind = .Malformed_Message}
 		}
 
 		switch kind {
 		case cast(u16)Extension_Type.Server_Name:
 			if name_seen || size != 0 || !handshake_sni_offered(server_name) {
-				return {kind = .Malformed_Message}
+				return nil,{kind = .Malformed_Message}
 			}
 
 			name_seen = true
 		case cast(u16)Extension_Type.Supported_Groups:
 			if groups_seen || size < 4 || size % 2 != 0 {
-				return {kind = .Malformed_Message}
+				return nil,{kind = .Malformed_Message}
 			}
 
 			list_size := cast(int)message[at] << 8 | cast(int)message[at + 1]
 			if list_size != size - 2 {
-				return {kind = .Malformed_Message}
+				return nil,{kind = .Malformed_Message}
 			}
 
 			groups_seen = true
+		case cast(u16)Extension_Type.Application_Layer_Protocol_Negotiation:
+			if alpn_seen {return nil,{kind=.Malformed_Message}}
+			alpn_seen=true
+			selected, error = alpn_selection_decode(message[at:at+size],offers)
+			if error.kind != .None {return nil,error}
 		case:
-			return {kind = .Unsupported_Extension}
+			return nil,{kind = .Unsupported_Extension}
 		}
 		at += size
 	}
-	return {}
+	return selected,{}
 }
 
 // Initial ClientHello exchange
@@ -533,6 +549,7 @@ client_hello_prepare :: proc(conn: ^Conn) -> Client_Hello_Send_Error {
 	}
 	hello := Client_Hello {
 		server_name = conn.config.server_name,
+		alpn_protocols = conn.config.alpn_protocols,
 	}
 	crypto.rand_bytes(hello.random[:])
 	crypto.rand_bytes(conn.x25519_private_key[:])
@@ -573,6 +590,7 @@ client_hello_send :: proc(conn: ^Conn) -> Client_Hello_Send_Error {
 
 client_hello_fail :: proc(conn: ^Conn, err: Client_Hello_Send_Error) -> Client_Hello_Send_Error {
 	conn.phase = .Failed
+	alpn_clear(conn)
 	conn.client_hello_error = err
 	crypto.zero_explicit(&conn.x25519_private_key, size_of(conn.x25519_private_key))
 	return err
@@ -764,6 +782,7 @@ server_hello_accept :: proc(conn: ^Conn, message: []u8) -> Server_Hello_Read_Err
 
 server_hello_fail :: proc(conn: ^Conn, err: Server_Hello_Read_Error) -> Server_Hello_Read_Error {
 	conn.phase = .Failed
+	alpn_clear(conn)
 	conn.server_hello_error = err
 	crypto.zero_explicit(&conn.x25519_private_key, size_of(conn.x25519_private_key))
 	crypto.zero_explicit(&conn.shared_secret, size_of(conn.shared_secret))
@@ -821,6 +840,7 @@ client_handshake_keys_init :: proc(conn: ^Conn) -> Handshake_Keys_Error {
 	defer crypto.zero_explicit(&secrets, size_of(secrets))
 	if err != .None {
 		conn.phase = .Failed
+		alpn_clear(conn)
 		conn.handshake_keys_error = {
 			kind  = .Derivation_Failed,
 			cause = err,
@@ -1320,6 +1340,7 @@ handshake_record_fail :: proc(
 	Handshake_Record_Read_Error,
 ) {
 	conn.phase = .Failed
+	alpn_clear(conn)
 	conn.handshake_record_error = err
 	handshake_keys_clear(conn)
 	return nil, err

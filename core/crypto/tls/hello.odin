@@ -20,6 +20,7 @@ Extension_Type :: enum u16 {
 	Server_Name               = 0,
 	Supported_Groups          = 10,
 	Signature_Algorithms      = 13,
+	Application_Layer_Protocol_Negotiation = 16,
 	Supported_Versions        = 43,
 	Signature_Algorithms_Cert = 50,
 	Key_Share                 = 51,
@@ -43,18 +44,20 @@ Signature_Scheme :: enum u16 {
 VERSION_TLS_1_3 :: cast(u16)0x0304
 MAX_SERVER_NAME_SIZE :: 253
 // Includes the four-byte handshake header; excludes the record header.
-MAX_CLIENT_HELLO_SIZE :: 139 + MAX_SERVER_NAME_SIZE
+MAX_CLIENT_HELLO_SIZE :: 139 + MAX_SERVER_NAME_SIZE + 6 + MAX_ALPN_OFFER_BYTES
 
 Client_Hello :: struct {
 	server_name:       string,
 	random:            [32]u8,
 	x25519_public_key: [32]u8,
+	alpn_protocols:    []string,
 }
 
 Client_Hello_Error :: enum {
 	None,
 	Invalid_Server_Name,
 	Destination_Undersized,
+	Invalid_ALPN,
 }
 
 // Accept IP literals for certificate verification, but omit them from SNI.
@@ -100,7 +103,7 @@ server_name_valid :: proc(server_name: string) -> bool {
 }
 
 // RFC 8446 sections 4.1.2 and 4.2. Pure encoding: randomness and key generation
-// belong to the connection. This initial profile has no resumption, ALPN, or
+// belong to the connection. This initial profile has no resumption or
 // middlebox compatibility session ID. dst must not alias the hello fields.
 client_hello_encode :: proc(
 	dst: []u8,
@@ -113,6 +116,8 @@ client_hello_encode :: proc(
 		return 0, .Invalid_Server_Name
 	}
 
+	alpn_size, alpn_valid := alpn_protocols_size(hello.alpn_protocols)
+	if !alpn_valid {return 0,.Invalid_ALPN}
 	name := strings.trim_suffix(hello.server_name, ".")
 	if net.parse_address(hello.server_name) != nil {
 		name = ""
@@ -123,6 +128,7 @@ client_hello_encode :: proc(
 
 	// supported_versions, groups, signatures, certificate signatures, key_share.
 	extensions_size := sni_size + 7 + 8 + 12 + 14 + 42
+	if alpn_size > 0 {extensions_size += 6 + alpn_size}
 	body_size := 43 + extensions_size
 	if len(dst) < 4 + body_size {
 		return 0, .Destination_Undersized
@@ -156,6 +162,16 @@ client_hello_encode :: proc(
 	}
 
 	client_hello_extensions_encode(dst, hello, &written)
+	if alpn_size > 0 {
+		hello_put_extension(dst, &written, .Application_Layer_Protocol_Negotiation, 2 + alpn_size)
+		hello_put_u16(dst, &written, u16(alpn_size))
+		for protocol in hello.alpn_protocols {
+			dst[written] = u8(len(protocol))
+			written += 1
+			copy(dst[written:][:len(protocol)], transmute([]u8)protocol)
+			written += len(protocol)
+		}
+	}
 	return written, .None
 }
 

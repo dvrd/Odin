@@ -194,6 +194,7 @@ close :: proc(conn: ^Conn) -> IO_Error {
 	}
 
 	conn.phase = .Closed
+	alpn_clear(conn)
 	application_clear(&conn.application)
 	handshake_keys_clear(conn)
 	transport_err := conn.transport.close(conn.transport.data)
@@ -473,6 +474,7 @@ application_ticket_valid :: proc(body: []u8) -> bool {
 
 application_fail :: proc(conn: ^Conn, err: IO_Error) -> IO_Error {
 	conn.phase = .Failed
+	alpn_clear(conn)
 	application_clear(&conn.application)
 	conn.application.failure = err
 	handshake_keys_clear(conn)
