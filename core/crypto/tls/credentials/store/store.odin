@@ -513,3 +513,10 @@ sign_digest_pss_sha256 :: proc(
 	n, cause := credentials.sign_digest_pss_sha256(credential, digest, out)
 	return n, Error{} if cause == .None else Error{kind = .Credential_Failed, credential = cause}
 }
+
+certificate_algorithms :: proc(store: ^Store, lease: Lease, index: int) -> (credentials.Certificate_Algorithms, Error) {
+	credential, error := borrow(store, lease)
+	if error.kind != .None {return {}, error}
+	metadata, cause := credentials.certificate_algorithms(credential, index)
+	return metadata, Error{} if cause == .None else Error{kind=.Credential_Failed, credential=cause}
+}

@@ -9,9 +9,9 @@ Server_Handshake_Direction :: enum {Read, Write} // Relative to the local server
 Server_Handshake_Event_Kind :: enum {None, Handshake_Bytes, Traffic_Secret, Peer_Parameters, Complete, Fatal}
 Server_Handshake_Error :: enum {
 	None, Invalid_Config, Invalid_Owner, Invalid_State, Invalid_Event,
-	Wrong_Level, Malformed, Unsupported, Limit, Allocation_Failed, Cancelled, Identity_Exhausted,
+	Wrong_Level, Malformed, Unsupported, Limit, Allocation_Failed, Cancelled, Identity_Exhausted, Credential_Failed, Signing_Failed, Entropy_Unavailable,
 }
-Server_Handshake_Status :: enum {Need_Input, Need_Event_Drain, Await_Flight, Terminal, Invalid_Owner}
+Server_Handshake_Status :: enum {Need_Input, Need_Event_Drain, Await_Flight, Await_Client_Finished, Terminal, Invalid_Owner}
 Server_Handshake_Config :: struct {
 	max_client_hello_bytes: int,
 	max_extensions: int,
@@ -40,7 +40,7 @@ Server_Handshake_Stats :: struct {
 	allocation_attempts: int,
 }
 @(private)
-Server_Handshake_Phase :: enum {Uninitialized, Client_Hello, Await_Flight, Failed, Aborted, Destroyed}
+Server_Handshake_Phase :: enum {Uninitialized, Client_Hello, Await_Flight, Await_Client_Finished, Failed, Aborted, Destroyed}
 
 // Initialize zeroed storage once, at its final address. No copies, concurrent
 // calls, reentry or field mutation. Destroy does not make storage reusable:
@@ -61,6 +61,7 @@ Server_Handshake :: struct {
 	_event: Server_Handshake_Event,
 	_next_id: u64,
 	_error: Server_Handshake_Error,
+	_flight: Server_Flight,
 }
 
 server_handshake_init :: proc(owner: ^Server_Handshake, config: Server_Handshake_Config, allocator: mem.Allocator) -> Server_Handshake_Error {
@@ -118,6 +119,7 @@ server_handshake_clear_event :: proc(owner: ^Server_Handshake) {
 @(private)
 server_handshake_cleanup :: proc(owner: ^Server_Handshake) {
 	server_handshake_clear_event(owner)
+	server_flight_cleanup(owner)
 	server_handshake_release_input(owner)
 	owner._stats.live_bytes -= len(owner._output)
 	server_handshake_wipe_free(owner, owner._output)
@@ -140,11 +142,12 @@ server_handshake_fail :: proc(owner: ^Server_Handshake, error: Server_Handshake_
 }
 
 // Input borrows end on return. Only consumed bytes have transferred; resubmit
-// the untouched suffix. This shell stops after one negotiated ClientHello.
+// the untouched suffix. Client Finished acceptance is a separate producer step.
 server_handshake_feed :: proc(owner: ^Server_Handshake, level: Server_Handshake_Level, input: []u8) -> (consumed: int, status: Server_Handshake_Status, error: Server_Handshake_Error) {
 	if !server_handshake_valid(owner) {return 0, .Invalid_Owner, .Invalid_Owner}
 	if owner._phase == .Failed || owner._phase == .Aborted || owner._phase == .Destroyed {return 0, .Terminal, owner._error}
 	if owner._event.kind != .None {return 0, .Need_Event_Drain, .None}
+	if owner._phase == .Await_Client_Finished {return 0, .Await_Client_Finished, .None}
 	if owner._phase == .Await_Flight {return 0, .Await_Flight, .None}
 	if level != .Initial {
 		server_handshake_fail(owner, .Wrong_Level)
@@ -198,6 +201,10 @@ server_handshake_feed :: proc(owner: ^Server_Handshake, level: Server_Handshake_
 
 server_handshake_peek :: proc(owner: ^Server_Handshake) -> (Server_Handshake_Event, Server_Handshake_Error) {
 	if !server_handshake_valid(owner) {return {}, .Invalid_Owner}
+	if owner._event.kind == .None && owner._flight.stage != .None {
+		e := server_flight_next(owner)
+		if e != .None {server_handshake_fail(owner, e)}
+	}
 	return owner._event, .None
 }
 server_handshake_accept :: proc(owner: ^Server_Handshake, id: u64) -> Server_Handshake_Error {
@@ -205,6 +212,7 @@ server_handshake_accept :: proc(owner: ^Server_Handshake, id: u64) -> Server_Han
 	if id == 0 || owner._event.kind == .None || id != owner._event.id {return .Invalid_Event}
 	if owner._event.kind == .Handshake_Bytes {transcript_update(&owner._transcript, owner._event.bytes)}
 	server_handshake_clear_event(owner)
+	if owner._flight.stage == .End {_ = server_flight_next(owner)}
 	return .None
 }
 // No alert callback or network close: the transport owns those decisions.
@@ -232,7 +240,7 @@ server_handshake_stats :: proc(owner: ^Server_Handshake) -> (Server_Handshake_St
 // Internal producer seam for flight153/Finished154. No public caller can
 // manufacture success or install keys through the event consumer interface.
 // A borrowed DER chunk must remain pinned by its producer through acceptance
-// or cleanup. This shell takes no credential lease; flight153 must own that pin.
+// or cleanup. The flight producer owns that pin.
 @(private)
 server_handshake_publish :: proc(owner: ^Server_Handshake, source: Server_Handshake_Event, borrow_bytes := false) -> Server_Handshake_Error {
 	event := source

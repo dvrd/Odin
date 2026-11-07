@@ -105,3 +105,9 @@ OpenSSL verify 8 workers × 8 native signatures for each of 2048/4096 bits under
 ASan and TSan. Fixtures are synthetic public test keys, not service identities.
 Executable evidence is Darwin arm64; Linux arm64 is semantic checking only.
 No performance, complete TLS interoperability or production trust claim follows.
+
+`certificate_algorithms(index)` returns construction-time signature and subject
+key algorithm identifiers by value. The store forwards it under a lease; it
+exposes no X509 slices or private-key storage. TLS flight admission uses this
+metadata to enforce its documented conservative chain-signature policy without
+re-parsing DER. This accessor is identification, not chain verification.

@@ -387,3 +387,16 @@ allocation_error :: proc(owner: ^Owner, fallback: Error) -> Error {
 }
 @(private)
 is_whitespace :: proc(b: u8) -> bool {return b == 32 || b == 9 || b == 13 || b == 10}
+
+// Parsed construction-time metadata by value; never exposes mutable X509/key storage.
+Certificate_Algorithms :: struct {
+	signature: x509.Signature_Algorithm,
+	subject_key: x509.Public_Key_Algorithm,
+}
+certificate_algorithms :: proc(credential: ^Credential, index: int) -> (Certificate_Algorithms, Error) {
+	if credential == nil {return {}, .Invalid_Handle}
+	owner := cast(^Owner)credential
+	if index < 0 || index >= owner.count {return {}, .Invalid_Index}
+	cert := &owner.certs[index]
+	return {cert.signature_algorithm, cert.public_key_algorithm}, .None
+}
