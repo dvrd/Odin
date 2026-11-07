@@ -498,144 +498,6 @@ encode_hostname :: proc(b: ^strings.Builder, hostname: string) -> (ok: bool) {
 	return true
 }
 
-skip_hostname :: proc(packet: []u8, start_idx: int) -> (encode_size: int, ok: bool) {
-	out_size := 0
-
-	cur_idx := start_idx
-	iteration_max := 0
-	top: for cur_idx < len(packet) {
-		if packet[cur_idx] == 0 {
-			out_size += 1
-			break
-		}
-
-		if iteration_max > 255 {
-			return
-		}
-
-		if packet[cur_idx] > 63 && packet[cur_idx] != 0xC0 {
-			return
-		}
-
-		switch packet[cur_idx] {
-		case 0xC0:
-			out_size += 2
-			break top
-		case:
-			label_size := int(packet[cur_idx]) + 1
-			idx2 := cur_idx + label_size
-
-			if idx2 < cur_idx + 1 || idx2 > len(packet) {
-				return
-			}
-
-			out_size += label_size
-			cur_idx = idx2
-		}
-
-		iteration_max += 1
-	}
-
-	if start_idx + out_size > len(packet) {
-		return
-	}
-
-	return out_size, true
-}
-
-decode_hostname :: proc(packet: []u8, start_idx: int, allocator := context.allocator) -> (hostname: string, encode_size: int, ok: bool) {
-	output := [NAME_MAX]u8{}
-	b := strings.builder_from_slice(output[:])
-
-	// If you're on level 0, update out_bytes, everything through a pointer
-	// doesn't count towards this hostname's packet length
-
-	// Evaluate tokens to generate the hostname
-	out_size := 0
-	level := 0
-	print_size := 0
-	cur_idx := start_idx
-	iteration_max := 0
-	labels_added := 0
-	for cur_idx < len(packet) {
-		if packet[cur_idx] == 0 {
-
-			if (level == 0) {
-				out_size += 1
-			}
-
-			break
-		}
-
-		if iteration_max > 255 {
-			return
-		}
-
-		switch {
-
-		// A pointer is when the two higher bits are set.
-		case packet[cur_idx] & 0xC0 == 0xC0:
-			if len(packet[cur_idx:]) < 2 {
-				return
-			}
-			pkt := packet[cur_idx:cur_idx+2]
-			val := (^u16be)(raw_data(pkt))^
-			offset := int(val & 0x3FFF)
-			// RFC 9267 a ptr should only point backwards, enough to avoid infinity.
-			// "The offset at which this octet is located must be smaller than the offset
-			// at which the compression pointer is located". Still keep iteration_max to
-			// avoid tiny jumps.
-			if offset > len(packet) || offset >= cur_idx {
-				return
-			}
-
-			cur_idx = offset
-
-			if (level == 0) {
-				out_size += 2
-				level += 1
-			}
-
-		// Validate label len
-		case packet[cur_idx] > LABEL_MAX:
-			return
-
-		// This is a label, insert it into the hostname
-		case:
-			label_size := int(packet[cur_idx])
-			idx2 := cur_idx + label_size + 1
-			if idx2 < cur_idx + 1 || idx2 > len(packet) {
-				return
-			}
-
-			if print_size + label_size + 1 > NAME_MAX {
-				return
-			}
-
-			if labels_added > 0 {
-				strings.write_byte(&b, '.')
-			}
-			strings.write_bytes(&b, packet[cur_idx+1:idx2])
-			print_size += label_size + 1
-			labels_added += 1
-
-			cur_idx = idx2
-
-			if (level == 0) {
-				out_size += label_size + 1
-			}
-		}
-
-		iteration_max += 1
-	}
-
-	if start_idx + out_size > len(packet) {
-		return
-	}
-
-	return strings.clone(strings.to_string(b), allocator), out_size, true
-}
-
 // Uses RFC 952 & RFC 1123
 validate_hostname :: proc(hostname: string) -> (ok: bool) {
 	if len(hostname) > NAME_MAX || len(hostname) == 0 {
@@ -665,161 +527,140 @@ validate_hostname :: proc(hostname: string) -> (ok: bool) {
 	return true
 }
 
-parse_record :: proc(packet: []u8, cur_off: ^int, filter: DNS_Record_Type = nil, allocator := context.allocator) -> (record: DNS_Record, ok: bool) {
-	context.allocator = allocator
-	if cur_off^ < 0 || cur_off^ > len(packet) {
-		return
+parse_record :: proc(
+	packet: []u8,
+	cur_off: ^int,
+	filter: DNS_Record_Type = nil,
+	allocator := context.allocator,
+) -> (
+	record: DNS_Record,
+	ok: bool,
+) {
+	if cur_off == nil {
+		return nil, false
 	}
-	record_buf := packet[cur_off^:]
-
-	srv_record_name, hn_sz := decode_hostname(packet, cur_off^, context.temp_allocator) or_return
-	// TODO(tetra): Not sure what we should call this.
-	// Is it really only used in SRVs?
-	// Maybe some refactoring is required?
-
-	ahdr_sz := size_of(DNS_Record_Header)
-	if len(record_buf) - hn_sz < ahdr_sz {
-		return
+	owner_buffer: [NAME_MAX]u8
+	header, data_start, finish, owner_size, valid := dns_record_span(
+		packet,
+		cur_off^,
+		owner_buffer[:],
+	)
+	if !valid {
+		return nil, false
 	}
-
-	record_hdr_bytes := record_buf[hn_sz:hn_sz+ahdr_sz]
-	record_hdr := cast(^DNS_Record_Header)raw_data(record_hdr_bytes)
-
-	data_sz := record_hdr.length
-	data_off := cur_off^ + int(hn_sz) + int(ahdr_sz)
-	if int(data_sz) > len(packet) - data_off {
-		return
+	if header.type != u16be(filter) {
+		cur_off^ = finish; return nil, true
 	}
-	data := packet[data_off:data_off+int(data_sz)]
-	cur_off^ += int(hn_sz) + int(ahdr_sz) + int(data_sz)
-
-	if u16be(filter) != record_hdr.type {
-		return nil, true
+	data := packet[data_start:finish]
+	kind := DNS_Record_Type(header.type)
+	target_buffer: [NAME_MAX]u8
+	value: []u8
+	first_dot, second_dot := -1, -1
+	prefix := 0
+	switch kind {
+	case .IP4:
+		if len(data) != 4 {
+			return nil, false
+		}
+	case .IP6:
+		if len(data) != 16 {
+			return nil, false
+		}
+	case .TXT:
+		value = data
+	case .CNAME, .NS, .MX, .SRV:
+		if kind == .MX {
+			prefix = 2
+		}
+		if kind == .SRV {
+			prefix = 6
+			owner := string(owner_buffer[:owner_size])
+			first_dot = strings.index_byte(owner, '.')
+			if first_dot < 0 {
+				return nil, false
+			}
+			rest := strings.index_byte(owner[first_dot + 1:], '.')
+			if rest < 0 {
+				return nil, false
+			}
+			second_dot = first_dot + 1 + rest
+		}
+		if len(data) <= prefix {
+			return nil, false
+		}
+		decoded, encoded, name_ok := dns_name_read(packet, data_start + prefix, target_buffer[:])
+		if !name_ok || encoded != len(data) - prefix {
+			return nil, false
+		}
+		value = target_buffer[:decoded]
+	case:
+		return nil, false
 	}
-
-	_record: DNS_Record
-	#partial switch DNS_Record_Type(record_hdr.type) {
-		case .IP4:
-			if len(data) != 4 {
-				return
-			}
-
-			addr := (^IP4_Address)(raw_data(data))^
-
-			_record = DNS_Record_IP4{
-				base = DNS_Record_Base{
-					record_name = strings.clone(srv_record_name),
-					ttl_seconds = u32(record_hdr.ttl),
-				},
-				address = addr,
-			}
-
-		case .IP6:
-			if len(data) != 16 {
-				return
-			}
-
-			addr := (^IP6_Address)(raw_data(data))^
-
-			_record = DNS_Record_IP6{
-				base = DNS_Record_Base{
-					record_name = strings.clone(srv_record_name),
-					ttl_seconds = u32(record_hdr.ttl),
-				},
-				address = addr,
-			}
-
-		case .CNAME:
-			hostname, _ := decode_hostname(packet, data_off) or_return
-
-			_record = DNS_Record_CNAME{
-				base = DNS_Record_Base{
-					record_name = strings.clone(srv_record_name),
-					ttl_seconds = u32(record_hdr.ttl),
-				},
-				host_name = hostname,
-			}
-
-		case .TXT:
-			_record = DNS_Record_TXT{
-				base = DNS_Record_Base{
-					record_name = strings.clone(srv_record_name),
-					ttl_seconds = u32(record_hdr.ttl),
-				},
-				value = strings.clone(string(data)),
-			}
-
-		case .NS:
-			name, _ := decode_hostname(packet, data_off) or_return
-
-			_record = DNS_Record_NS{
-				base = DNS_Record_Base{
-					record_name = strings.clone(srv_record_name),
-					ttl_seconds = u32(record_hdr.ttl),
-				},
-				host_name = name,
-			}
-
-		case .SRV:
-			if len(data) <= 6 {
-				return
-			}
-
-			_data := mem.slice_data_cast([]u16be, data)
-
-			priority, weight, port := _data[0], _data[1], _data[2]
-			target, _ := decode_hostname(packet, data_off + (size_of(u16be) * 3)) or_return
-
-			// NOTE(tetra): Srv record name should be of the form '_servicename._protocol.hostname'
-			// The record name is the name of the record.
-			// Not to be confused with the _target_ of the record, which is--in combination with the port--what we're looking up
-			// by making this request in the first place.
-
-			record_name := strings.clone(srv_record_name)
-			parts := strings.split_n(record_name, ".", 3, context.temp_allocator)
-			if len(parts) != 3 {
-				delete(record_name)
-				delete(target)
-				return
-			}
-			service_name, protocol_name := parts[0], parts[1]
-
-			_record = DNS_Record_SRV{
-				base = DNS_Record_Base{
-					record_name = record_name,
-					ttl_seconds = u32(record_hdr.ttl),
-				},
-				target        = target,
-				service_name  = service_name,
-				protocol_name = protocol_name,
-				priority      = int(priority),
-				weight        = int(weight),
-				port          = int(port),
-			}
-
-		case .MX:
-			if len(data) <= 2 {
-				return
-			}
-
-			preference: u16be = mem.slice_data_cast([]u16be, data)[0]
-			hostname, _ := decode_hostname(packet, data_off + size_of(u16be)) or_return
-
-			_record = DNS_Record_MX{
-				base = DNS_Record_Base{
-					record_name = strings.clone(srv_record_name),
-					ttl_seconds = u32(record_hdr.ttl),
-				},
-				host_name  = hostname,
-				preference = int(preference),
-			}
-
-		case:
-			return
-
+	owned_name, name_ok := dns_clone_bytes(owner_buffer[:owner_size], allocator)
+	if !name_ok {
+		return nil, false
 	}
-
-	return _record, true
+	owned_value: string
+	committed := false
+	defer if !committed {
+		delete(owned_name, allocator); delete(owned_value, allocator)
+	}
+	if kind == .TXT || kind == .CNAME || kind == .NS || kind == .MX || kind == .SRV {
+		value_ok: bool
+		owned_value, value_ok = dns_clone_bytes(value, allocator)
+		if !value_ok {
+			return nil, false
+		}
+	}
+	base := DNS_Record_Base {
+		record_name = owned_name,
+		ttl_seconds = u32(header.ttl),
+	}
+	switch kind {
+	case .IP4:
+		record = DNS_Record_IP4 {
+			base    = base,
+			address = (cast(^IP4_Address)raw_data(data))^,
+		}
+	case .IP6:
+		record = DNS_Record_IP6 {
+			base    = base,
+			address = (cast(^IP6_Address)raw_data(data))^,
+		}
+	case .TXT:
+		record = DNS_Record_TXT {
+			base  = base,
+			value = owned_value,
+		}
+	case .CNAME:
+		record = DNS_Record_CNAME {
+			base      = base,
+			host_name = owned_value,
+		}
+	case .NS:
+		record = DNS_Record_NS {
+			base      = base,
+			host_name = owned_value,
+		}
+	case .MX:
+		record = DNS_Record_MX {
+			base       = base,
+			host_name  = owned_value,
+			preference = (int(data[0]) << 8) | int(data[1]),
+		}
+	case .SRV:
+		record = DNS_Record_SRV {
+			base          = base,
+			target        = owned_value,
+			service_name  = owned_name[:first_dot],
+			protocol_name = owned_name[first_dot + 1:second_dot],
+			priority      = (int(data[0]) << 8) | int(data[1]),
+			weight        = (int(data[2]) << 8) | int(data[3]),
+			port          = (int(data[4]) << 8) | int(data[5]),
+		}
+	}
+	cur_off^ = finish; committed = true
+	return record, true
 }
 
 /*
@@ -845,96 +686,79 @@ parse_record :: proc(packet: []u8, cur_off: ^int, filter: DNS_Record_Type = nil,
 	- Data[]
 */
 
-parse_response :: proc(response: []u8, filter: DNS_Record_Type = nil, allocator := context.allocator) -> (records: []DNS_Record, xid: u16be, ok: bool) {
-	context.allocator = allocator
-
+parse_response :: proc(
+	response: []u8,
+	filter: DNS_Record_Type = nil,
+	allocator := context.allocator,
+) -> (
+	records: []DNS_Record,
+	xid: u16be,
+	ok: bool,
+) {
 	HEADER_SIZE_BYTES :: 12
 	if len(response) < HEADER_SIZE_BYTES {
-		return
+		return nil, 0, false
 	}
-
-	_records := make([dynamic]DNS_Record, 0)
-
-	dns_hdr_chunks := mem.slice_data_cast([]u16be, response[:HEADER_SIZE_BYTES])
-	hdr := unpack_dns_header(dns_hdr_chunks[0], dns_hdr_chunks[1])
-	if !hdr.is_response {
-		delete(_records)
-		return
+	chunks := mem.slice_data_cast([]u16be, response[:HEADER_SIZE_BYTES])
+	header := unpack_dns_header(chunks[0], chunks[1])
+	if !header.is_response || int(chunks[2]) != 1 {
+		return nil, 0, false
 	}
-
-	question_count := int(dns_hdr_chunks[2])
-	if question_count != 1 {
-		delete(_records)
-		return
+	_, question_size, question_ok := dns_name_read(response, HEADER_SIZE_BYTES, nil)
+	if !question_ok ||
+	   len(response) - HEADER_SIZE_BYTES < 4 ||
+	   question_size > len(response) - HEADER_SIZE_BYTES - 4 {
+		return nil, 0, false
 	}
-	answer_count := int(dns_hdr_chunks[3])
-	authority_count := int(dns_hdr_chunks[4])
-	additional_count := int(dns_hdr_chunks[5])
-
-	cur_idx := HEADER_SIZE_BYTES
-
-	for _ in 0..<question_count {
-		if cur_idx == len(response) {
-			continue
-		}
-
-		dq_sz :: 4
-		hn_sz := skip_hostname(response, cur_idx) or_return
-
-		cur_idx += hn_sz + dq_sz
-		if cur_idx > len(response) {
-			delete(_records)
-			return
-		}
+	start := HEADER_SIZE_BYTES + question_size + 4
+	total := int(chunks[3]) + int(chunks[4]) + int(chunks[5])
+	// An uncompressed root plus the fixed record header is the minimum extent.
+	// Bound advertised work by real bytes before any allocation or record loop.
+	if total > (len(response) - start) / (1 + size_of(DNS_Record_Header)) {
+		return nil, 0, false
 	}
-
-	for _ in 0..<answer_count {
-		if cur_idx == len(response) {
-			continue
+	cursor, matching := start, 0
+	for _ in 0 ..< total {
+		record_header, _, finish, _, valid := dns_record_span(response, cursor)
+		if !valid {
+			return nil, 0, false
 		}
-
-		rec, rec_ok := parse_record(response, &cur_idx, filter)
-		if !rec_ok {
-			destroy_dns_records(_records[:])
-			return
+		if record_header.type == u16be(filter) {
+			matching += 1
 		}
-		if rec != nil {
-			append(&_records, rec)
-		}
+		cursor = finish
 	}
-
-	for _ in 0..<authority_count {
-		if cur_idx == len(response) {
-			continue
+	if matching == 0 {
+		return nil, header.id, true
+	}
+	// Allocate the exact returned table once, so its slice owns the whole backing.
+	result, error := make([]DNS_Record, matching, allocator)
+	if error != nil || raw_data(result) == nil || len(result) != matching {
+		if raw_data(result) != nil {
+			delete(result, allocator)
 		}
-
-		rec, rec_ok := parse_record(response, &cur_idx, filter)
-		if !rec_ok {
-			destroy_dns_records(_records[:])
-			return
+		return nil, 0, false
+	}
+	committed := false
+	defer if !committed {
+		destroy_dns_records(result, allocator)
+	}
+	cursor = start
+	used := 0
+	for _ in 0 ..< total {
+		value, valid := parse_record(response, &cursor, filter, allocator)
+		if !valid {
+			return nil, 0, false
 		}
-		if rec != nil {
-			append(&_records, rec)
+		if value != nil {
+			result[used] = value; used += 1
 		}
 	}
-
-	for _ in 0..<additional_count {
-		if cur_idx == len(response) {
-			continue
-		}
-
-		rec, rec_ok := parse_record(response, &cur_idx, filter)
-		if !rec_ok {
-			destroy_dns_records(_records[:])
-			return
-		}
-		if rec != nil {
-			append(&_records, rec)
-		}
+	if used != matching {
+		return nil, 0, false
 	}
-	xid = hdr.id
-
-	return _records[:], xid, true
+	committed = true
+	return result, header.id, true
 }
 
 // timeval backends truncate to microseconds: a positive sub-microsecond wait
