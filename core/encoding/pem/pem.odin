@@ -146,12 +146,19 @@ decode :: proc(data: []byte, allocator := context.allocator) -> (blk: ^Block, re
 	}
 
 	// Initialize the block.
-	blk = new(Block, allocator) or_return
-	if blk.data, err = make([dynamic]byte, out_len, allocator); err != nil {
+	allocation_error: runtime.Allocator_Error
+	blk, allocation_error = new(Block, allocator)
+	if allocation_error != .None || blk == nil {
+		if allocation_error == .None {allocation_error = .Out_Of_Memory}
+		return nil, nil, allocation_error
+	}
+	if blk.data, err = make([dynamic]byte, out_len, allocator); err != nil || cap(blk.data) < out_len {
+		if err == nil {err = runtime.Allocator_Error.Out_Of_Memory}
 		free(blk, allocator)
 		return nil, nil, err
 	}
-	if blk.label, err = strings.clone(label, allocator); err != nil {
+	if blk.label, err = strings.clone(label, allocator); err != nil || len(blk.label) != len(label) {
+		if err == nil {err = runtime.Allocator_Error.Out_Of_Memory}
 		block_delete(blk)
 		return nil, nil, err
 	}
@@ -320,8 +327,8 @@ valid_label :: proc(label: []byte) -> bool {
 
 @(private)
 sanitize_and_delete :: proc(data: [dynamic]byte) {
-	b, l := raw_data(data), len(data)
-	crypto.zero_explicit(b, l)
+	b, capacity := raw_data(data), cap(data)
+	if b != nil {crypto.zero_explicit(b, capacity)}
 
 	delete(data)
 }
