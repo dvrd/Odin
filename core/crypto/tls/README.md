@@ -105,8 +105,10 @@ and [RFC 8448](https://www.rfc-editor.org/rfc/rfc8448).
 
 ## Recordless server foundation
 
-The [bounded owner/event shell](SERVER_HANDSHAKE.md) assembles one ClientHello
-and exposes tentative offers before stopping at `Await_Flight`. It is not a
-working server handshake or transport. Server flight, credential pinning,
-Finished authentication and TCP/QUIC bindings remain separate implementation
-gates. Existing client APIs and behavior are unchanged.
+The [bounded recordless owner](SERVER_HANDSHAKE.md) assembles ClientHello,
+admits a pinned RSA credential, emits the server flight and traffic secrets,
+and authenticates client Finished before publishing Complete. It supports the
+restricted TLS1.3/X25519/AES128GCM/RSA-PSS profile; no ALPN selection, HRR,
+resumption, client certificates or production TCP/QUIC binding is provided.
+Existing client APIs and behavior are unchanged. See the contract for explicit
+input boundaries, transient erasure and event acceptance requirements.

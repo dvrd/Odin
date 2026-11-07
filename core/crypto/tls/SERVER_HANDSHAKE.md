@@ -41,11 +41,21 @@ event is pending, repeated peeks never advance or hash it again. Signing uses
 OS entropy and is synchronous/non-preemptible; caller owns that latency policy.
 
 Accepting the last application-secret event releases the credential lease and
-erases the handshake/application schedules. The owner then returns
-`Await_Client_Finished`, retaining the client handshake secret and transcript
-for Finished154. It cannot yet authenticate a peer, authorize application data
-or publish Complete. Possession of application secrets is never that authority.
-Engine146, Finished154, independent matrix157 and TCP147/QUIC98 remain open.
+erases the handshake/application schedules. The owner then enters its
+Await_Client_Finished phase, retaining the client handshake secret and transcript
+until client Finished authentication. Feed exactly one Finished at Handshake
+level; its 32-byte MAC is checked in constant time against the accepted transcript
+through server Finished and the client handshake traffic secret. No client
+certificate authentication is requested/supplied. Possession of application
+secrets or tentative peer offers never authorizes application delivery.
+
+On successful verification and with every flight event accepted, the engine
+wipes/frees all transient grants, partial input, secrets and transcript, then
+publishes one payload-free `Complete`. Copy required durable state and accept
+that event before the binding delivers application data. Complete is repeatably
+peekable until accepted; stale/duplicate acceptance fails. No subsequent Complete
+is generated. Engine146, capability155/156, independent matrix157 and
+TCP147/QUIC98 remain open.
 
 ## Feed and event ownership
 
@@ -59,8 +69,27 @@ body allocation. Wrong level in the input phase fails with zero consumed.
 One complete ClientHello stops exactly at its boundary, even with a coalesced
 suffix. No input is retained from the caller.
 
+After flight drain, Finished accepts every header/body partition, using at most
+36 bytes of the existing unborrowed output scratch; it allocates nothing. A wrong
+type consumes its first byte; a wrong length consumes its four-byte header, never
+the declared body. Wrong encryption level consumes zero and fails, including
+empty input at a wrong level. A bad MAC consumes the complete message and reports
+`Finished_Failed`. Correct input with any same-call suffix consumes through
+Finished only, fails `Malformed`, and never publishes Complete: the entire call
+has one encryption level, so that suffix is old-level data. Bindings must split
+input at encryption-level boundaries, retain unconsumed bytes, and handle
+Application-level input themselves.
+
+Successful verification is terminal even while Complete awaits acceptance.
+Subsequent nonempty feed (duplicate Finished, later old-level data or application
+bytes) consumes zero and returns `Terminal/Invalid_State`; it cannot revoke or
+repeat success. Empty terminal feed returns `Terminal/None`. Failed/aborted/
+destroyed feed retains the existing terminal error. Pending pre-completion events
+return zero/Need_Event_Drain; Await_Flight before flight admission returns zero/
+Await_Flight. Neither accepts out-of-order input; resubmit only when eligible.
+
 `Need_Event_Drain` means the pending event must be accepted before further
-progress; feed consumes zero while it is pending. `server_handshake_peek` returns
+progress; pre-completion feed consumes zero while it is pending. `server_handshake_peek` returns
 the same immutable payload/ID until acceptance or teardown. A repeated pending-event peek does not hash, allocate, erase or advance state. `server_handshake_accept(owner, id)` accepts
 exactly one current nonzero ID; stale/duplicate/zero IDs are errors without side
 effects. Feed after failure, abort or destruction consumes zero and returns
@@ -74,7 +103,7 @@ Event kinds reserve these producer/consumer contracts:
 | `Handshake_Bytes` | Exact ordered handshake fragments including message headers, Initial/plaintext or Handshake level; no records/CCS. Copy into transport-owned ordered storage before acceptance. Accepted bytes enter the transcript exactly once. |
 | `Traffic_Secret` | 32 bytes, AES128GCM/SHA256, explicit level and Read/Write relative to the local server. Derive/copy transport protection before acceptance; owner storage is immediately wiped. Key availability alone never authorizes application delivery. |
 | `Peer_Parameters` | Tentative SNI, ALPN **offers** and opaque QUIC parameter presence/bytes from ClientHello. They are neither selected nor authenticated. Copy any needed durable metadata before acceptance. |
-| `Complete` | Reserved for Finished154, after authentication and required output acceptance. No public path emits it before Finished154. |
+| `Complete` | Once after valid client Finished and all required output acceptance; transient state is already erased. Accept before application delivery. |
 | `Fatal` | Stable typed protocol/local error, without sensitive diagnostic payloads or implicit alert/transport handling. |
 
 Every output borrow, including copied event structs, ends at accept/abort/destroy.
@@ -82,8 +111,9 @@ The private producer seam copies at most 2,048 bytes into reusable scratch or
 borrows an immutable pinned certificate fragment. Shared DER is never wiped by
 the owner. Its credential lease stays live through all DER borrows and is
 released exactly once after the flight or during failure/abort/destroy. The seam has no public
-injection API; tests exercise reserved output/secret/completion lifetimes without
-pretending to authenticate a handshake. The flight producer enforces protocol state/order; publishing a Complete test event is not authentication evidence.
+injection API and refuses Complete even internally. Only the Finished consumer
+can publish success after authentication. The flight producer enforces protocol
+state/order.
 Transport acceptance means local storage ownership, not peer acknowledgment.
 
 ## Limits and cleanup
@@ -113,8 +143,11 @@ before Free and drops all stored input views. Short/oversized/error-bearing gran
 are rejected and their full reported extents are wiped/freed. Allocators must
 report valid accessible grant extents and honor Free; arbitrary corrupt allocators
 are outside this contract. Explicit erasure covers owned storage, not all compiler
-registers, stack copies or consumer-owned material. Final success cleanup and
-remaining transcript/client-secret release are Finished154 work.
+registers, stack copies or consumer-owned material. Successful Finished
+verification runs this same full cleanup before publishing
+Complete; only identity, terminal phase, configuration and cumulative statistics
+remain. Destroy also clears allocator/configuration. No resumption/exporter or
+post-handshake authentication state is retained.
 
 Run package lifecycle/fault tests with:
 
@@ -138,7 +171,9 @@ python3 tests/core/crypto/tls/server_flight.py --odin ./odin \
 It encrypts test-only records around public events and drives Go `crypto/tls`
 over `net.Pipe`; no listener/production driver is supplied. Both RSA sizes and
 16 padded certificates exercise split handshake headers, DER and CV, all four
-secret events, and independently authenticated server output. Test-only peer
-application traffic checks derived keys; the native owner still cannot authorize
-application data until Finished154. No OpenSSL/non-Darwin matrix or production
+secret events, and independently authenticated server output. The peer returns
+its actual client Finished through a bounded anonymous pipe;
+the native owner consumes it one byte at a time and must publish Complete before
+the adapter permits bidirectional application exchange. No OpenSSL/non-Darwin
+matrix or production
 server claim follows; those remain157/147 gates.

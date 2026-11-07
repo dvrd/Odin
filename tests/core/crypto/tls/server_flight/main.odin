@@ -7,7 +7,8 @@ import "core:os"
 import "core:time"
 
 main :: proc() {
-	assert(len(os.args) == 5)
+	assert(len(os.args) == 5 || len(os.args) == 6)
+	bad := len(os.args) == 6
 	ch, re := os.read_entire_file(os.args[1], context.allocator); assert(re == nil)
 	defer delete(ch)
 	cp, ce := os.read_entire_file(os.args[2], context.allocator); assert(ce == nil)
@@ -60,8 +61,27 @@ main :: proc() {
 		assert(tls.server_handshake_accept(&o, event.id) == .None)
 	}
 	_, status, e := tls.server_handshake_feed(&o, .Handshake, nil)
-	assert(status == .Await_Client_Finished && e == .None)
+	assert(status == .Need_Input && e == .None)
 	assert(os.write_entire_file(os.args[4], output[:]) == nil)
+	fmt.println("READY")
+	// The independent peer returns its actual Finished over a bounded pipe.
+	finished: [36]u8
+	for at:=0; at<len(finished); {
+		n,re:=os.read(os.stdin,finished[at:]); assert(re==nil && n>0); at+=n
+	}
+	for at in 0 ..< len(finished) {
+		n,st,fe:=tls.server_handshake_feed(&o,.Handshake,finished[at:at+1])
+		assert(n==1)
+		if bad && at==35 {assert(fe==.Finished_Failed && st==.Terminal)} else {
+			assert(fe==.None && st==(.Need_Event_Drain if at==35 else .Need_Input))
+		}
+	}
+	complete,_:=tls.server_handshake_peek(&o)
+	assert(complete.kind==(.Fatal if bad else .Complete))
+	clean,_:=tls.server_handshake_stats(&o); assert(clean.live_bytes==0)
+	assert(tls.server_handshake_accept(&o,complete.id)==.None)
+	none,_:=tls.server_handshake_peek(&o); assert(none.kind==.None)
+	fmt.println("REJECTED" if bad else "COMPLETE")
 	stats, _ := tls.server_handshake_stats(&o)
 	fmt.eprintf(
 		"public flight: owner=%d peak=%d allocations=%d\n",

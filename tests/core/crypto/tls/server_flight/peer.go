@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
@@ -131,6 +132,7 @@ func main() {
 	if len(os.Args) != 5 {
 		panic("peer binary cert key tempdir")
 	}
+	bad := os.Getenv("WEBTOOLS_BAD_FINISHED") == "1"
 	dir := os.Args[4]
 	cert, e := os.ReadFile(os.Args[2])
 	must(e)
@@ -154,6 +156,10 @@ func main() {
 			done <- fmt.Errorf("implicit ALPN")
 			return
 		}
+		if bad {
+			done <- nil
+			return
+		}
 		buf := make([]byte, 6)
 		_, e := io.ReadFull(client, buf)
 		if e != nil {
@@ -175,9 +181,27 @@ func main() {
 	out := filepath.Join(dir, "events.bin")
 	must(os.WriteFile(in, ch, 0600))
 	cmd := exec.Command(os.Args[1], in, os.Args[2], os.Args[3], out)
-	log, e := cmd.CombinedOutput()
-	if e != nil {
-		panic(fmt.Sprintf("engine: %s: %v", log, e))
+	if bad {
+		cmd.Args = append(cmd.Args, "bad")
+	}
+	stdin, e := cmd.StdinPipe()
+	must(e)
+	stdout, e := cmd.StdoutPipe()
+	must(e)
+	var log bytes.Buffer
+	cmd.Stderr = &log
+	must(cmd.Start())
+	defer func() {
+		if cmd.ProcessState == nil {
+			cmd.Process.Kill()
+			cmd.Wait()
+		}
+	}()
+	reader := bufio.NewReader(stdout)
+	ready, e := reader.ReadString('\n')
+	must(e)
+	if ready != "READY\n" {
+		panic("engine not ready")
 	}
 	data, e := os.ReadFile(out)
 	must(e)
@@ -232,6 +256,27 @@ func main() {
 	if kind != 22 || len(finished) != 36 || finished[0] != 20 {
 		panic("client Finished")
 	}
+	if bad {
+		finished[35] ^= 1
+	}
+	_, e = stdin.Write(finished)
+	must(e)
+	complete, e := reader.ReadString('\n')
+	must(e)
+	expected := "COMPLETE\n"
+	if bad {
+		expected = "REJECTED\n"
+	}
+	if complete != expected {
+		panic("incorrect authentication result")
+	}
+	must(stdin.Close())
+	must(cmd.Wait())
+	if bad {
+		must(<-done)
+		fmt.Printf("independent Go altered Finished rejected without Complete PASS; %s", log.String())
+		return
+	}
 	appWrite := protect(secrets[2])
 	appRead := protect(secrets[3])
 	appWrite.send(b, 23, []byte("server"))
@@ -240,5 +285,5 @@ func main() {
 		panic("client application secret")
 	}
 	must(<-done)
-	fmt.Printf("independent Go TLS1.3: certificate/CV/Finished, both HS/app directions, split records PASS; %s", log)
+	fmt.Printf("independent Go TLS1.3: certificate/CV/Finished, native client Finished/Complete, both HS/app directions, split records PASS; %s", log.String())
 }

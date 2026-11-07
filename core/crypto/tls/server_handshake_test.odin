@@ -160,6 +160,7 @@ server_owner_events_order_and_exact_hash :: proc(t: ^testing.T) {
 	owner_test_ready(t,&o,&a,wire)
 	defer server_handshake_destroy(&o)
 	before := transcript_snapshot(&o._transcript)
+	testing.expect_value(t,server_handshake_publish(&o,{kind=.Complete}),.Invalid_Event)
 	bytes := []u8{2,0,0,2,0x12,0x34}
 	testing.expect_value(t,server_handshake_publish(&o,{kind=.Handshake_Bytes,level=.Initial,bytes=bytes}),.None)
 	event,_ := server_handshake_peek(&o)
@@ -193,7 +194,7 @@ server_owner_events_order_and_exact_hash :: proc(t: ^testing.T) {
 @(test)
 server_owner_pending_event_cancellation :: proc(t: ^testing.T) {
 	wire := transmute([]u8)#load("testdata/server_go_client_hello.wire")
-	for kind in ([]Server_Handshake_Event_Kind{.Peer_Parameters,.Handshake_Bytes,.Traffic_Secret,.Complete,.Fatal}) {
+	for kind in ([]Server_Handshake_Event_Kind{.Peer_Parameters,.Handshake_Bytes,.Traffic_Secret,.Fatal}) {
 		for destroy in ([]bool{false,true}) {
 			a := Owner_Test_Audit{backing=context.allocator}; o: Server_Handshake
 			server_handshake_init(&o,SERVER_HANDSHAKE_DEFAULT_CONFIG,owner_test_allocator(&a))
@@ -293,7 +294,7 @@ server_owner_hard_caps_and_identity_exhaustion :: proc(t: ^testing.T) {
 	testing.expect_value(t,stats.requested_bytes,67584)
 	fmt.printf("recordless max CH+scratch: requested=%d peak=%d live=%d bytes, allocations=%d\n",stats.requested_bytes,stats.peak_bytes,stats.live_bytes,stats.allocation_attempts)
 	o._next_id=max(u64)
-	testing.expect_value(t,server_handshake_publish(&o,{kind=.Complete}),.Identity_Exhausted)
+	testing.expect_value(t,server_handshake_publish(&o,{kind=.Handshake_Bytes,bytes=([]u8){2,0,0,0}}),.Identity_Exhausted)
 	_,status,e:=server_handshake_feed(&o,.Initial,wire)
 	testing.expect_value(t,status,.Terminal); testing.expect_value(t,e,.Identity_Exhausted)
 	server_handshake_destroy(&o); owner_test_clean(t,&a)

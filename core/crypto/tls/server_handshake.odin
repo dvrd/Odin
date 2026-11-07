@@ -9,7 +9,7 @@ Server_Handshake_Direction :: enum {Read, Write} // Relative to the local server
 Server_Handshake_Event_Kind :: enum {None, Handshake_Bytes, Traffic_Secret, Peer_Parameters, Complete, Fatal}
 Server_Handshake_Error :: enum {
 	None, Invalid_Config, Invalid_Owner, Invalid_State, Invalid_Event,
-	Wrong_Level, Malformed, Unsupported, Limit, Allocation_Failed, Cancelled, Identity_Exhausted, Credential_Failed, Signing_Failed, Entropy_Unavailable,
+	Wrong_Level, Malformed, Unsupported, Limit, Allocation_Failed, Cancelled, Identity_Exhausted, Credential_Failed, Signing_Failed, Entropy_Unavailable, Finished_Failed,
 }
 Server_Handshake_Status :: enum {Need_Input, Need_Event_Drain, Await_Flight, Await_Client_Finished, Terminal, Invalid_Owner}
 Server_Handshake_Config :: struct {
@@ -40,7 +40,7 @@ Server_Handshake_Stats :: struct {
 	allocation_attempts: int,
 }
 @(private)
-Server_Handshake_Phase :: enum {Uninitialized, Client_Hello, Await_Flight, Await_Client_Finished, Failed, Aborted, Destroyed}
+Server_Handshake_Phase :: enum {Uninitialized, Client_Hello, Await_Flight, Await_Client_Finished, Complete, Failed, Aborted, Destroyed}
 
 // Initialize zeroed storage once, at its final address. No copies, concurrent
 // calls, reentry or field mutation. Destroy does not make storage reusable:
@@ -142,12 +142,15 @@ server_handshake_fail :: proc(owner: ^Server_Handshake, error: Server_Handshake_
 }
 
 // Input borrows end on return. Only consumed bytes have transferred; resubmit
-// the untouched suffix. Client Finished acceptance is a separate producer step.
+// the untouched suffix. Finished input must contain Handshake-level bytes only.
 server_handshake_feed :: proc(owner: ^Server_Handshake, level: Server_Handshake_Level, input: []u8) -> (consumed: int, status: Server_Handshake_Status, error: Server_Handshake_Error) {
 	if !server_handshake_valid(owner) {return 0, .Invalid_Owner, .Invalid_Owner}
 	if owner._phase == .Failed || owner._phase == .Aborted || owner._phase == .Destroyed {return 0, .Terminal, owner._error}
+	if owner._phase == .Complete {
+		return 0, .Terminal, .Invalid_State if len(input) > 0 else .None
+	}
 	if owner._event.kind != .None {return 0, .Need_Event_Drain, .None}
-	if owner._phase == .Await_Client_Finished {return 0, .Await_Client_Finished, .None}
+	if owner._phase == .Await_Client_Finished {return server_handshake_finished_feed(owner, level, input)}
 	if owner._phase == .Await_Flight {return 0, .Await_Flight, .None}
 	if level != .Initial {
 		server_handshake_fail(owner, .Wrong_Level)
@@ -237,7 +240,7 @@ server_handshake_stats :: proc(owner: ^Server_Handshake) -> (Server_Handshake_St
 	return owner._stats, .None
 }
 
-// Internal producer seam for flight153/Finished154. No public caller can
+// Internal producer seam for server flight fragments. No public caller can
 // manufacture success or install keys through the event consumer interface.
 // A borrowed DER chunk must remain pinned by its producer through acceptance
 // or cleanup. The flight producer owns that pin.
@@ -262,8 +265,7 @@ server_handshake_publish :: proc(owner: ^Server_Handshake, source: Server_Handsh
 		if len(event.secret) != 32 || event.level == .Initial || event.cipher != .AES_128_GCM_SHA256 {return .Invalid_Event}
 		copy(owner._secret[:], event.secret)
 		event.secret = owner._secret[:]
-	case .Complete:
-		// Authentication and output-order eligibility belong to producer154.
+	case .Complete: return .Invalid_Event // Only Finished verification can publish success.
 	case: return .Invalid_Event
 	}
 	if !server_handshake_id(owner) {server_handshake_fail(owner, .Identity_Exhausted); return .Identity_Exhausted}
@@ -271,7 +273,6 @@ server_handshake_publish :: proc(owner: ^Server_Handshake, source: Server_Handsh
 	#partial switch event.kind {
 	case .Handshake_Bytes: owner._event = {kind=event.kind, level=event.level, bytes=event.bytes}
 	case .Traffic_Secret: owner._event = {kind=event.kind, level=event.level, direction=event.direction, cipher=event.cipher, secret=event.secret}
-	case .Complete: owner._event = {kind=.Complete}
 	}
 	owner._event.id = owner._next_id
 	return .None
