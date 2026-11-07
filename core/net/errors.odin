@@ -187,7 +187,7 @@ UDP_Recv_Error :: enum i32 {
 	Would_Block,
 	// Interrupted by a signal or other method of cancellation like WSACancelBlockingCall on Windows.
 	Interrupted,
-	// Linux and UDP only: indicates the buffer was too small to receive all data, and the excess is truncated and discarded.
+	// UDP only, on supporting backends: the buffer was too small to receive all data, and the excess is truncated and discarded.
 	Excess_Truncated,
 
 	// An error unable to be categorized in above categories, `last_platform_error` may have more info.

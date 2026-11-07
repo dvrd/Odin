@@ -125,6 +125,11 @@ Socket     :: distinct i64
 TCP_Socket :: distinct Socket
 UDP_Socket :: distinct Socket
 
+// This implementation sends one message including zero bytes and reports
+// truncated receives with copied length and source. This is a stdlib capability,
+// not kernel/runtime certification. Consumers may #defined-check older cores.
+UDP_DATAGRAM_BOUNDARIES_SUPPORTED :: ODIN_OS == .Darwin || ODIN_OS == .Linux
+
 Socket_Protocol :: enum {
 	TCP,
 	UDP,

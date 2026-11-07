@@ -295,7 +295,7 @@ _recv_udp :: proc(udp_sock: UDP_Socket, buf: []byte) -> (int, Endpoint, UDP_Recv
 	}
 	if bytes_read > len(buf) {
 		// NOTE(tetra): The buffer has been filled, with a partial message.
-		return len(buf), {}, .Excess_Truncated
+		return len(buf), _wrap_os_addr(from_addr), .Excess_Truncated
 	}
 	return bytes_read, _wrap_os_addr(from_addr), nil
 }

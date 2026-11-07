@@ -210,8 +210,9 @@ _recv_udp :: proc(skt: UDP_Socket, buf: []byte) -> (bytes_read: int, remote_endp
 	}
 
 	from: posix.sockaddr_storage
-	fromsize := posix.socklen_t(size_of(from))
-	res := posix.recvfrom(posix.FD(skt), raw_data(buf), len(buf), {}, (^posix.sockaddr)(&from), &fromsize)
+	iov := posix.iovec{iov_base = raw_data(buf), iov_len = uint(len(buf))}
+	message := posix.msghdr{msg_name = &from, msg_namelen = posix.socklen_t(size_of(from)), msg_iov = &iov, msg_iovlen = 1}
+	res := posix.recvmsg(posix.FD(skt), &message, {})
 	if res < 0 {
 		err = _udp_recv_error()
 		return
@@ -219,6 +220,7 @@ _recv_udp :: proc(skt: UDP_Socket, buf: []byte) -> (bytes_read: int, remote_endp
 
 	bytes_read = int(res)
 	remote_endpoint = _sockaddr_to_endpoint(&from)
+	if .TRUNC in message.msg_flags {err = .Excess_Truncated}
 	return
 }
 
@@ -241,17 +243,11 @@ _send_tcp :: proc(skt: TCP_Socket, buf: []byte) -> (bytes_written: int, err: TCP
 @(private)
 _send_udp :: proc(skt: UDP_Socket, buf: []byte, to: Endpoint) -> (bytes_written: int, err: UDP_Send_Error) {
 	toaddr := _endpoint_to_sockaddr(to)
-	for bytes_written < len(buf) {
-		limit := min(1<<31, len(buf) - bytes_written)
-		remaining := buf[bytes_written:][:limit]
-		res := posix.sendto(posix.FD(skt), raw_data(remaining), len(remaining), {.NOSIGNAL}, (^posix.sockaddr)(&toaddr), posix.socklen_t(toaddr.ss_len))
-		if res < 0 {
-			err = _udp_send_error()
-			return
-		}
-
-		bytes_written += int(res)
-	}
+	// One call is one datagram, including an empty payload. Never split or
+	// silently omit messages by treating UDP like a stream write loop.
+	res := posix.sendto(posix.FD(skt), raw_data(buf), len(buf), {.NOSIGNAL}, (^posix.sockaddr)(&toaddr), posix.socklen_t(toaddr.ss_len))
+	if res < 0 {return 0, _udp_send_error()}
+	bytes_written = int(res)
 	return
 }
 
