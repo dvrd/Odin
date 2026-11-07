@@ -9,7 +9,7 @@ import "core:time"
 main :: proc() {
 	assert(len(os.args) == 5 || len(os.args) == 6)
 	bad := len(os.args) == 6 && os.args[5] == "bad"
-	select_parameters := len(os.args) == 6 && !bad
+	select_parameters := len(os.args) == 6 && (os.args[5] == "alpn" || os.args[5] == "quic")
 	quic := select_parameters && os.args[5] == "quic"
 	ch, re := os.read_entire_file(os.args[1], context.allocator); assert(re == nil)
 	defer delete(ch)
@@ -31,7 +31,25 @@ main :: proc() {
 		n, _, e := tls.server_handshake_feed(&o, .Initial, ch[at:at + 1])
 		assert(n == 1 && e == .None)
 	}
-	peer, _ := tls.server_handshake_peek(&o); assert(peer.kind == .Peer_Parameters)
+	peer, _ := tls.server_handshake_peek(&o)
+	if peer.kind == .Handshake_Bytes {
+		assert(peer.level==.Initial && len(peer.bytes)<=88)
+		n:=len(peer.bytes); retry_wire:[95]u8
+		retry_wire[0],retry_wire[1]=u8(peer.kind),u8(peer.level)
+		retry_wire[3],retry_wire[4],retry_wire[5],retry_wire[6]=u8(n>>24),u8(n>>16),u8(n>>8),u8(n)
+		copy(retry_wire[7:],peer.bytes)
+		assert(os.write_entire_file(os.args[4],retry_wire[:7+n])==nil)
+		assert(tls.server_handshake_accept(&o,peer.id)==.None)
+		fmt.println("RETRY")
+		length:[4]u8
+		for at:=0;at<4; {n,e:=os.read(os.stdin,length[at:]);assert(e==nil && n>0);at+=n}
+		size:=int(length[0])<<24|int(length[1])<<16|int(length[2])<<8|int(length[3]);assert(size>0 && size<=65536)
+		second:=make([]u8,size);defer delete(second)
+		for at:=0;at<size; {n,e:=os.read(os.stdin,second[at:]);assert(e==nil && n>0);at+=n}
+		for at in 0..<size {n,_,e:=tls.server_handshake_feed(&o,.Initial,second[at:at+1]);assert(n==1 && e==.None)}
+		peer,_=tls.server_handshake_peek(&o)
+	}
+	assert(peer.kind == .Peer_Parameters)
 	if select_parameters {
 		config:=tls.Server_Handshake_Parameters_Config{alpn_protocols=[]string{"opaque\x00\xff","http/1.1","h2","h3"},require_alpn=true}
 		if quic {

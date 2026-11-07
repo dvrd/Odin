@@ -15,7 +15,7 @@ Server_Hello_Codec_Status :: enum {
 	Malformed,
 	Unsupported,
 	Limit,
-	Retry_Required, // X25519 offered without a share; no HRR is produced here.
+	Retry_Required, // Selected group offered without a share; owner may send one HRR.
 }
 
 Server_Client_Hello_Limits :: struct {
@@ -111,6 +111,9 @@ server_client_hello_decode :: proc(wire: []u8, limits := Server_Client_Hello_Lim
 		data := wire[at:at+data_size]; at += data_size
 		valid := true
 		switch kind {
+		case 44: return {}, .Malformed // No stateful cookie was requested in this profile.
+		case 21:
+			for b in data {if b != 0 {return {}, .Malformed}}
 		case 43: hello.versions, valid = server_hello_vector(data, 1, 2, 2)
 		case 10:
 			hello.groups, valid = server_hello_vector(data, 2, 2, 2)
@@ -199,6 +202,7 @@ server_client_hello_decode :: proc(wire: []u8, limits := Server_Client_Hello_Lim
 		length := int(hello_u16(hello.key_shares,n+2)); n += 4
 		if length == 0 || length > len(hello.key_shares)-n {return {}, .Malformed}
 		if group == u16(Named_Group.X25519) && length != 32 {return {}, .Malformed}
+		if group == u16(Named_Group.SECP256R1) && (length != 65 || hello.key_shares[n] != 4) {return {}, .Malformed}
 		for group_cursor < len(hello.groups) && hello_u16(hello.groups,group_cursor) != group {group_cursor += 2}
 		if group_cursor == len(hello.groups) {return {}, .Malformed}
 		group_cursor += 2
@@ -256,20 +260,21 @@ server_hello_psk_valid :: proc(identities, binders: []u8) -> bool {
 server_client_hello_negotiate :: proc(hello: Server_Client_Hello_View) -> (Server_Client_Hello_Selection, Server_Hello_Codec_Status) {
 	if !server_hello_offer_contains(hello.versions, VERSION_TLS_1_3) ||
 	   !server_hello_offer_contains(hello.cipher_suites,u16(Cipher_Suite.AES_128_GCM_SHA256)) ||
-	   !server_hello_offer_contains(hello.groups,u16(Named_Group.X25519)) ||
 	   !server_hello_offer_contains(hello.signature_algorithms,u16(Signature_Scheme.RSA_PSS_RSAE_SHA256)) {return {}, .Unsupported}
-	selection := Server_Client_Hello_Selection{version=VERSION_TLS_1_3, cipher=.AES_128_GCM_SHA256, group=.X25519, signature=.RSA_PSS_RSAE_SHA256}
+	group: Named_Group
+	if server_hello_offer_contains(hello.groups,u16(Named_Group.X25519)) {group=.X25519} else if server_hello_offer_contains(hello.groups,u16(Named_Group.SECP256R1)) {group=.SECP256R1} else {return {},.Unsupported}
+	selection := Server_Client_Hello_Selection{version=VERSION_TLS_1_3, cipher=.AES_128_GCM_SHA256, group=group, signature=.RSA_PSS_RSAE_SHA256}
 	for n := 0; n < len(hello.key_shares); {
 		if len(hello.key_shares)-n < 4 {return {}, .Malformed}
 		group := hello_u16(hello.key_shares,n)
 		length := int(hello_u16(hello.key_shares,n+2)); n += 4
 		if length > len(hello.key_shares)-n {return {}, .Malformed}
-		if group == u16(Named_Group.X25519) {
-			if length != 32 {return {}, .Malformed}
+		if group == u16(selection.group) {
+			if selection.group == .X25519 && length != 32 || selection.group == .SECP256R1 && (length != 65 || hello.key_shares[n] != 4) {return {}, .Malformed}
 			selection.peer_key_share = hello.key_shares[n:n+length]
 			return selection, .None
 		}
 		n += length
 	}
-	return {}, .Retry_Required
+	return selection, .Retry_Required
 }

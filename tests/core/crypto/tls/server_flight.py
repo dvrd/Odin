@@ -30,5 +30,17 @@ def main():
             output=run([peer,binary,fixtures/'rsa2048-valid.pem',fixtures/'rsa2048.pem',temp],env=parameter_env)
             report['cases'].append({'name':mode,'result':'pass','output':output.strip()})
             print(mode+': '+output.strip(),flush=True)
+        for mode in ['p256','retry','retry-p256']:
+            curve_env=env.copy();curve_env['WEBTOOLS_CURVE']=mode
+            output=run([peer,binary,fixtures/'rsa2048-valid.pem',fixtures/'rsa2048.pem',temp],env=curve_env)
+            report['cases'].append({'name':mode,'result':'pass','output':output.strip()})
+            print(mode+': '+output.strip(),flush=True)
+        for mode in ['retry-opaque','retry-bad-finished']:
+            extra_env=env.copy();extra_env['WEBTOOLS_CURVE']='retry'
+            if mode=='retry-opaque':extra_env['WEBTOOLS_PARAMETERS']='opaque'
+            else:extra_env['WEBTOOLS_BAD_FINISHED']='1'
+            output=run([peer,binary,fixtures/'rsa2048-valid.pem',fixtures/'rsa2048.pem',temp],env=extra_env)
+            report['cases'].append({'name':mode,'result':'pass','output':output.strip()})
+            print(mode+': '+output.strip(),flush=True)
     pathlib.Path(a.report).write_text(json.dumps(report,indent=2)+'\n')
 if __name__=='__main__': main()

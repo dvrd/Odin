@@ -3,17 +3,18 @@ handshake message. `server_client_hello_size` inspects up to the first four byte
 and returns `Need_Input` for an incomplete header; it permits a coalesced suffix.
 `server_client_hello_decode` requires exactly the declared message and returns
 `Malformed` for any truncated or trailing bytes. Neither routine retains state.
-The future recordless owner must accumulate/copy split input and submit only the
+The recordless owner must accumulate/copy split input and submit only the
 first declared message, retaining its coalesced suffix for the next state.
 
 `Server_Client_Hello_View` and `Server_Client_Hello_Selection` borrow the caller's
 immutable message storage. No allocation, credentials, random generation,
-cryptography, clock, transport, or callbacks are involved. On any error the
-returned view/selection is empty. Pass only a successfully decoded view to
+cryptography, clock, transport, or callbacks are involved. On error the returned view/selection is empty, except that Retry_Required
+returns the supported version/cipher/group/signature with no peer share. Pass only a successfully decoded view to
 `server_client_hello_negotiate`; modifying its fields bypasses decoder validation.
 
 The decoder validates legacy version, session ID (at most 32 bytes), the single
-null compression method, all recognized vector framing, extension uniqueness,
+null compression method, zero padding, unsolicited-cookie rejection, recognized
+vector framing, extension uniqueness,
 key-share/group membership and order, and the required extension relationships.
 Unknown/GREASE extension bodies and unknown identifiers remain opaque and do not
 prevent a compatible offer from being selected. ALPN values are opaque bytes,
@@ -29,12 +30,14 @@ checks rescan at most 128 prior entries; key-share validation uses a monotonical
 advancing group cursor. Other offer vectors are scanned linearly within the wire
 cap. `Limit` distinguishes these refusals from malformed wire syntax.
 
-Selection is TLS 1.3 / AES-128-GCM-SHA256 / X25519 / rsa_pss_rsae_sha256 and only
-succeeds when all are offered with a 32-byte share. X25519 with an empty/other
-valid share list returns `Retry_Required`; no HRR is produced. Missing compatible
-offers return `Unsupported`. This restricted profile does not meet all baseline
-TLS implementation requirements (notably P-256 and other signature schemes).
-The caller must perform actual X25519 point/shared-secret validation.
+Selection is TLS1.3/AES128GCM-SHA256/rsa_pss_rsae_sha256 with X25519 preferred
+before P-256. Missing a share for the preferred mutually supported group returns
+Retry_Required and a borrowed group selection. The codec produces no HRR;
+the recordless owner drives the single retry documented in SERVER_RETRY.md.
+X25519 shares require32 bytes; P-256 requires65 and uncompressed prefix4. Native
+ECDH validates points/shared secrets during the flight. Missing compatible offers
+return Unsupported. ECDSA credential ownership/signing and other capabilities
+remain separate before any full TLS baseline-compliance claim.
 
 PSK identities, binders, modes and early-data offers are strictly framed; PSK must
 be last, binder/identity counts must match, PSK requires modes, and early data

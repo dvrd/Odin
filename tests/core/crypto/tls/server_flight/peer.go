@@ -138,6 +138,17 @@ func main() {
 		return
 	}
 	selected := os.Getenv("WEBTOOLS_PARAMETERS")
+	curveMode := os.Getenv("WEBTOOLS_CURVE")
+	curves := []tls.CurveID{tls.X25519}
+	if curveMode == "p256" {
+		curves = []tls.CurveID{tls.CurveP256}
+	}
+	if curveMode == "retry" {
+		curves = []tls.CurveID{tls.SecP256r1MLKEM768, tls.X25519, tls.CurveP256}
+	}
+	if curveMode == "retry-p256" {
+		curves = []tls.CurveID{tls.SecP384r1MLKEM1024, tls.CurveP256}
+	}
 	names := []string{"h2", "http/1.1"}
 	if selected == "opaque" {
 		names = []string{"opaque\x00\xff", "h2"}
@@ -154,7 +165,7 @@ func main() {
 	defer b.Close()
 	must(a.SetDeadline(time.Now().Add(15 * time.Second)))
 	must(b.SetDeadline(time.Now().Add(15 * time.Second)))
-	client := tls.Client(a, &tls.Config{MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519}, ServerName: "synthetic.invalid", RootCAs: roots, NextProtos: names, Time: func() time.Time { return time.Unix(1790000000, 0) }})
+	client := tls.Client(a, &tls.Config{MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13, CurvePreferences: curves, ServerName: "synthetic.invalid", RootCAs: roots, NextProtos: names, Time: func() time.Time { return time.Unix(1790000000, 0) }})
 	done := make(chan error, 1)
 	go func() {
 		if e := client.Handshake(); e != nil {
@@ -201,6 +212,8 @@ func main() {
 		cmd.Args = append(cmd.Args, "bad")
 	} else if selected != "" {
 		cmd.Args = append(cmd.Args, "alpn")
+	} else if curveMode != "" {
+		cmd.Args = append(cmd.Args, curveMode)
 	}
 	stdin, e := cmd.StdinPipe()
 	must(e)
@@ -218,6 +231,36 @@ func main() {
 	reader := bufio.NewReader(stdout)
 	ready, e := reader.ReadString('\n')
 	must(e)
+	expectRetry := curveMode == "retry" || curveMode == "retry-p256"
+	if ready == "RETRY\n" {
+		if !expectRetry {
+			panic("unexpected retry")
+		}
+		r, e := os.ReadFile(out)
+		must(e)
+		if len(r) < 7 || r[0] != 1 || r[1] != 0 || int(binary.BigEndian.Uint32(r[3:7])) != len(r)-7 {
+			panic("retry event")
+		}
+		writeRecord(b, 22, r[7:])
+		var second []byte
+		for {
+			kind, second = readRecord(b)
+			if kind != 20 {
+				break
+			}
+		}
+		if kind != 22 || len(second) > 65536 {
+			panic("second hello")
+		}
+		header := make([]byte, 4)
+		binary.BigEndian.PutUint32(header, uint32(len(second)))
+		_, e = stdin.Write(append(header, second...))
+		must(e)
+		ready, e = reader.ReadString('\n')
+		must(e)
+	} else if expectRetry {
+		panic("missing retry")
+	}
 	if ready != "READY\n" {
 		panic("engine not ready")
 	}

@@ -9,16 +9,18 @@ After destruction, use fresh zeroed storage for a new lifetime. Event IDs are
 scoped to that owner lifetime; do not use one owner's IDs with another owner.
 No callback, executor, socket, TLS record or ambient clock is stored here.
 Server parameter policy/selection and its binding acceptance hook are documented
-in [SERVER_PARAMETERS.md](SERVER_PARAMETERS.md).
+in [SERVER_PARAMETERS.md](SERVER_PARAMETERS.md). The P-256/single-retry lifecycle
+and its additional transient memory are in [SERVER_RETRY.md](SERVER_RETRY.md).
 
-After assembling one ClientHello, accept its tentative `Peer_Parameters`, then
+After assembling the final ClientHello (including a second one if retry was
+required), accept its tentative `Peer_Parameters`, then
 call `server_handshake_start_flight(owner, store, admission_time)`. The host keeps
 the store alive through owner teardown. This acquires one immutable credential
 lease and checks leaf validity/KU/EKU/critical extensions at the explicit time.
 Publication must establish the host's chain/identity policy; admission does not
 verify ancestry, trust or hostname. Rotation/close cannot revoke this lease.
 
-The restricted profile is TLS1.3/AES128GCM-SHA256/X25519 with RSA-PSS-SHA256
+The restricted profile is TLS1.3/AES128GCM-SHA256 with X25519 or P-256 and RSA-PSS-SHA256
 CertificateVerify and RSA 2048–4096 credentials. Each transmitted certificate's
 parsed signature metadata must match `signature_algorithms_cert`, falling back
 to `signature_algorithms` only when absent. This first chain policy supports
@@ -26,7 +28,8 @@ RSA PKCS1 SHA256/384/512 signatures only, including roots: other signatures are
 `Unsupported`, even when X509 can parse them. It never assumes a compatible
 chain from an RSA leaf. No key or PEM is copied/parsed per handshake.
 
-There is no HRR or PSK/0-RTT selection. Offers requiring retry fail Unsupported.
+One key-share HRR is supported; PSK/0-RTT is never selected. Retry state, CH2
+invariants and zero-cookie policy are in SERVER_RETRY.md.
 ALPN and mode-specific opaque QUIC parameters use an explicit pending-event
 selection/acceptance API; see SERVER_PARAMETERS.md. Default callers keep optional
 TCP/no ALPN. A QUIC binding must validate semantic parameters before selection;
@@ -59,7 +62,7 @@ as authenticated until Complete acceptance wipes/frees their separate grant.
 Copy required durable state and accept
 that event before the binding delivers application data. Complete is repeatably
 peekable until accepted; stale/duplicate acceptance fails. No subsequent Complete
-is generated. Engine146, capability155, independent matrix157 and
+is generated. Engine146, independent matrix157 and
 TCP147/QUIC98 remain open.
 
 ## Feed and event ownership
@@ -134,10 +137,11 @@ credential owner independently caps 16 certificates and 1 MiB summed DER; wire
 overhead is additional. No full Certificate message/flight is concatenated.
 
 Measured Darwin arm64 fixed owner: **1,224 bytes**; event value: **136 bytes**.
-Default optional TCP/no ALPN retains the two-grant **67,584-byte** maximum.
+Without retry, optional TCP/no ALPN retains the two-grant **67,584-byte** maximum.
 Selected parameters add one at-most **2,303-byte** grant retained through pending
-Complete; the measured maximum overlapping grants are **69,887 bytes**, three
-allocations. See SERVER_PARAMETERS.md for exact parameter bounds/lifetimes.
+Complete; the measured maximum overlapping grants without retry is **69,887 bytes**,
+three allocations. Retry can retain two complete hellos plus scratch: **133,120
+bytes**, three grants; see SERVER_RETRY.md. See SERVER_PARAMETERS.md for exact parameter bounds/lifetimes.
 `server_handshake_stats` reports cumulative requested
 bytes/attempts and peak/live **accepted** grants, excluding caller-owned fixed
 storage, shared DER, allocator metadata and rejected abnormal grants. The audit

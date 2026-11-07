@@ -40,7 +40,7 @@ Server_Handshake_Stats :: struct {
 	allocation_attempts: int,
 }
 @(private)
-Server_Handshake_Phase :: enum {Uninitialized, Client_Hello, Await_Flight, Await_Client_Finished, Complete, Failed, Aborted, Destroyed}
+Server_Handshake_Phase :: enum {Uninitialized, Client_Hello, Retry_Client_Hello, Await_Flight, Await_Client_Finished, Complete, Failed, Aborted, Destroyed}
 
 // Initialize zeroed storage once, at its final address. No copies, concurrent
 // calls, reentry or field mutation. Destroy does not make storage reusable:
@@ -136,6 +136,8 @@ server_handshake_id :: proc(owner: ^Server_Handshake) -> bool {
 }
 @(private)
 server_handshake_fail :: proc(owner: ^Server_Handshake, error: Server_Handshake_Error) {
+	// A producer may already have published failure. Preserve that borrow/ID.
+	if owner._phase == .Failed {return}
 	server_handshake_cleanup(owner)
 	owner._phase, owner._error = .Failed, error
 	if server_handshake_id(owner) {
@@ -187,7 +189,14 @@ server_handshake_feed :: proc(owner: ^Server_Handshake, level: Server_Handshake_
 	hello, decoded := server_client_hello_decode(owner._input, {owner._config.max_client_hello_bytes, owner._config.max_extensions})
 	selection: Server_Client_Hello_Selection
 	if decoded == .None {selection, decoded = server_client_hello_negotiate(hello)}
-	if decoded != .None {
+	retry := owner._phase == .Retry_Client_Hello
+	if retry {
+		if decoded != .None || selection.group != owner._selection.group || !server_retry_invariants(owner._hello,hello,owner._selection.group) {
+			server_handshake_fail(owner,.Malformed); return consumed,.Terminal,.Malformed
+		}
+		server_retry_clear(owner)
+	}
+	if decoded != .None && decoded != .Retry_Required {
 		e := Server_Handshake_Error.Unsupported
 		if decoded == .Malformed {e = .Malformed}
 		if decoded == .Limit {e = .Limit}
@@ -196,6 +205,11 @@ server_handshake_feed :: proc(owner: ^Server_Handshake, level: Server_Handshake_
 	owner._hello, owner._selection = hello, selection
 	transcript_update(&owner._transcript, owner._input)
 	owner._phase = .Await_Flight
+	if decoded == .Retry_Required {
+		e := server_retry_begin(owner)
+		if e != .None {server_handshake_fail(owner,e); return consumed,.Terminal,e}
+		return consumed,.Need_Event_Drain,.None
+	}
 	if !server_handshake_id(owner) {
 		server_handshake_fail(owner, .Identity_Exhausted); return consumed, .Terminal, .Identity_Exhausted
 	}
@@ -216,8 +230,10 @@ server_handshake_accept :: proc(owner: ^Server_Handshake, id: u64) -> Server_Han
 	if !server_handshake_valid(owner) {return .Invalid_Owner}
 	if id == 0 || owner._event.kind == .None || id != owner._event.id {return .Invalid_Event}
 	if owner._event.kind == .Complete {server_parameters_clear(owner)}
+	retry := server_retry_active(owner) && owner._event.kind == .Handshake_Bytes
 	if owner._event.kind == .Handshake_Bytes {transcript_update(&owner._transcript, owner._event.bytes)}
 	server_handshake_clear_event(owner)
+	if retry {owner._phase = .Retry_Client_Hello}
 	if owner._flight.stage == .End {_ = server_flight_next(owner)}
 	return .None
 }

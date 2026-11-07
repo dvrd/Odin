@@ -108,7 +108,8 @@ and [RFC 8448](https://www.rfc-editor.org/rfc/rfc8448).
 The [bounded recordless owner](SERVER_HANDSHAKE.md) assembles ClientHello,
 admits a pinned RSA credential, emits the server flight and traffic secrets,
 and authenticates client Finished before publishing Complete. It supports the
-restricted TLS1.3/X25519/AES128GCM/RSA-PSS profile; no ALPN selection, HRR,
+restricted TLS1.3/X25519-or-P256/AES128GCM/RSA-PSS profile with explicit ALPN/
+opaque QUIC parameter handoff and one key-share retry (SERVER_RETRY.md); no
 resumption, client certificates or production TCP/QUIC binding is provided.
 Existing client APIs and behavior are unchanged. See the contract for explicit
 input boundaries, transient erasure and event acceptance requirements.

@@ -59,9 +59,11 @@ or authenticated query. Other handshake transients/secrets are already erased
 before Complete is published. Repeated query/peek never allocates or changes data.
 
 Darwin arm64 measurements: fixed owner1,224 bytes (previously1,136), event136;
-parameter storage at most2,303 bytes (255+1,024+1,024). Maximum accepted overlapping
+parameter storage at most2,303 bytes (255+1,024+1,024). Without retry, maximum accepted overlapping
 grants measured69,887 bytes (65,536 ClientHello+2,303 selections+2,048 scratch),
 three allocations. Optional no-ALPN TCP retains two grants/67,584-byte maximum.
+A prior key-share retry temporarily retains both hellos, separately bounded in
+SERVER_RETRY.md (133,120 bytes); CH1 is erased before parameter selection.
 The retained selection grant is counted by stats until Complete acceptance;
 then live bytes return to zero. Full reported allocator grants are erased before
 Free, including rejected short/oversized/error-bearing grants. These exclude
@@ -74,7 +76,7 @@ recordless exchange: fragmented handshake bytes, both opaque parameter blobs,
 four matching directional secrets and actual client Finished/native Complete.
 The QUIC fixture's deliberately opaque test bytes are not semantic validation of
 transport parameters. It implements no packets, recovery, application transport,
-TCP driver or HTTP versions. Engine146, P-256/HRR155, independent matrix157,
+TCP driver or HTTP versions. Engine146, independent matrix157,
 ECDSA158 and bindings147/98 remain separate open gates.
 
 References: [RFC7301 section3.2](https://www.rfc-editor.org/rfc/rfc7301.html#section-3.2),

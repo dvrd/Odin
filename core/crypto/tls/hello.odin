@@ -31,6 +31,7 @@ Cipher_Suite :: enum u16 {
 }
 
 Named_Group :: enum u16 {
+	SECP256R1 = 0x0017,
 	X25519 = 0x001d,
 }
 

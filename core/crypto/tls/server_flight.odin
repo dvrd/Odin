@@ -1,7 +1,7 @@
 package tls
 
 import "core:crypto"
-import "core:crypto/x25519"
+import "core:crypto/ecdh"
 import "core:crypto/x509"
 import "core:time"
 import credential_store "credentials/store"
@@ -9,6 +9,7 @@ import credential_store "credentials/store"
 @(private)
 Server_Flight_Stage :: enum {
 	None,
+	Retry_Wait,
 	Hello,
 	Handshake_Write,
 	Handshake_Read,
@@ -30,7 +31,10 @@ Server_Flight :: struct {
 	lease:                                   credential_store.Lease,
 	count, index, offset, certificate_bytes: int,
 	handshake:                               Handshake_Secrets,
-	application:                             Application_Secrets,
+	using transient: struct #raw_union {
+		application: Application_Secrets,
+		retry: Server_Retry,
+	},
 	client_finished_secret:                  [32]u8,
 }
 
@@ -108,6 +112,7 @@ server_flight_certificate_scheme :: proc(algorithm: x509.Signature_Algorithm) ->
 }
 @(private)
 server_flight_cleanup :: proc(owner: ^Server_Handshake) {
+	if server_retry_active(owner) {server_retry_clear(owner)}
 	if owner._flight.store != nil {
 		_ = credential_store.release(owner._flight.store, &owner._flight.lease)
 	}
@@ -154,16 +159,18 @@ server_flight_secret :: proc(
 server_flight_next :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 	f := &owner._flight
 	switch f.stage {
-	case .None:
+	case .None, .Retry_Wait:
 		return .None
 	case .Hello:
 		if !crypto.HAS_RAND_BYTES {
 			return .Entropy_Unavailable
 		}
-		private, random: [32]u8
-		defer crypto.zero_explicit(&private, size_of(private))
-		crypto.rand_bytes(private[:]); crypto.rand_bytes(random[:])
-		return server_flight_prepare_hello(owner, private, random)
+		private: ecdh.Private_Key
+		defer ecdh.private_key_clear(&private)
+		curve := ecdh.Curve.X25519 if owner._selection.group == .X25519 else .SECP256R1
+		if !ecdh.private_key_generate(&private, curve) {return .Entropy_Unavailable}
+		random: [32]u8; crypto.rand_bytes(random[:])
+		return server_flight_prepare_ecdh(owner, &private, random)
 	case .Handshake_Write:
 		f.stage = .Handshake_Read
 		return server_flight_secret(owner, f.handshake.server_traffic_secret[:], .Write)
@@ -250,50 +257,59 @@ server_flight_next :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 	}
 	unreachable()
 }
+// Keep the X25519 wrapper used by deterministic fixtures.
 @(private)
 server_flight_hello :: proc(dst: []u8, session: []u8, public, random: [32]u8) -> int {
+	pub:=public
+	return server_flight_group_hello(dst, session, .X25519, pub[:], random)
+}
+@(private)
+server_flight_group_hello :: proc(dst: []u8, session: []u8, group: Named_Group, public: []u8, random: [32]u8) -> int {
 	at := 4
 	hello_put_u16(dst, &at, 0x0303)
-	for b, i in random {dst[at + i] = b}; at += 32
+	for b,i in random {dst[at+i]=b}; at += 32
 	dst[at] = u8(len(session)); at += 1; copy(dst[at:], session); at += len(session)
 	hello_put_u16(dst, &at, 0x1301); dst[at] = 0; at += 1
-	hello_put_u16(dst, &at, 46)
+	hello_put_u16(dst, &at, u16(14+len(public)))
 	hello_put_u16(dst, &at, 43); hello_put_u16(dst, &at, 2); hello_put_u16(dst, &at, 0x0304)
-	hello_put_u16(dst, &at, 51); hello_put_u16(dst, &at, 36); hello_put_u16(dst, &at, 0x001d)
-	hello_put_u16(dst, &at, 32)
-	for b, i in public {dst[at + i] = b}; at += 32
+	hello_put_u16(dst, &at, 51); hello_put_u16(dst, &at, u16(4+len(public))); hello_put_u16(dst, &at, u16(group))
+	hello_put_u16(dst, &at, u16(len(public)))
+	copy(dst[at:],public); at += len(public)
 	dst[0] = 2; server_flight_put24(dst[1:4], at - 4)
 	return at
 }
 
-// Private deterministic seam; production calls it only with OS entropy.
+// Private deterministic seam; production uses OS-generated keys through the
+// pointer API, never a by-value ECDH union or a persistent per-owner key.
 @(private)
-server_flight_prepare_hello :: proc(
-	owner: ^Server_Handshake,
-	private_key, random: [32]u8,
-) -> Server_Handshake_Error {
+server_flight_prepare_hello :: proc(owner: ^Server_Handshake, private_key, random: [32]u8) -> Server_Handshake_Error {
+	private: ecdh.Private_Key; defer ecdh.private_key_clear(&private)
+	curve := ecdh.Curve.X25519 if owner._selection.group == .X25519 else .SECP256R1
+	key:=private_key; defer crypto.zero_explicit(&key,size_of(key))
+	if !ecdh.private_key_set_bytes(&private,curve,key[:]) {return .Malformed}
+	return server_flight_prepare_ecdh(owner,&private,random)
+}
+@(private)
+server_flight_prepare_ecdh :: proc(owner: ^Server_Handshake, private: ^ecdh.Private_Key, random: [32]u8) -> Server_Handshake_Error {
 	f := &owner._flight
-	shared, public: [32]u8
-	private := private_key
-	defer crypto.zero_explicit(&private, size_of(private))
-	defer crypto.zero_explicit(&shared, size_of(shared))
-	x25519.scalarmult_basepoint(public[:], private[:])
-	x25519.scalarmult(shared[:], private[:], owner._selection.peer_key_share)
-	// Stage the hash through SH; the live transcript is committed on accept.
-	wire: [122]u8
-	n := server_flight_hello(wire[:], owner._hello.session_id, public, random)
-	staged := owner._transcript; transcript_update(&staged, wire[:n])
-	secrets, e := handshake_secrets_derive_from_hash(shared, transcript_snapshot(&staged))
-	defer crypto.zero_explicit(&secrets, size_of(secrets))
-	if e != .None {
-		return .Malformed
-	}
-	f.handshake = secrets
-	e2 := server_flight_bytes(owner, transmute([]u8)wire[:n], true)
-	if e2 != .None {
-		return e2
-	}
+	shared: [32]u8; public: [65]u8
+	defer crypto.zero_explicit(&shared,size_of(shared))
+	peer: ecdh.Public_Key; defer ecdh.public_key_clear(&peer)
+	curve := ecdh.Curve.X25519 if owner._selection.group == .X25519 else .SECP256R1
+	if !ecdh.public_key_set_bytes(&peer,curve,owner._selection.peer_key_share) ||
+	   !ecdh.ecdh(private,&peer,shared[:]) {return .Malformed}
+	size := 32 if curve == .X25519 else 65
+	ecdh.private_key_public_bytes(private,public[:size])
+	wire: [155]u8
+	n := server_flight_group_hello(wire[:],owner._hello.session_id,owner._selection.group,public[:size],random)
+	staged := owner._transcript; transcript_update(&staged,wire[:n])
+	secrets,e := handshake_secrets_derive_from_hash(shared,transcript_snapshot(&staged))
+	defer crypto.zero_explicit(&secrets,size_of(secrets))
+	if e != .None {return .Malformed}
+	f.handshake=secrets
+	e2:=server_flight_bytes(owner,transmute([]u8)wire[:n],true)
+	if e2 != .None {return e2}
 	server_handshake_release_input(owner)
-	f.stage = .Handshake_Write
+	f.stage=.Handshake_Write
 	return .None
 }
