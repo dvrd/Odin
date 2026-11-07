@@ -3,7 +3,6 @@ package tls
 import "core:crypto"
 import "core:crypto/hkdf"
 import "core:crypto/hmac"
-import "core:crypto/sha2"
 
 // Handshake key derivation
 
@@ -74,6 +73,22 @@ handshake_secrets_derive :: proc(
 		return {}, .Invalid_Server_Hello
 	}
 
+	t: Handshake_Transcript
+	transcript_init(&t)
+	transcript_update(&t, transcript_prefix)
+	transcript_update(&t, client_hello)
+	transcript_update(&t, server_hello)
+	return handshake_secrets_derive_from_hash(shared_secret, transcript_snapshot(&t))
+}
+
+// The caller has validated message framing/order. Hash CH through SH inclusive,
+// with the synthetic message_hash prefix when retry was accepted. Returned
+// client/server directions are protocol roles, independent of the local role.
+@(private)
+handshake_secrets_derive_from_hash :: proc(
+	shared_secret: [32]u8,
+	transcript_hash: [32]u8,
+) -> (secrets: Handshake_Secrets, err: Key_Schedule_Error) {
 	shared := shared_secret
 	defer crypto.zero_explicit(&shared, size_of(shared))
 	if crypto.is_zero_constant_time(shared[:]) == 1 {
@@ -86,18 +101,11 @@ handshake_secrets_derive :: proc(
 	defer crypto.zero_explicit(&derived_secret, size_of(derived_secret))
 	// With no PSK the IKM is Hash.length zero bytes, not an empty string.
 	hkdf.extract(.SHA256, zero[:], zero[:], early_secret[:])
-	empty_hash, transcript_hash: [32]u8
-	hash_context: sha2.Context_256
-	sha2.init_256(&hash_context)
-	sha2.final(&hash_context, empty_hash[:])
+	empty_hash := transcript_empty_hash()
 	key_schedule_expand_label(early_secret[:], "derived", empty_hash[:], derived_secret[:])
 	hkdf.extract(.SHA256, derived_secret[:], shared[:], secrets.handshake_secret[:])
-	sha2.init_256(&hash_context)
-	sha2.update(&hash_context, transcript_prefix)
-	sha2.update(&hash_context, client_hello)
-	sha2.update(&hash_context, server_hello)
-	sha2.final(&hash_context, transcript_hash[:])
-	handshake_traffic_secrets_derive(&secrets, transcript_hash[:])
+	hash := transcript_hash
+	handshake_traffic_secrets_derive(&secrets, hash[:])
 	return secrets, .None
 }
 
@@ -242,10 +250,8 @@ application_secrets_derive :: proc(
 	defer crypto.zero_explicit(&secret, size_of(secret))
 	derived: [32]u8
 	defer crypto.zero_explicit(&derived, size_of(derived))
-	empty_hash, zero: [32]u8
-	ctx: sha2.Context_256
-	sha2.init_256(&ctx)
-	sha2.final(&ctx, empty_hash[:])
+	zero: [32]u8
+	empty_hash := transcript_empty_hash()
 	finished_expand(secret[:], "derived", empty_hash[:], derived[:])
 	hkdf.extract(.SHA256, derived[:], zero[:], secrets.master_secret[:])
 	hash := server_finished_transcript_hash

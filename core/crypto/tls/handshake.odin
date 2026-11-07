@@ -220,11 +220,11 @@ handshake_server_flight_read :: proc(
 }
 
 handshake_server_flight_verify :: proc(conn: ^Conn, flight: []u8) -> ([32]u8, Handshake_Error) {
-	transcript: sha2.Context_256
-	sha2.init_256(&transcript)
-	sha2.update(&transcript, conn.retry_transcript[:conn.retry_transcript_size])
-	sha2.update(&transcript, handshake_effective_client_hello(conn))
-	sha2.update(&transcript, conn.server_hello[:conn.server_hello_size])
+	transcript: Handshake_Transcript
+	transcript_init(&transcript)
+	transcript_update(&transcript, conn.retry_transcript[:conn.retry_transcript_size])
+	transcript_update(&transcript, handshake_effective_client_hello(conn))
+	transcript_update(&transcript, conn.server_hello[:conn.server_hello_size])
 	at := 0
 	encrypted_extensions, message_err := handshake_next_message(flight, &at, .Encrypted_Extensions)
 	if message_err.kind != .None {
@@ -234,7 +234,7 @@ handshake_server_flight_verify :: proc(conn: ^Conn, flight: []u8) -> ([32]u8, Ha
 	selected, extension_error := encrypted_extensions_decode(encrypted_extensions, conn.config.server_name, conn.config.alpn_protocols)
 	if extension_error.kind != .None {return {},handshake_fail(conn,extension_error)}
 
-	sha2.update(&transcript, encrypted_extensions)
+	transcript_update(&transcript, encrypted_extensions)
 	if cert_error := handshake_flight_certificates_verify(conn, flight, &at, &transcript); cert_error.kind != .None do return {}, cert_error
 	hash, finished_error := handshake_flight_finished_verify(conn, flight, &at, &transcript)
 	if finished_error.kind != .None {return {},finished_error}
@@ -271,7 +271,7 @@ handshake_flight_certificates_verify :: proc(
 		return handshake_fail(conn, {kind = .Authentication_Failed, authentication = err})
 	}
 
-	sha2.update(transcript, certificate)
+	transcript_update(transcript, certificate)
 	return handshake_flight_signature_verify(conn, &certs, flight, at, transcript)
 }
 
@@ -292,13 +292,13 @@ handshake_flight_signature_verify :: proc(
 	}
 
 	transcript_hash: [32]u8
-	sha2.final(transcript, transcript_hash[:], finalize_clone = true)
+	transcript_hash = transcript_snapshot(transcript)
 	if err := verify_server_certificate_signature(certs, certificate_verify, transcript_hash);
 	   err.kind != .None {
 		return handshake_fail(conn, {kind = .Authentication_Failed, authentication = err})
 	}
 
-	sha2.update(transcript, certificate_verify)
+	transcript_update(transcript, certificate_verify)
 	return {}
 }
 
@@ -321,7 +321,7 @@ handshake_flight_finished_verify :: proc(
 		return {}, handshake_fail(conn, {kind = .Unexpected_Handshake_Message})
 	}
 
-	sha2.final(transcript, transcript_hash[:], finalize_clone = true)
+	transcript_hash = transcript_snapshot(transcript)
 	if err := finished_verify(
 		finished_message,
 		conn.handshake_secrets.server_traffic_secret,
@@ -330,8 +330,8 @@ handshake_flight_finished_verify :: proc(
 		return {}, handshake_fail(conn, {kind = .Finished_Failed, finished = err})
 	}
 
-	sha2.update(transcript, finished_message)
-	sha2.final(transcript, transcript_hash[:], finalize_clone = true)
+	transcript_update(transcript, finished_message)
+	transcript_hash = transcript_snapshot(transcript)
 	return transcript_hash, {}
 }
 
@@ -1076,12 +1076,11 @@ client_hello_retry_prepare :: proc(conn: ^Conn, retry: []u8, cookie: []u8) -> Se
 }
 
 client_hello_retry_transcript_prepare :: proc(conn: ^Conn, first, retry: []u8) {
-	conn.retry_transcript[0] = 254 // message_hash
-	retry_put_u24(conn.retry_transcript[:], 1, 32)
-	hash: sha2.Context_256
-	sha2.init_256(&hash)
-	sha2.update(&hash, first)
-	sha2.final(&hash, conn.retry_transcript[4:36])
+	t: Handshake_Transcript
+	transcript_init(&t)
+	transcript_update(&t, first)
+	message := transcript_message_hash(transcript_snapshot(&t))
+	copy(conn.retry_transcript[:36], message[:])
 	copy(conn.retry_transcript[36:], retry)
 	conn.retry_transcript_size = 36 + len(retry)
 }

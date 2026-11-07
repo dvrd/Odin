@@ -141,12 +141,7 @@ verify_server_certificate_signature :: proc(
 	}
 
 	signature := message[8:]
-	signed: [64 + len(SERVER_CERTIFICATE_VERIFY_CONTEXT) + 1 + 32]u8
-	for i in 0 ..< 64 do signed[i] = 0x20
-	context_string: string = SERVER_CERTIFICATE_VERIFY_CONTEXT
-	copy(signed[64:], transmute([]u8)context_string)
-	// The zero separator is already present after the context string.
-	for value, i in transcript_hash do signed[len(signed) - 32 + i] = value
+	signed := certificate_verify_input(transcript_hash, server = true)
 	valid, signature_error := authentication_signature_check(
 		&certs.chain[0],
 		scheme,
