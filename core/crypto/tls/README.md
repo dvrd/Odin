@@ -102,3 +102,11 @@ wrong-hostname rejection and shutdown. Go is not a dependency of the Odin
 package or ordinary tests. Regenerate certificates with the fixture's
 `-generate` flag. Protocol references: [RFC 8446](https://www.rfc-editor.org/rfc/rfc8446)
 and [RFC 8448](https://www.rfc-editor.org/rfc/rfc8448).
+
+## Recordless server foundation
+
+The [bounded owner/event shell](SERVER_HANDSHAKE.md) assembles one ClientHello
+and exposes tentative offers before stopping at `Await_Flight`. It is not a
+working server handshake or transport. Server flight, credential pinning,
+Finished authentication and TCP/QUIC bindings remain separate implementation
+gates. Existing client APIs and behavior are unchanged.
