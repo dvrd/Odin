@@ -40,9 +40,9 @@ server_handshake_finished_feed :: proc(owner: ^Server_Handshake, level: Server_H
 		server_handshake_fail(owner, .Malformed)
 		return consumed, .Terminal, .Malformed
 	}
-	// No post-handshake transcript consumers in this profile. Revoke/wipe all
-	// transients before publishing the sole payload-free authorization event.
-	server_handshake_cleanup(owner)
+	// No post-handshake transcript consumers in this profile. Wipe handshake
+	// transients before Complete; keep selected parameters until its acceptance.
+	server_handshake_cleanup(owner, true)
 	if !server_handshake_id(owner) {
 		server_handshake_fail(owner, .Identity_Exhausted)
 		return consumed, .Terminal, .Identity_Exhausted

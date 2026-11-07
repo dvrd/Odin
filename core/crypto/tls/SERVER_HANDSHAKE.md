@@ -8,6 +8,8 @@ struct copies; this is a caller ownership contract, not language-enforced linear
 After destruction, use fresh zeroed storage for a new lifetime. Event IDs are
 scoped to that owner lifetime; do not use one owner's IDs with another owner.
 No callback, executor, socket, TLS record or ambient clock is stored here.
+Server parameter policy/selection and its binding acceptance hook are documented
+in [SERVER_PARAMETERS.md](SERVER_PARAMETERS.md).
 
 After assembling one ClientHello, accept its tentative `Peer_Parameters`, then
 call `server_handshake_start_flight(owner, store, admission_time)`. The host keeps
@@ -24,13 +26,14 @@ RSA PKCS1 SHA256/384/512 signatures only, including roots: other signatures are
 `Unsupported`, even when X509 can parse them. It never assumes a compatible
 chain from an RSA leaf. No key or PEM is copied/parsed per handshake.
 
-There is no HRR, ALPN selection, PSK/0-RTT selection or QUIC mode. Offers requiring
-retry fail `Unsupported`. QUIC transport-parameter presence fails `Unsupported`
-in this profile, instead of silently omitting mandatory QUIC extensions. ALPN
-offers may be present but no h2/h3 or other protocol is selected implicitly.
+There is no HRR or PSK/0-RTT selection. Offers requiring retry fail Unsupported.
+ALPN and mode-specific opaque QUIC parameters use an explicit pending-event
+selection/acceptance API; see SERVER_PARAMETERS.md. Default callers keep optional
+TCP/no ALPN. A QUIC binding must validate semantic parameters before selection;
+there is no production QUIC transport here.
 
 Drain events through repeated peek/copy/accept until None. The flight is SH
-(with session-ID echo), handshake Write/Read secrets, empty EE, streamed
+(with session-ID echo), handshake Write/Read secrets, selected-parameter EE, streamed
 Certificate, context-separated RSA CertificateVerify, server Finished, then
 application Write/Read secrets. Initial SH bytes must enter ordered transport
 storage before installing handshake keys. Finished bytes must enter it before
@@ -50,11 +53,13 @@ certificate authentication is requested/supplied. Possession of application
 secrets or tentative peer offers never authorizes application delivery.
 
 On successful verification and with every flight event accepted, the engine
-wipes/frees all transient grants, partial input, secrets and transcript, then
-publishes one payload-free `Complete`. Copy required durable state and accept
+wipes/frees handshake input/output grants, partial input, secrets and transcript,
+then publishes one payload-free `Complete`. Owned selections remain queryable
+as authenticated until Complete acceptance wipes/frees their separate grant.
+Copy required durable state and accept
 that event before the binding delivers application data. Complete is repeatably
 peekable until accepted; stale/duplicate acceptance fails. No subsequent Complete
-is generated. Engine146, capability155/156, independent matrix157 and
+is generated. Engine146, capability155, independent matrix157 and
 TCP147/QUIC98 remain open.
 
 ## Feed and event ownership
@@ -102,8 +107,8 @@ Event kinds reserve these producer/consumer contracts:
 | --- | --- |
 | `Handshake_Bytes` | Exact ordered handshake fragments including message headers, Initial/plaintext or Handshake level; no records/CCS. Copy into transport-owned ordered storage before acceptance. Accepted bytes enter the transcript exactly once. |
 | `Traffic_Secret` | 32 bytes, AES128GCM/SHA256, explicit level and Read/Write relative to the local server. Derive/copy transport protection before acceptance; owner storage is immediately wiped. Key availability alone never authorizes application delivery. |
-| `Peer_Parameters` | Tentative SNI, ALPN **offers** and opaque QUIC parameter presence/bytes from ClientHello. They are neither selected nor authenticated. Copy any needed durable metadata before acceptance. |
-| `Complete` | Once after valid client Finished and all required output acceptance; transient state is already erased. Accept before application delivery. |
+| `Peer_Parameters` | Tentative SNI, ALPN **offers** and opaque QUIC parameter presence/bytes from ClientHello. They are neither selected nor authenticated. Validate QUIC semantics before explicit selection/acceptance; copy any needed offer metadata before acceptance. |
+| `Complete` | Once after valid client Finished and all required output acceptance; handshake transients are erased; owned selected parameters remain queryable until acceptance wipes/frees them. Copy durable state and accept before application delivery. |
 | `Fatal` | Stable typed protocol/local error, without sensitive diagnostic payloads or implicit alert/transport handling. |
 
 Every output borrow, including copied event structs, ends at accept/abort/destroy.
@@ -128,9 +133,12 @@ wire overhead is checked against u24 bounds before any flight event. The
 credential owner independently caps 16 certificates and 1 MiB summed DER; wire
 overhead is additional. No full Certificate message/flight is concatenated.
 
-Measured Darwin arm64 fixed owner: **1,136 bytes**; event value: **136 bytes**.
-The owner's maximum accepted transient grants total **67,584 bytes** (65,536 +
-2,048), two allocations. `server_handshake_stats` reports cumulative requested
+Measured Darwin arm64 fixed owner: **1,224 bytes**; event value: **136 bytes**.
+Default optional TCP/no ALPN retains the two-grant **67,584-byte** maximum.
+Selected parameters add one at-most **2,303-byte** grant retained through pending
+Complete; the measured maximum overlapping grants are **69,887 bytes**, three
+allocations. See SERVER_PARAMETERS.md for exact parameter bounds/lifetimes.
+`server_handshake_stats` reports cumulative requested
 bytes/attempts and peak/live **accepted** grants, excluding caller-owned fixed
 storage, shared DER, allocator metadata and rejected abnormal grants. The audit
 allocator tests separately check complete reported extents of abnormal grants.
@@ -145,7 +153,8 @@ report valid accessible grant extents and honor Free; arbitrary corrupt allocato
 are outside this contract. Explicit erasure covers owned storage, not all compiler
 registers, stack copies or consumer-owned material. Successful Finished
 verification runs this same full cleanup before publishing
-Complete; only identity, terminal phase, configuration and cumulative statistics
+Complete, except for the owned selection grant retained until Complete acceptance;
+after acceptance only identity, terminal phase, configuration and cumulative statistics
 remain. Destroy also clears allocator/configuration. No resumption/exporter or
 post-handshake authentication state is retained.
 

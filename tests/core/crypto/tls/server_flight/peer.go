@@ -133,6 +133,15 @@ func main() {
 		panic("peer binary cert key tempdir")
 	}
 	bad := os.Getenv("WEBTOOLS_BAD_FINISHED") == "1"
+	if os.Getenv("WEBTOOLS_PARAMETERS") == "quic" {
+		runQUIC()
+		return
+	}
+	selected := os.Getenv("WEBTOOLS_PARAMETERS")
+	names := []string{"h2", "http/1.1"}
+	if selected == "opaque" {
+		names = []string{"opaque\x00\xff", "h2"}
+	}
 	dir := os.Args[4]
 	cert, e := os.ReadFile(os.Args[2])
 	must(e)
@@ -145,14 +154,21 @@ func main() {
 	defer b.Close()
 	must(a.SetDeadline(time.Now().Add(15 * time.Second)))
 	must(b.SetDeadline(time.Now().Add(15 * time.Second)))
-	client := tls.Client(a, &tls.Config{MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519}, ServerName: "synthetic.invalid", RootCAs: roots, NextProtos: []string{"h2", "http/1.1"}, Time: func() time.Time { return time.Unix(1790000000, 0) }})
+	client := tls.Client(a, &tls.Config{MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519}, ServerName: "synthetic.invalid", RootCAs: roots, NextProtos: names, Time: func() time.Time { return time.Unix(1790000000, 0) }})
 	done := make(chan error, 1)
 	go func() {
 		if e := client.Handshake(); e != nil {
 			done <- e
 			return
 		}
-		if client.ConnectionState().NegotiatedProtocol != "" {
+		expectedALPN := ""
+		if selected == "alpn" {
+			expectedALPN = "http/1.1"
+		}
+		if selected == "opaque" {
+			expectedALPN = "opaque\x00\xff"
+		}
+		if client.ConnectionState().NegotiatedProtocol != expectedALPN {
 			done <- fmt.Errorf("implicit ALPN")
 			return
 		}
@@ -183,6 +199,8 @@ func main() {
 	cmd := exec.Command(os.Args[1], in, os.Args[2], os.Args[3], out)
 	if bad {
 		cmd.Args = append(cmd.Args, "bad")
+	} else if selected != "" {
+		cmd.Args = append(cmd.Args, "alpn")
 	}
 	stdin, e := cmd.StdinPipe()
 	must(e)

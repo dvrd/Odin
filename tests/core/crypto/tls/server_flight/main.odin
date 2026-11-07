@@ -8,7 +8,9 @@ import "core:time"
 
 main :: proc() {
 	assert(len(os.args) == 5 || len(os.args) == 6)
-	bad := len(os.args) == 6
+	bad := len(os.args) == 6 && os.args[5] == "bad"
+	select_parameters := len(os.args) == 6 && !bad
+	quic := select_parameters && os.args[5] == "quic"
 	ch, re := os.read_entire_file(os.args[1], context.allocator); assert(re == nil)
 	defer delete(ch)
 	cp, ce := os.read_entire_file(os.args[2], context.allocator); assert(ce == nil)
@@ -30,7 +32,16 @@ main :: proc() {
 		assert(n == 1 && e == .None)
 	}
 	peer, _ := tls.server_handshake_peek(&o); assert(peer.kind == .Peer_Parameters)
-	assert(tls.server_handshake_accept(&o, peer.id) == .None)
+	if select_parameters {
+		config:=tls.Server_Handshake_Parameters_Config{alpn_protocols=[]string{"opaque\x00\xff","http/1.1","h2","h3"},require_alpn=true}
+		if quic {
+			assert(peer.peer.has_quic_transport_parameters)
+			assert(string(peer.peer.quic_transport_parameters)=="\x00\x01\x02")
+			config.mode=.QUIC; config.quic_transport_parameters=[]u8{9,8,7}
+		}
+		assert(tls.server_handshake_select_parameters(&o,peer.id,config)==.None)
+		p,pe:=tls.server_handshake_parameters(&o); assert(pe==.None && !p.authenticated)
+	} else {assert(tls.server_handshake_accept(&o, peer.id) == .None)}
 	assert(
 		tls.server_handshake_start_flight(&o, s, time.from_nanoseconds(1790000000 * 1000000000)) ==
 		.None,
@@ -78,9 +89,17 @@ main :: proc() {
 	}
 	complete,_:=tls.server_handshake_peek(&o)
 	assert(complete.kind==(.Fatal if bad else .Complete))
-	clean,_:=tls.server_handshake_stats(&o); assert(clean.live_bytes==0)
+	clean,_:=tls.server_handshake_stats(&o)
+	if select_parameters {
+		p,pe:=tls.server_handshake_parameters(&o); assert(pe==.None && p.authenticated)
+		assert(string(p.alpn)==("h3" if quic else "http/1.1") || string(p.alpn)=="opaque\x00\xff")
+		if quic {assert(string(p.local_quic)=="\x09\x08\x07" && string(p.peer_quic)=="\x00\x01\x02")}
+		assert(clean.live_bytes==len(p.alpn)+len(p.local_quic)+len(p.peer_quic))
+	} else {assert(clean.live_bytes==0)}
 	assert(tls.server_handshake_accept(&o,complete.id)==.None)
 	none,_:=tls.server_handshake_peek(&o); assert(none.kind==.None)
+	clean,_=tls.server_handshake_stats(&o); assert(clean.live_bytes==0)
+	if select_parameters {_,pe:=tls.server_handshake_parameters(&o); assert(pe==.Invalid_State)}
 	fmt.println("REJECTED" if bad else "COMPLETE")
 	stats, _ := tls.server_handshake_stats(&o)
 	fmt.eprintf(

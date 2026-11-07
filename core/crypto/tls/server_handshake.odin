@@ -9,7 +9,7 @@ Server_Handshake_Direction :: enum {Read, Write} // Relative to the local server
 Server_Handshake_Event_Kind :: enum {None, Handshake_Bytes, Traffic_Secret, Peer_Parameters, Complete, Fatal}
 Server_Handshake_Error :: enum {
 	None, Invalid_Config, Invalid_Owner, Invalid_State, Invalid_Event,
-	Wrong_Level, Malformed, Unsupported, Limit, Allocation_Failed, Cancelled, Identity_Exhausted, Credential_Failed, Signing_Failed, Entropy_Unavailable, Finished_Failed,
+	Wrong_Level, Malformed, Unsupported, Limit, Allocation_Failed, Cancelled, Identity_Exhausted, Credential_Failed, Signing_Failed, Entropy_Unavailable, Finished_Failed, No_Application_Protocol,
 }
 Server_Handshake_Status :: enum {Need_Input, Need_Event_Drain, Await_Flight, Await_Client_Finished, Terminal, Invalid_Owner}
 Server_Handshake_Config :: struct {
@@ -62,6 +62,7 @@ Server_Handshake :: struct {
 	_next_id: u64,
 	_error: Server_Handshake_Error,
 	_flight: Server_Flight,
+	_parameters: Server_Parameters,
 }
 
 server_handshake_init :: proc(owner: ^Server_Handshake, config: Server_Handshake_Config, allocator: mem.Allocator) -> Server_Handshake_Error {
@@ -117,7 +118,8 @@ server_handshake_clear_event :: proc(owner: ^Server_Handshake) {
 	owner._event = {}
 }
 @(private)
-server_handshake_cleanup :: proc(owner: ^Server_Handshake) {
+server_handshake_cleanup :: proc(owner: ^Server_Handshake, keep_parameters := false) {
+	if !keep_parameters {server_parameters_clear(owner)}
 	server_handshake_clear_event(owner)
 	server_flight_cleanup(owner)
 	server_handshake_release_input(owner)
@@ -213,6 +215,7 @@ server_handshake_peek :: proc(owner: ^Server_Handshake) -> (Server_Handshake_Eve
 server_handshake_accept :: proc(owner: ^Server_Handshake, id: u64) -> Server_Handshake_Error {
 	if !server_handshake_valid(owner) {return .Invalid_Owner}
 	if id == 0 || owner._event.kind == .None || id != owner._event.id {return .Invalid_Event}
+	if owner._event.kind == .Complete {server_parameters_clear(owner)}
 	if owner._event.kind == .Handshake_Bytes {transcript_update(&owner._transcript, owner._event.bytes)}
 	server_handshake_clear_event(owner)
 	if owner._flight.stage == .End {_ = server_flight_next(owner)}

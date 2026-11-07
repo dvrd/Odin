@@ -14,7 +14,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='webtools-finished154-') as td:
         temp=pathlib.Path(td);binary=temp/'flight';peer=temp/'peer'
         run([a.odin,'build',source,'-out:'+str(binary)]+(['-sanitize:'+a.sanitize] if a.sanitize else []))
-        run([a.go,'build','-o',peer,source/'peer.go'],env=env)
+        run([a.go,'build','-o',peer,source/'peer.go',source/'quic_peer.go'],env=env)
         large=temp/'large.pem';run([peer,'--large-cert',fixtures/'rsa2048.pem',large])
         chain=temp/'chain.pem';chain.write_bytes(large.read_bytes()*16)
         for name,cert,key in [('rsa2048',fixtures/'rsa2048-valid.pem',fixtures/'rsa2048.pem'),('rsa4096',fixtures/'rsa4096-valid.pem',fixtures/'rsa4096.pem'),('large16',chain,fixtures/'rsa2048.pem')]:
@@ -25,5 +25,10 @@ def main():
         output=run([peer,binary,fixtures/'rsa2048-valid.pem',fixtures/'rsa2048.pem',temp],env=negative_env)
         report['cases'].append({'name':'altered-client-finished','result':'pass','output':output.strip()})
         print('altered-client-finished: '+output.strip(),flush=True)
+        for mode in ['alpn','opaque','quic']:
+            parameter_env=env.copy();parameter_env['WEBTOOLS_PARAMETERS']=mode
+            output=run([peer,binary,fixtures/'rsa2048-valid.pem',fixtures/'rsa2048.pem',temp],env=parameter_env)
+            report['cases'].append({'name':mode,'result':'pass','output':output.strip()})
+            print(mode+': '+output.strip(),flush=True)
     pathlib.Path(a.report).write_text(json.dumps(report,indent=2)+'\n')
 if __name__=='__main__': main()

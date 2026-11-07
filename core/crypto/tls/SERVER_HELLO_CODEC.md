@@ -23,7 +23,8 @@ must enforce mode, required presence, semantics and its own byte limit.
 
 Limits are local policy, not RFC wire maxima: default/hard maximum 65,536 bytes
 including the four-byte handshake header, at most 128 extensions (configurable
-downward), and at most 128 groups, shares and SNI names. Extension duplicate
+downward), and at most 128 groups, shares, SNI names and ALPN names. Duplicate ALPN
+names are rejected; name comparison is byte-exact. Extension duplicate
 checks rescan at most 128 prior entries; key-share validation uses a monotonically
 advancing group cursor. Other offer vectors are scanned linearly within the wire
 cap. `Limit` distinguishes these refusals from malformed wire syntax.

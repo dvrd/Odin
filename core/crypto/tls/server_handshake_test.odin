@@ -10,8 +10,8 @@ Owner_Test_Audit :: struct {
 	error_with_grant: bool,
 	live, peak, requested, freed: int,
 	dirty, bad_free: bool,
-	pointers: [2]rawptr,
-	sizes: [2]int,
+	pointers: [3]rawptr,
+	sizes: [3]int,
 }
 owner_test_allocator_proc :: proc(data: rawptr, mode: mem.Allocator_Mode, size, alignment: int, old: rawptr, old_size: int, loc := #caller_location) -> ([]u8, mem.Allocator_Error) {
 	a := cast(^Owner_Test_Audit)data

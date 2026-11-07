@@ -150,9 +150,18 @@ server_client_hello_decode :: proc(wire: []u8, limits := Server_Client_Hello_Lim
 		case 16:
 			hello.alpn_protocols, valid = server_hello_vector(data, 2, 2, 1)
 			if valid {
+				count := 0
 				for n := 0; n < len(hello.alpn_protocols); {
+					count += 1
+					if count > SERVER_CLIENT_HELLO_MAX_ENTRIES {return {}, .Limit}
+					start := n
 					length := int(hello.alpn_protocols[n]); n += 1
 					if length == 0 || length > len(hello.alpn_protocols)-n {return {}, .Malformed}
+					for previous := 0; previous < start; {
+						p := int(hello.alpn_protocols[previous]); previous += 1
+						if string(hello.alpn_protocols[previous:previous+p]) == string(hello.alpn_protocols[n:n+length]) {return {}, .Malformed}
+						previous += p
+					}
 					n += length
 				}
 			}

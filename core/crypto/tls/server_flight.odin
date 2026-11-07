@@ -36,7 +36,7 @@ Server_Flight :: struct {
 
 // Explicit admission, after accepting tentative Peer_Parameters. The host keeps
 // Store alive until destroy/abort. Pins one generation even across rotation/close.
-// This restricted profile emits no ALPN, early-data or QUIC extensions.
+// Parameters are explicitly selected, or default to optional TCP/no ALPN.
 server_handshake_start_flight :: proc(
 	owner: ^Server_Handshake,
 	store: ^credential_store.Store,
@@ -50,6 +50,10 @@ server_handshake_start_flight :: proc(
 	   owner._flight.stage != .None {
 		return .Invalid_State
 	}
+	if !owner._parameters.selected {
+		e := server_parameters_select(owner, {})
+		if e != .None {server_handshake_fail(owner, e); return e}
+	}
 	lease, error := credential_store.acquire(store)
 	if error.kind != .None {
 		server_handshake_fail(owner, .Credential_Failed); return .Credential_Failed
@@ -57,11 +61,6 @@ server_handshake_start_flight :: proc(
 	owner._flight.store, owner._flight.lease = store, lease
 	if credential_store.check_server_leaf(store, lease, now).kind != .None {
 		server_handshake_fail(owner, .Credential_Failed); return .Credential_Failed
-	}
-	// QUIC requires authenticated parameters/ALPN (156); never silently run
-	// the TCP-style profile when the client explicitly offers QUIC parameters.
-	if owner._hello.has_quic_transport_parameters {
-		server_handshake_fail(owner, .Unsupported); return .Unsupported
 	}
 	offers := owner._hello.signature_algorithms_cert
 	if len(offers) == 0 {
@@ -173,8 +172,7 @@ server_flight_next :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 		return server_flight_secret(owner, f.handshake.client_traffic_secret[:], .Read)
 	case .Extensions:
 		f.stage = .Certificate_Header
-		wire := [6]u8{8, 0, 0, 2, 0, 0}
-		return server_flight_bytes(owner, transmute([]u8)wire[:])
+		return server_parameters_extensions(owner)
 	case .Certificate_Header:
 		header: [8]u8; header[0] = 11
 		server_flight_put24(header[1:4], 4 + f.certificate_bytes)
