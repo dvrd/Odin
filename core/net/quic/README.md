@@ -51,3 +51,61 @@ Run from an Odin root containing this package:
 ./odin test core/net/quic/tests -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
 ./odin test core/net/quic/tests -sanitize:address -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
 ```
+
+## Initial packet protection
+
+`initial_keys_derive_v1` derives caller-owned client/server `Initial_Keys` from the
+client's original Destination Connection ID (0–20 bytes), using native
+SHA-256/HKDF and the v1 salt. It does not decide when a Retry changes that ID.
+`initial_nonce` XORs the IV with the caller's full packet number, which must be
+less than 2^62. These publicly derivable Initial keys do **not** authenticate a
+server or protect against an observer or active attacker.
+
+The explicit send sequence is:
+
+1. Encode the unprotected Initial header with `long_header_encode_v1`. Its
+   `ciphertext_length` includes the future 16-byte tag.
+2. `initial_payload_seal` writes ciphertext plus tag into caller storage after
+   that header. The header's declared Length and truncated PN must agree with
+   this payload and the caller's full PN.
+3. `initial_header_protection_apply` masks the first byte and PN in a complete
+   single packet, sampling at the decoded PN offset plus four. The caller must
+   provide enough payload/PADDING for the entire 16-byte sample.
+
+Receive by structurally delimiting one packet, calling
+`initial_header_protection_remove`, reconstructing its full PN in the caller,
+then `initial_payload_open` with the complete unmasked header through PN. No
+packet-number reconstruction, replay window, ACK/recovery or connection-state
+updates occur here. Only after a successful open may a caller use authenticated
+packet contents or validate reserved bits. Successful GCM verification remains
+weaker than peer authentication because Initial keys are public.
+
+Crypto operations allocate nothing and retain no buffers or key pointers. Header
+protection mutates the caller packet in place; all its sample/structural/alias
+checks precede mutation. Payload operations allow exact in-place processing at
+the payload start, and reject other destination overlap with input, header, tag
+or keys. Rejected preflight operations leave destination storage unchanged. A
+failed GCM open returns zero bytes and `Authentication_Failed`, zeroes only its
+produced plaintext region, and leaves trailing destination bytes alone. An
+in-place open therefore invalidates its ciphertext even on authentication failure.
+The separate tag remains caller-owned. Never share mutable keys/buffers across
+concurrent calls without synchronization.
+
+Clear every key owner with `initial_keys_clear` or `initial_key_pair_clear` when
+finished; these explicitly erase key bytes and the initialization marker. Copies
+of the value create additional owners to erase. Temporary derivation secrets (including the local pair after return-value copying),
+nonces, masks and AES schedules are explicitly erased internally. Odin does not
+provide linear types or guarantees about compiler-created/register copies;
+callers must avoid accidental copies and must not reuse a packet number with the
+same sending keys. Key discard timing and connection cancellation remain caller
+policy.
+
+This slice covers Initial AES-128-GCM plus AES-ECB header protection only. It does
+not implement TLS CRYPTO integration, certificate/server authentication, Retry
+integrity, application traffic keys, resumption or network interoperability.
+Tests compare full RFC 9001 client/server Initial packets, derive the published
+keys and exercise both AES implementation selections, authentication failures,
+truncation, overlap, sample bounds and key erasure. `.Hardware` follows the AES
+package's normal portable fallback on machines without acceleration.
+
+Definitions and vectors: [RFC 9001 sections 5.2–5.4 and Appendix A](https://www.rfc-editor.org/rfc/rfc9001.html#section-5.2).
