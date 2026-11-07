@@ -188,6 +188,21 @@ get_dns_records_from_os :: proc(hostname: string, type: DNS_Record_Type, allocat
 	See `destroy_records`.
 */
 get_dns_records_from_nameservers :: proc(hostname: string, type: DNS_Record_Type, name_servers: []Endpoint, host_overrides: []DNS_Record, allocator := context.allocator) -> (records: []DNS_Record, err: DNS_Error) {
+	return dns_records_from_nameservers_until(hostname, type, name_servers, host_overrides, {}, allocator)
+}
+
+// An absolute deadline bounds all socket waits across every nameserver. Zero
+// preserves the existing one-second per-server receive policy.
+get_dns_records_from_nameservers_until :: proc(hostname: string, type: DNS_Record_Type, name_servers: []Endpoint, host_overrides: []DNS_Record, deadline: time.Time, allocator := context.allocator) -> ([]DNS_Record, DNS_Error) {
+	return dns_records_from_nameservers_until(hostname, type, name_servers, host_overrides, deadline, allocator)
+}
+
+@(private)
+dns_records_from_nameservers_until :: proc(hostname: string, type: DNS_Record_Type, name_servers: []Endpoint, host_overrides: []DNS_Record, deadline: time.Time, allocator := context.allocator) -> (records: []DNS_Record, err: DNS_Error) {
+	if deadline != (time.Time{}) && time.diff(time.now(), deadline) <= 0 {return nil, .Timeout}
+	when ODIN_OS != .Darwin && ODIN_OS != .Linux && ODIN_OS != .FreeBSD && ODIN_OS != .OpenBSD && ODIN_OS != .NetBSD {
+		if deadline != (time.Time{}) {return nil, .Unsupported}
+	}
 	init_dns_configuration()
 	context.allocator = allocator
 
@@ -201,25 +216,41 @@ get_dns_records_from_nameservers :: proc(hostname: string, type: DNS_Record_Type
 	dns_response_buf: [4096]u8 = ---
 	dns_response: []u8
 	for name_server in name_servers {
+		if deadline != (time.Time{}) && time.diff(time.now(), deadline) <= 0 {return nil, .Timeout}
 		conn, sock_err := make_unbound_udp_socket(family_from_endpoint(name_server))
 		if sock_err != nil {
 			return nil, .Connection_Error
 		}
 		defer close(conn)
 
+		if deadline != (time.Time{}) {
+			remaining := time.diff(time.now(), deadline)
+			if remaining <= 0 {return nil, .Timeout}
+			if set_option(conn, .Send_Timeout, dns_socket_timeout(remaining)) != nil {return nil, .Unsupported}
+		}
 		_ = send(conn, dns_packet[:], name_server) or_continue
 
-		deadline := time.tick_add(time.tick_now(), time.Second * 1)
+		receive_deadline := time.tick_add(time.tick_now(), time.Second * 1)
 		for {
-			timeout := time.tick_diff(time.tick_now(), deadline)
+			timeout := time.tick_diff(time.tick_now(), receive_deadline)
 			if timeout < time.Millisecond {
 				break
+			}
+			if deadline != (time.Time{}) {
+				remaining := time.diff(time.now(), deadline)
+				if remaining <= 0 {
+					return nil, .Timeout
+				}
+				timeout = dns_socket_timeout(min(timeout, remaining))
 			}
 			if set_option(conn, .Receive_Timeout, timeout) != nil {
 				return nil, .Connection_Error
 			}
 
 			recv_sz, src := recv_udp(conn, dns_response_buf[:]) or_break
+			if deadline != (time.Time{}) && time.diff(time.now(), deadline) <= 0 {
+				return nil, .Timeout
+			}
 			if recv_sz < size_of(id) {
 				continue
 			}
@@ -239,12 +270,15 @@ get_dns_records_from_nameservers :: proc(hostname: string, type: DNS_Record_Type
 			}
 
 			if len(rsp) == 0 {
+				destroy_dns_records(rsp[:])
 				break
 			}
 
 			return rsp[:], nil
 		}
 	}
+
+	if deadline != (time.Time{}) && time.diff(time.now(), deadline) <= 0 {return nil, .Timeout}
 
 	return
 }
@@ -901,4 +935,11 @@ parse_response :: proc(response: []u8, filter: DNS_Record_Type = nil, allocator 
 	xid = hdr.id
 
 	return _records[:], xid, true
+}
+
+// timeval backends truncate to microseconds: a positive sub-microsecond wait
+// must not become {0,0}, which disables SO_RCVTIMEO/SO_SNDTIMEO entirely.
+@(private)
+dns_socket_timeout :: proc(remaining: time.Duration) -> time.Duration {
+	return max(remaining, time.Microsecond)
 }

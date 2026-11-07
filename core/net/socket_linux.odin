@@ -86,7 +86,7 @@ _unwrap_os_proto_socktype :: proc "contextless" (protocol: Socket_Protocol) -> (
 	}
 }
 
-@(private="file")
+@(private)
 _unwrap_os_addr :: proc "contextless" (endpoint: Endpoint) -> linux.Sock_Addr_Any {
 	switch address in endpoint.address {
 	case IP4_Address:

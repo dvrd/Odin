@@ -74,6 +74,8 @@ Dial_Error :: enum i32 {
 
 	// An error unable to be categorized in above categories, `last_platform_error` may have more info.
 	Unknown,
+	// Caller-requested deadline is not implemented by this platform path.
+	Unsupported,
 }
 
 Bind_Error :: enum i32 {

@@ -50,6 +50,29 @@ Handshake_Error :: struct {
 // This blocking client currently supports certificate authentication without
 // client certificates, PSKs, early data, or negotiated ALPN.
 handshake :: proc(conn: ^Conn) -> Handshake_Error {
+	return handshake_until_internal(conn, {})
+}
+
+// Authenticates within the earlier of the configured handshake budget and the
+// caller's absolute deadline. Zero preserves handshake's existing behavior.
+// Synchronous callbacks cannot be interrupted; expiry is checked on return.
+handshake_until :: proc(conn: ^Conn, deadline: time.Time) -> Handshake_Error {
+	effective := deadline
+	// Preserve one effective absolute cutoff, including for callbacks which
+	// return success after the earlier configured handshake budget elapsed.
+	if deadline != (time.Time{}) && conn != nil {
+		timeout := conn.config.handshake_timeout
+		if timeout == 0 {timeout = 10 * time.Second}
+		now := time.now()
+		if time.diff(now, deadline) > timeout {effective = time.time_add(now, timeout)}
+	}
+	error := handshake_until_internal(conn, effective)
+	if error.kind != .None {return error}
+	return handshake_until_check(conn, effective)
+}
+
+@(private)
+handshake_until_internal :: proc(conn: ^Conn, deadline: time.Time) -> Handshake_Error {
 	if conn == nil do return {kind = .Invalid_State}
 
 	if conn.phase == .Established do return {}
@@ -66,7 +89,7 @@ handshake :: proc(conn: ^Conn) -> Handshake_Error {
 		return {kind = .Invalid_State}
 	}
 
-	deadlines_set, deadline_error := handshake_deadline_start(conn)
+	deadlines_set, deadline_error := handshake_deadline_start_until(conn, deadline)
 	if deadline_error.kind != .None do return deadline_error
 
 	defer {
@@ -74,6 +97,7 @@ handshake :: proc(conn: ^Conn) -> Handshake_Error {
 			transport.set_deadline(conn.transport, {})
 		}
 	}
+	if error := handshake_until_check(conn, deadline); error.kind != .None {return error}
 	if hello_error := handshake_hello_exchange(conn); hello_error.kind != .None {
 		return hello_error
 	}
@@ -84,32 +108,52 @@ handshake :: proc(conn: ^Conn) -> Handshake_Error {
 		return handshake_fail(conn, {kind = .Allocation_Failed, allocation = allocation_error})
 	}
 	defer delete(flight_storage)
+	if error := handshake_until_check(conn, deadline); error.kind != .None {return error}
 	flight, flight_error := handshake_server_flight_read(conn, flight_storage)
 	if flight_error.kind != .None do return flight_error
 	transcript_hash, verify_error := handshake_server_flight_verify(conn, flight)
 	if verify_error.kind != .None do return verify_error
 	secrets := application_secrets_derive(conn.handshake_secrets.handshake_secret, transcript_hash)
 	defer crypto.zero_explicit(&secrets, size_of(secrets))
+	if error := handshake_until_check(conn, deadline); error.kind != .None {return error}
 	if finish_error := handshake_client_finished_send(conn, &transcript_hash); finish_error.kind != .None do return finish_error
+	if error := handshake_until_check(conn, deadline); error.kind != .None {return error}
 	activation_error := handshake_application_activate(conn, secrets, deadlines_set)
 	if activation_error.kind == .None do deadlines_set = false
 	return activation_error
 }
 
 handshake_deadline_start :: proc(conn: ^Conn) -> (bool, Handshake_Error) {
+	return handshake_deadline_start_until(conn, {})
+}
+
+@(private)
+handshake_deadline_start_until :: proc(conn: ^Conn, deadline: time.Time) -> (bool, Handshake_Error) {
 	deadlines_set := false
 	if conn.transport.set_read_deadline != nil && conn.transport.set_write_deadline != nil {
 		timeout := conn.config.handshake_timeout
 		if timeout == 0 do timeout = 10 * time.Second
 
-		if err := transport.set_deadline(conn.transport, time.time_add(time.now(), timeout));
+		now := time.now()
+		selected := deadline
+		if deadline == (time.Time{}) {
+			// Only the legacy path establishes a relative deadline here.
+			selected = time.time_add(now, timeout)
+		} else if time.diff(now, deadline) <= 0 {
+			return false, handshake_fail(conn, {kind = .Deadline_Failed, transport = {kind = .Timeout}})
+		}
+		if err := transport.set_deadline(conn.transport, selected);
 		   err.kind != .None {
 			transport.set_deadline(conn.transport, {})
 			return false, handshake_fail(conn, {kind = .Deadline_Failed, transport = err})
 		}
 
+		if deadline != (time.Time{}) && time.diff(time.now(), selected) <= 0 {
+			transport.set_deadline(conn.transport, {})
+			return false, handshake_fail(conn, {kind = .Deadline_Failed, transport = {kind = .Timeout}})
+		}
 		deadlines_set = true
-	} else if conn.config.handshake_timeout > 0 {
+	} else if conn.config.handshake_timeout > 0 || deadline != (time.Time{}) {
 		return false, handshake_fail(
 			conn,
 			{kind = .Deadline_Failed, transport = {kind = .Deadline_Unsupported}},
@@ -1479,4 +1523,13 @@ async_handshake_drive :: proc(conn: ^Async_Conn) {
 	}
 	async_record_consumed(conn)
 	async_queue(conn)
+}
+
+@(private)
+handshake_until_check :: proc(conn: ^Conn, deadline: time.Time) -> Handshake_Error {
+	if deadline != (time.Time{}) && time.diff(time.now(), deadline) <= 0 {
+		conn.handshake_complete = false
+		return handshake_fail(conn, {kind = .Deadline_Failed, transport = {kind = .Timeout}})
+	}
+	return {}
 }

@@ -101,6 +101,8 @@ DNS_Error :: enum u32 {
 	Connection_Error,
 	Server_Error,
 	System_Error,
+	Timeout,
+	Unsupported,
 }
 
 // SOCKET OPTIONS & DEFINITIONS

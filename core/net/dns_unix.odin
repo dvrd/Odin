@@ -19,9 +19,15 @@ package net
 		Feoramund:       FreeBSD platform code
 */
 import "core:strings"
+import "core:time"
 
 @(private)
 _get_dns_records_os :: proc(hostname: string, type: DNS_Record_Type, allocator := context.allocator) -> (records: []DNS_Record, err: DNS_Error) {
+	return dns_records_os_until(hostname, type, {}, allocator)
+}
+
+@(private)
+dns_records_os_until :: proc(hostname: string, type: DNS_Record_Type, deadline: time.Time, allocator := context.allocator) -> (records: []DNS_Record, err: DNS_Error) {
 	context.allocator = allocator
 
 	if type != .SRV {
@@ -86,8 +92,11 @@ _get_dns_records_os :: proc(hostname: string, type: DNS_Record_Type, allocator :
 	}
 
 	when ODIN_PLATFORM_SUBTARGET == .Android {
+		if deadline != (time.Time{}) {
+			return nil, .Unsupported
+		}
 		return get_dns_records_from_netd(hostname, type)
 	} else {
-		return get_dns_records_from_nameservers(hostname, type, name_servers, host_overrides[:])
+		return dns_records_from_nameservers_until(hostname, type, name_servers, host_overrides[:], deadline)
 	}
 }
