@@ -13,7 +13,9 @@ static void require(int ok, const char *operation) {
 int main(int argc,char **argv) {
     require(argc==5,"endpoint CA-file groups mode");
     alarm(20);signal(SIGPIPE,SIG_IGN);
-    const char *mode=argv[4];int negative=0;long expected=0;
+    const char *mode=argv[4];int ec_only=!strncmp(mode,"ecdsa",5);
+    if(!strncmp(mode,"ecdsa-",6))mode+=6;
+    int negative=0;long expected=0;
     if(!strcmp(mode,"trust")){negative=1;expected=18;}
     if(!strcmp(mode,"hostname")){negative=1;expected=62;}
     if(!strcmp(mode,"time")){negative=1;expected=10;}
@@ -23,7 +25,7 @@ int main(int argc,char **argv) {
     require(SSL_CTX_set_max_proto_version(ctx,TLS1_3_VERSION),"max TLS1.3");
     require(SSL_CTX_set_ciphersuites(ctx,"TLS_AES_128_GCM_SHA256"),"cipher");
     require(SSL_CTX_set1_groups_list(ctx,argv[3]),"groups");
-    require(SSL_CTX_set1_sigalgs_list(ctx,"rsa_pss_rsae_sha256:rsa_pkcs1_sha256"),"signatures");
+    require(SSL_CTX_set1_sigalgs_list(ctx,ec_only?"ecdsa_secp256r1_sha256":"rsa_pss_rsae_sha256:rsa_pkcs1_sha256"),"signatures");
     SSL_CTX_set_verify(ctx,SSL_VERIFY_PEER,NULL);
     require(SSL_CTX_load_verify_locations(ctx,argv[2],NULL),"fixture roots");
     SSL_CTX_set_max_cert_list(ctx,1049088);

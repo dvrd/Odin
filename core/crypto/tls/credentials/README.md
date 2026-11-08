@@ -1,7 +1,7 @@
-# Immutable RSA credentials
+# Immutable native server credentials
 
 `core:crypto/tls/credentials` owns a leaf-first certificate list and one native
-RSA private key. It does not import its parent TLS package, create sockets, read
+RSA or P-256 ECDSA private key. It does not import its parent TLS package, create sockets, read
 files, discover trust roots or start workers. X509 currently imports `core:net`
 transitively for hostname verification helpers; constructing credentials invokes
 no networking. This is a foundation for a server handshake, not a TLS server.
@@ -10,13 +10,15 @@ no networking. This is a foundation for a server handshake, not a TLS server.
 The PEM arguments are borrowed during that call; DER, X509 tables and normalized
 key storage belong to the returned owner. Inputs may subsequently be changed or
 released. Failure returns nil and erases/releases every owned allocation.
-Construction checks certificate/key syntax and leaf RSA modulus/exponent matching.
+Construction checks certificate/key syntax and leaf RSA modulus/exponent or exact derived P-256 public-point matching.
 It does not prove chain ancestry, signatures, trust, hostname, current validity,
 CA policy or private-key primality. The input order is retained.
 
 Accepted keys are unencrypted two-prime version-0 PKCS#1 (`RSA PRIVATE KEY`) or
 PKCS#8 (`PRIVATE KEY`) with a 2048–4096-bit RSA modulus. Exactly one key is allowed;
-other blocks, leading/trailing non-whitespace and encrypted keys fail closed.
+P-256 additionally accepts strict SEC1 (`EC PRIVATE KEY`) or version-0 PKCS8
+with id-ecPublicKey/named P-256 parameters; see [EC.md](EC.md). Other blocks,
+leading/trailing non-whitespace and encrypted keys fail closed.
 Certificate blocks must be `CERTIFICATE`, with no intervening unrelated text.
 The native X509/key parser profiles and limits also apply.
 
@@ -43,7 +45,7 @@ Zero limits select this fixed profile; explicit values may lower it only:
 | Encoded private-key PEM bytes | 96 KiB |
 | Owned allocation bytes, including transient overlap | 4 MiB |
 
-The native private-key DER importer additionally caps input at 64 KiB.
+The private-key DER envelope is capped at64KiB; inner SEC1 is capped at512 bytes.
 A stable owner contains 128 allocation records; exhausting this metadata also
 returns `Storage_Limit`, independently of the byte limit. Allocation/free/resize
 accounting is local to the owner, never a global allocator override. Resizes
@@ -98,16 +100,24 @@ python3 tests/core/crypto/tls/credentials/concurrency.py --odin /path/to/odin --
 python3 tests/core/crypto/tls/credentials/concurrency.py --odin /path/to/odin --go /path/to/local/go --sanitize thread --report /path/to/report-tsan.json
 ```
 
-Six tests cover ownership, every fixture allocation failure position, unusual
+Ten tests cover ownership, every fixture allocation failure position, unusual
 allocator grants/full wiping, exact peak limits, 16/17 certificate bounds, malformed
 profiles, explicit leaf policy and output/alias contracts. Independent Go and
-OpenSSL verify 8 workers × 8 native signatures for each of 2048/4096 bits under
+OpenSSL verify 8 workers × 8 native signatures for each of RSA2048/RSA4096/P-256 under
 ASan and TSan. Fixtures are synthetic public test keys, not service identities.
 Executable evidence is Darwin arm64; Linux arm64 is semantic checking only.
-No performance, complete TLS interoperability or production trust claim follows.
+Actual server interoperability is covered by the separate TLS server gate.
+No performance, complete TLS compliance or production trust claim follows.
 
 `certificate_algorithms(index)` returns construction-time signature and subject
 key algorithm identifiers by value. The store forwards it under a lease; it
 exposes no X509 slices or private-key storage. TLS flight admission uses this
 metadata to enforce its documented conservative chain-signature policy without
 re-parsing DER. This accessor is identification, not chain verification.
+
+`signature_scheme` identifies one supported typed TLS scheme. `sign_sha256`
+accepts that exact scheme, hashes a borrowed message once, and emits RSA-PSS or
+canonical ECDSA DER without allocating. Wrong schemes fail unchanged. The legacy
+RSA digest signer remains unchanged for RSA and rejects ECDSA. See [EC.md](EC.md)
+for encoding, entropy, measured owner representation and limits. The concurrency
+harness accepts `--go-root` and `--openssl` for explicitly installed offline tools.

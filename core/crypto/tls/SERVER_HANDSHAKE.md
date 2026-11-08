@@ -20,13 +20,16 @@ lease and checks leaf validity/KU/EKU/critical extensions at the explicit time.
 Publication must establish the host's chain/identity policy; admission does not
 verify ancestry, trust or hostname. Rotation/close cannot revoke this lease.
 
-The restricted profile is TLS1.3/AES128GCM-SHA256 with X25519 or P-256 and RSA-PSS-SHA256
-CertificateVerify and RSA 2048–4096 credentials. Each transmitted certificate's
+The restricted profile is TLS1.3/AES128GCM-SHA256 with X25519 or P-256, RSA-PSS-SHA256
+or ECDSA-P256-SHA256 CertificateVerify, and RSA2048–4096/P-256 credentials. Each transmitted certificate's
 parsed signature metadata must match `signature_algorithms_cert`, falling back
-to `signature_algorithms` only when absent. This first chain policy supports
-RSA PKCS1 SHA256/384/512 signatures only, including roots: other signatures are
+to `signature_algorithms` only when absent. The conservative chain policy supports
+RSA PKCS1 SHA256/384/512 and ECDSA-SHA256 with a supplied P-256 issuer, including
+roots: other signatures are
 `Unsupported`, even when X509 can parse them. It never assumes a compatible
-chain from an RSA leaf. No key or PEM is copied/parsed per handshake.
+chain from the leaf key. The pinned credential determines the exact offered
+CertificateVerify scheme at admission and again at signing; hello views are
+erased after ServerHello, and rotation cannot change the lease identity. No key or PEM is copied/parsed per handshake.
 
 One key-share HRR is supported; PSK/0-RTT is never selected. Retry state, CH2
 invariants and zero-cookie policy are in SERVER_RETRY.md.
@@ -37,7 +40,7 @@ there is no production QUIC transport here.
 
 Drain events through repeated peek/copy/accept until None. The flight is SH
 (with session-ID echo), handshake Write/Read secrets, selected-parameter EE, streamed
-Certificate, context-separated RSA CertificateVerify, server Finished, then
+Certificate, context-separated CertificateVerify, server Finished, then
 application Write/Read secrets. Initial SH bytes must enter ordered transport
 storage before installing handshake keys. Finished bytes must enter it before
 application keys. Certificate headers, DER fragments and per-entry empty
@@ -63,8 +66,8 @@ as authenticated until Complete acceptance wipes/frees their separate grant.
 Copy required durable state and accept
 that event before the binding delivers application data. Complete is repeatably
 peekable until accepted; stale/duplicate acceptance fails. No subsequent Complete
-is generated. Independent engine verification is documented separately; production
-TCP147/QUIC98 bindings remain open.
+is generated. The [async TCP binding](SERVER_ASYNC.md) consumes these events. QUIC transport
+integration remains separate.
 
 ## Feed and event ownership
 
@@ -189,10 +192,10 @@ over `net.Pipe`; no listener/production driver is supplied. Both RSA sizes and
 secret events, and independently authenticated server output. The peer returns
 its actual client Finished through a bounded anonymous pipe;
 the native owner consumes it one byte at a time and must publish Complete before
-the adapter permits bidirectional application exchange. No OpenSSL/non-Darwin
-matrix or production
-server claim follows; those remain157/147 gates.
+the adapter permits bidirectional application exchange. This fixture is separate
+from the actual async TCP binding and its Go/OpenSSL gate; neither certifies
+non-Darwin execution or production application integration.
 
 The full independent Go/OpenSSL and sanitizer gate is documented in
 [SERVER_VERIFICATION.md](SERVER_VERIFICATION.md). It records local capability
-limits and does not provide a production record/async binding.
+limits, immutable credential signing and actual async TCP integration.

@@ -1,4 +1,4 @@
-# Recordless server verification gate
+# Native server verification gate
 
 Run the owned independent-peer, lifetime and memory gate from the Odin checkout:
 
@@ -15,10 +15,13 @@ Use the matching compiler/standard-library/LLVM pairing in ci/WEBTOOLS_TOOLCHAIN
 All binaries, generated public certificates, pipe/file exchanges and reports use
 temporary storage. Existing credentials are published fixture keys only.
 
-The gate runs the57-test core server package (including deterministic hello
+The gate runs the58-test core server package (including deterministic hello
 mutation/transcript, fragmentation/coalescing, allocator failures and complete-
-grant erasure),23 native client tests,22 Surf tests, the public owner consumer,
-independent Go/OpenSSL peers, and empty/isolated Surf executable consumers. It
+grant erasure),10 credential/9 store tests,23 native client tests,22 Surf tests,
+the public owner consumer,
+27 recordless Go/OpenSSL peers,61 actual async TCP peer cases,192 concurrent
+signatures independently verified by both Go and OpenSSL, and empty/isolated Surf
+executable consumers. It
 records commands, full outputs, return codes, sanitizer, compiler digest/version,
 client versions and measured owner/event/retry-grant sizes. A missing memory
 measurement or failed subprocess fails the gate; failed gates retain a report
@@ -26,7 +29,8 @@ with passed=false. There is no passing skip for a missing client/compiler.
 
 The async server adds eleven core tests; its actual TCP wire gate and measured
 connection budget are documented in [SERVER_ASYNC.md](SERVER_ASYNC.md).
-This recordless peer fixture remains separate from that driver.
+The recordless peer fixture remains separate from that driver; the full gate
+runs both plus RSA/ECDSA immutable credential checks.
 
 The peer-only command remains available as server_flight.py. Without --openssl
 it runs16 Go cases; with an explicit --openssl it also runs11 OpenSSL cases.
@@ -79,10 +83,12 @@ owned only until Complete acceptance. Live bytes and leases then return to zero.
 Shared credentials, allocator metadata, record-fixture buffers, compiled/transitive
 stack/register copies, RSS and consumer copies are outside engine measurements.
 
-This verifies the current restricted RSA-PSS server engine on the recorded local
-platform. It does not certify non-Darwin execution, throughput, ECDSA credentials,
-client certificates, resumption, stateless cookies or production TCP/QUIC bindings.
+This verifies the restricted RSA-PSS/P-256 ECDSA server engine and async TCP
+binding on the recorded local platform. It does not certify non-Darwin execution,
+throughput, client certificates, resumption, stateless cookies or QUIC binding.
 Engine146's restricted-engine acceptance audit is recorded in
-reports/webtools-engine-2026-11-07.md. The async TCP binding has its own gate;
-QUIC98 and broader96 require separate integration evidence. ECDSA158 remains separate before
-a general TLS baseline-compliance claim.
+reports/webtools-engine-2026-11-07.md. The async TCP binding also has a standalone gate;
+QUIC98 and broader96 require separate integration evidence. P-256/ECDSA
+is added; the conservative chain policy still rejects RSA-PSS certificate
+signatures. Full section9.1 admission/general TLS compliance requires its own
+protocol/policy/platform audit.

@@ -66,6 +66,10 @@ server_handshake_start_flight :: proc(
 	if credential_store.check_server_leaf(store, lease, now).kind != .None {
 		server_handshake_fail(owner, .Credential_Failed); return .Credential_Failed
 	}
+	scheme,se:=credential_store.signature_scheme(store,lease)
+	if se.kind!=.None || scheme==.None {server_handshake_fail(owner,.Credential_Failed);return .Credential_Failed}
+	if !server_hello_offer_contains(owner._hello.signature_algorithms,u16(scheme)) {server_handshake_fail(owner,.Unsupported);return .Unsupported}
+	owner._selection.signature=cast(Signature_Scheme)u16(scheme)
 	offers := owner._hello.signature_algorithms_cert
 	if len(offers) == 0 {
 		offers = owner._hello.signature_algorithms
@@ -81,10 +85,15 @@ server_handshake_start_flight :: proc(
 		if de.kind != .None || me.kind != .None {
 			server_handshake_fail(owner, .Credential_Failed); return .Credential_Failed
 		}
-		// Conservative chain profile: RSA PKCS1 SHA256/384/512 signatures.
-		// Other parsed algorithms require issuer-key/parameter policy, not
-		// inference from a leaf's RSA signing key. Even roots must match here.
+		// Conservative chain profile: RSA PKCS1 SHA256/384/512 or ECDSA
+		// SHA256 with a supplied P-256 issuer. Signature policy is separate
+		// from the leaf's CertificateVerify key. Even roots must match here.
 		scheme := server_flight_certificate_scheme(metadata.signature)
+		if metadata.signature==.ECDSA_SHA256 {
+			issuer_index:=min(index+1,count-1)
+			issuer,ie:=credential_store.certificate_algorithms(store,lease,issuer_index)
+			if ie.kind!=.None || issuer.subject_key!=.ECDSA_P256 {server_handshake_fail(owner,.Unsupported);return .Unsupported}
+		}
 		if scheme == 0 || !server_hello_offer_contains(offers, scheme) {
 			server_handshake_fail(owner, .Unsupported); return .Unsupported
 		}
@@ -100,6 +109,8 @@ server_handshake_start_flight :: proc(
 @(private)
 server_flight_certificate_scheme :: proc(algorithm: x509.Signature_Algorithm) -> u16 {
 	#partial switch algorithm {
+	case .ECDSA_SHA256:
+		return 0x0403
 	case .RSA_SHA256:
 		return 0x0401
 	case .RSA_SHA384:
@@ -216,13 +227,17 @@ server_flight_next :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 		return server_flight_bytes(owner, transmute([]u8)wire[:])
 	case .Verify:
 		wire: [520]u8; defer crypto.zero_explicit(&wire, size_of(wire))
-		digest := certificate_verify_digest(transcript_snapshot(&owner._transcript), true)
-		n, e := credential_store.sign_digest_pss_sha256(f.store, f.lease, digest, wire[8:])
+		signed := certificate_verify_input(transcript_snapshot(&owner._transcript), true)
+		// Hello views/selection were erased after ServerHello. The live lease
+		// identifies the same admitted generation even after store rotation.
+		scheme,se:=credential_store.signature_scheme(f.store,f.lease)
+		if se.kind!=.None {return .Signing_Failed}
+		n, e := credential_store.sign_sha256(f.store, f.lease, scheme, signed[:], wire[8:])
 		if e.kind != .None {
 			return .Signing_Failed
 		}
 		wire[0] = 15; server_flight_put24(wire[1:4], 4 + n)
-		wire[4], wire[5], wire[6], wire[7] = 8, 4, u8(n >> 8), u8(n)
+		wire[4], wire[5], wire[6], wire[7] = u8(u16(scheme)>>8), u8(scheme), u8(n >> 8), u8(n)
 		f.stage = .Finished
 		return server_flight_bytes(owner, transmute([]u8)wire[:8 + n])
 	case .Finished:

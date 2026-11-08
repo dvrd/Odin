@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -169,6 +170,7 @@ func main() {
 	var wg sync.WaitGroup
 	results := make(chan error, count)
 	bits := make(chan int, count)
+	identities := make(chan string, count)
 	for i := 0; i < count; i++ {
 		wg.Add(1)
 		go func() {
@@ -301,7 +303,15 @@ func main() {
 				results <- fmt.Errorf("ALPN")
 				return
 			}
-			bits <- c.ConnectionState().PeerCertificates[0].PublicKey.(*rsa.PublicKey).N.BitLen()
+			identities <- string(c.ConnectionState().PeerCertificates[0].Raw)
+			switch key := c.ConnectionState().PeerCertificates[0].PublicKey.(type) {
+			case *rsa.PublicKey:
+				bits <- key.N.BitLen()
+			case *ecdsa.PublicKey:
+				bits <- key.Curve.Params().BitSize
+			default:
+				panic("unsupported peer key")
+			}
 			writeDone := make(chan error, 1)
 			if mode != "key-update" {
 				go func() { _, e := c.Write(payload); writeDone <- e }()
@@ -339,6 +349,7 @@ func main() {
 	wg.Wait()
 	close(results)
 	close(bits)
+	close(identities)
 	for e := range results {
 		must(e)
 	}
@@ -359,8 +370,19 @@ func main() {
 	for b := range bits {
 		sizes[b]++
 	}
-	if mode == "rotate" && (sizes[2048] == 0 || sizes[4096] == 0) {
-		panic("rotation did not preserve old/new generations")
+	if mode == "rotate" {
+		counts := map[string]int{}
+		for id := range identities {
+			counts[id]++
+		}
+		first, _ := pem.Decode(cert)
+		secondPEM, e := os.ReadFile(os.Args[6])
+		must(e)
+		second, _ := pem.Decode(secondPEM)
+		if first == nil || second == nil || counts[string(first.Bytes)] != 1 || counts[string(second.Bytes)] != count-1 {
+			panic("rotation did not preserve exact old/new certificate generations")
+		}
 	}
+
 	fmt.Printf("Go native async TLS %s clients=%d key_sizes=%v PASS\n%s%s", mode, count, sizes, rest.String(), diagnostics.String())
 }

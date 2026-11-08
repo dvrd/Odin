@@ -1,9 +1,10 @@
-// Immutable, bounded RSA server credential snapshots. No transport or file I/O.
+// Immutable, bounded native RSA/P-256 server credential snapshots. No transport or file I/O.
 package credentials
 
 import "core:bytes"
 import "core:crypto"
 import "core:crypto/hash"
+import "core:crypto/ecdsa"
 import "core:crypto/rsa"
 import "core:crypto/x509"
 import "core:encoding/pem"
@@ -42,6 +43,7 @@ Error :: enum {
 	Output_Aliases_Owner,
 	Entropy_Unavailable,
 	Signing_Failed,
+	Unsupported_Signature_Scheme,
 }
 Storage_Usage :: struct {
 	retained_bytes, peak_bytes: int,
@@ -61,7 +63,11 @@ Owner :: struct {
 	used, peak:                   int,
 	limit_hit, allocation_failed: bool,
 	allocations:                  [128]Allocation,
-	key:                          rsa.Private_Key,
+	using private: struct #raw_union {
+		key: rsa.Private_Key,
+		ec: ecdsa.Private_Key,
+	},
+	scheme: Signature_Scheme,
 	certs:                        [MAX_CERTIFICATES]x509.Certificate,
 	count:                        int,
 }
@@ -98,7 +104,7 @@ limits_normalize :: proc(limits: Limits) -> (Limits, bool) {
 		out.max_storage_bytes <= defaults.max_storage_bytes
 }
 
-// Copies leaf-first certificate DER and one unencrypted PKCS1/PKCS8 RSA key.
+// Copies leaf-first DER and one unencrypted RSA PKCS1/PKCS8 or P-256 SEC1/PKCS8 key.
 // Construction checks structure/key matching, not trust or current validity.
 @(require_results)
 create :: proc(
@@ -158,27 +164,11 @@ create :: proc(
 	} else if len(block.data) > x509.MAX_RSA_PKCS8_DER_SIZE {
 		key_error = .Input_Limit
 	} else {
-		parse_error: x509.Private_Key_Error
-		switch block.label {
-		case "PRIVATE KEY":
-			parse_error = x509.parse_pkcs8_rsa(&owner.key, block.data[:])
-		case "RSA PRIVATE KEY":
-			parse_error = x509.parse_pkcs1_rsa(&owner.key, block.data[:])
-		case:
-			key_error = .Unsupported_Key
-		}
-		if key_error == .None && parse_error.kind != .None {
-			key_error = .Malformed_Key
-		}
+		key_error = parse_credential_key(owner, block.label, block.data[:])
 	}
 	pem.block_delete(block)
 	if key_error != .None {
 		return nil, key_error
-	}
-	modulus: [512]u8
-	n := rsa.private_key_n(&owner.key, modulus[:])
-	if n < 256 || n > 512 || (n == 256 && modulus[0] < 0x80) {
-		return nil, .Unsupported_Key
 	}
 	remaining := trim_whitespace(chain_pem)
 	der_sum := 0
@@ -221,16 +211,19 @@ create :: proc(
 		return nil, .Malformed_PEM
 	}
 	leaf := &owner.certs[0]
-	exponent: u32
-	if len(leaf.rsa_e) > 4 {
-		return nil, .Key_Mismatch
+	if owner.scheme == .RSA_PSS_RSAE_SHA256 {
+		modulus: [512]u8
+		n := rsa.private_key_n(&owner.key, modulus[:])
+		exponent: u32
+		if len(leaf.rsa_e) > 4 {return nil, .Key_Mismatch}
+		for b in leaf.rsa_e {exponent = (exponent << 8) | u32(b)}
+		if leaf.public_key_algorithm != .RSA || !bytes.equal(leaf.rsa_n, modulus[:n]) || exponent != rsa.private_key_e(&owner.key) {return nil, .Key_Mismatch}
+	} else {
+		public: [65]u8
+		ecdsa.private_key_public_bytes(&owner.ec, public[:])
+		if leaf.public_key_algorithm != .ECDSA_P256 || !bytes.equal(leaf.ec_point, public[:]) {return nil, .Key_Mismatch}
 	}
-	for b in leaf.rsa_e {exponent = (exponent << 8) | u32(b)}
-	if leaf.public_key_algorithm != .RSA ||
-	   !bytes.equal(leaf.rsa_n, modulus[:n]) ||
-	   exponent != rsa.private_key_e(&owner.key) {
-		return nil, .Key_Mismatch
-	}
+
 	success = true
 	return handle, .None
 }
@@ -327,6 +320,7 @@ sign_digest_pss_sha256 :: proc(
 		return 0, .Entropy_Unavailable
 	}
 	owner := cast(^Owner)credential
+	if owner.scheme != .RSA_PSS_RSAE_SHA256 {return 0, .Unsupported_Key}
 	n := rsa.private_key_size(&owner.key)
 	if len(out) < n {
 		return 0, .Output_Too_Small

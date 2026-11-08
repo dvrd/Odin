@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Repeatable recordless server gate; owned fixtures, not a production driver."""
+"""Repeatable native server gate: credentials, engine, async TCP and consumers."""
 import argparse
 import hashlib
 import json
@@ -24,7 +24,7 @@ def main():
     compiler = pathlib.Path(args.odin).resolve()
     source_root = root if (root/'ci/webtools_consumer_gate.py').is_file() else compiler.parent
     report = {
-        'scope': 'recordless server correctness/ownership; no production binding or platform/throughput certification',
+        'scope': 'native credentials/recordless engine/async TCP correctness and ownership; no platform/throughput certification',
         'platform': platform.platform(), 'machine': platform.machine(),
         'compiler_sha256': hashlib.sha256(compiler.read_bytes()).hexdigest(),
         'sanitizer': args.sanitize, 'checks': [], 'passed': False,
@@ -52,6 +52,8 @@ def main():
             flags = ['-warnings-as-errors', '-sanitize:' + args.sanitize,
                      '-define:ODIN_TEST_THREADS=1', '-define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true']
             for name, package in [('server', root/'core/crypto/tls'),
+                                  ('credentials', root/'core/crypto/tls/credentials'),
+                                  ('credential-store', root/'core/crypto/tls/credentials/store'),
                                   ('native-client', source_root/'tests/core/crypto/tls')]:
                 check(name, [compiler, 'test', package, *flags, '-out:' + str(temp/name)])
             check('Surf', [compiler, 'test', source_root/'shared/surf/tests', *flags,
@@ -64,6 +66,16 @@ def main():
                   '--odin', compiler, '--go', args.go, '--go-root', args.go_root,
                   '--openssl', args.openssl, '--sanitize', args.sanitize, '--report', peer_report])
             report['peers'] = json.loads(peer_report.read_text())
+            signing_report = temp/'signing.json'
+            check('concurrent-signing', ['python3', root/'tests/core/crypto/tls/credentials/concurrency.py',
+                  '--odin', compiler, '--go', args.go, '--go-root', args.go_root,
+                  '--openssl', args.openssl, '--sanitize', args.sanitize, '--report', signing_report])
+            report['signing'] = json.loads(signing_report.read_text())
+            tcp_report = temp/'tcp.json'
+            check('async-tcp', ['python3', root/'tests/core/crypto/tls/server_tcp.py',
+                  '--odin', compiler, '--go', args.go, '--go-root', args.go_root,
+                  '--openssl', args.openssl, '--sanitize', args.sanitize, '--report', tcp_report])
+            report['tcp'] = json.loads(tcp_report.read_text())
             consumer_report = temp/'consumers.json'
             check('isolated-consumers', ['python3', source_root/'ci/webtools_consumer_gate.py',
                   '--odin', compiler, '--packages', 'surf', '--report', consumer_report])

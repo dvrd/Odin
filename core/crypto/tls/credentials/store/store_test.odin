@@ -580,3 +580,30 @@ store_races_distinct_leases_rotation_and_close_with_bounded_storage :: proc(t: ^
 		total,
 	)
 }
+
+@(test)
+store_typed_algorithms_survive_cross_algorithm_rotation_and_close :: proc(t:^testing.T) {
+	store:=make_store();defer destroy(&store)
+	ec,e:=credentials.create(#load("../../../../../tests/core/crypto/tls/credentials/testdata/p256-valid.pem"),#load("../../../../../tests/core/crypto/tls/credentials/testdata/p256.pem"),{},context.allocator);assert(e==.None)
+	assert(replace(store,&ec).kind==.None && ec==nil)
+	old,ae:=acquire(store);assert(ae.kind==.None)
+	scheme,se:=signature_scheme(store,old);testing.expect_value(t,se.kind,.None);testing.expect_value(t,scheme,.ECDSA_SECP256R1_SHA256)
+	before,_:=fingerprint(store,old)
+	rsa:=make_credential();assert(replace(store,&rsa).kind==.None)
+	newer,ne:=acquire(store);assert(ne.kind==.None)
+	rs,re:=signature_scheme(store,newer);testing.expect_value(t,re.kind,.None);testing.expect_value(t,rs,.RSA_PSS_RSAE_SHA256)
+	assert(close(store).kind==.None)
+	out:[512]u8
+	for lease in ([]Lease{old,newer}) {
+		sc,ce:=signature_scheme(store,lease);testing.expect_value(t,ce.kind,.None)
+		n,sign_error:=sign_sha256(store,lease,sc,[]u8{1,2,3},out[:]);testing.expect_value(t,sign_error.kind,.None);testing.expect(t,n>0)
+	}
+	after,_:=fingerprint(store,old);testing.expect_value(t,before,after)
+	_,wrong:=sign_sha256(store,old,.RSA_PSS_RSAE_SHA256,[]u8{1},out[:]);testing.expect_value(t,wrong.credential,.Unsupported_Signature_Scheme)
+	stale:=old;assert(release(store,&old).kind==.None);assert(release(store,&newer).kind==.None)
+	_,stale_error:=signature_scheme(store,stale);testing.expect(t,stale_error.kind!=.None)
+	for &b in out {b=0xa5}
+	_,stale_sign:=sign_sha256(store,stale,.ECDSA_SECP256R1_SHA256,[]u8{1},out[:]);testing.expect(t,stale_sign.kind!=.None)
+	for b in out {testing.expect_value(t,b,u8(0xa5))}
+	stats,_:=stats(store);testing.expect_value(t,stats.generations,0);testing.expect_value(t,stats.active_leases,0)
+}

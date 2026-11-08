@@ -1,25 +1,24 @@
 package main
 import "core:crypto"
-import "core:crypto/hash"
-import credentials "core:crypto/tls/credentials"
+import credentials "../../../../../../../core/crypto/tls/credentials"
 import "core:fmt"
 import "core:os"
 import "core:thread"
 
 Work :: struct {
 	credential: ^credentials.Credential,
-	digest:     [32]u8,
+	scheme: credentials.Signature_Scheme,
 	signatures: [8][512]u8,
-	length:     int,
+	length: [8]int,
 	error:      credentials.Error,
 }
 run :: proc(work: ^Work) {
-	for &signature in work.signatures {
-		n, error := credentials.sign_digest_pss_sha256(work.credential, work.digest, signature[:])
+	for &signature,i in work.signatures {
+		n, error := credentials.sign_sha256(work.credential, work.scheme, transmute([]u8)string("credential-concurrency-fixture"), signature[:])
 		if error != .None {
 			work.error = error; return
 		}
-		work.length = n
+		work.length[i] = n
 	}
 }
 main :: proc() {
@@ -37,7 +36,7 @@ main :: proc() {
 	threads: [8]^thread.Thread
 	for &job, i in jobs {
 		job.credential = owner
-		hash.hash_string_to_buffer(.SHA256, "credential-concurrency-fixture", job.digest[:])
+		job.scheme = credentials.signature_scheme(owner)
 		threads[i] = thread.create_and_start_with_poly_data(&job, run)
 		assert(threads[i] != nil)
 	}
@@ -46,7 +45,7 @@ main :: proc() {
 		assert(job.error == .None)
 		for &signature, j in job.signatures {
 			path := fmt.aprintf("%s/%d-%d.sig", os.args[3], i, j)
-			assert(os.write_entire_file(path, signature[:job.length]) == nil)
+			assert(os.write_entire_file(path, signature[:job.length[j]]) == nil)
 			delete(path)
 		}
 	}

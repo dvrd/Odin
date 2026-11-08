@@ -520,3 +520,16 @@ certificate_algorithms :: proc(store: ^Store, lease: Lease, index: int) -> (cred
 	metadata, cause := credentials.certificate_algorithms(credential, index)
 	return metadata, Error{} if cause == .None else Error{kind=.Credential_Failed, credential=cause}
 }
+
+// Scheme identity and signing are valid only while this owning lease is live.
+signature_scheme :: proc(store:^Store, lease:Lease) -> (credentials.Signature_Scheme,Error) {
+	credential,error:=borrow(store,lease)
+	if error.kind!=.None {return .None,error}
+	return credentials.signature_scheme(credential),{}
+}
+sign_sha256 :: proc(store:^Store, lease:Lease, scheme:credentials.Signature_Scheme, message,out:[]u8) -> (int,Error) {
+	credential,error:=borrow(store,lease)
+	if error.kind!=.None {return 0,error}
+	n,cause:=credentials.sign_sha256(credential,scheme,message,out)
+	return n, Error{} if cause==.None else Error{kind=.Credential_Failed,credential=cause}
+}

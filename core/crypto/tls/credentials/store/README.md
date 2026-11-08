@@ -1,6 +1,6 @@
 # Bounded credential publication and leases
 
-`core:crypto/tls/credentials/store` publishes immutable RSA credentials and pins
+`core:crypto/tls/credentials/store` publishes immutable RSA/P-256 credentials and pins
 retired owners while handshakes still borrow them. It is independent of the
 parent TLS client, TCP executor, files, environment and background workers.
 It adds no implicit clock, certificate policy, trust store or handshake.
@@ -31,7 +31,8 @@ pin. Transfer it by assignment followed by clearing the source. Do not forge its
 fields or concurrently release it against its own borrowers/signers. Distinct
 leases may be used concurrently and may refer to the same immutable generation.
 
-`certificate_count`, `certificate_der`, `fingerprint`, `sign_digest_pss_sha256`
+`certificate_count`, `certificate_der`, `fingerprint`, `sign_digest_pss_sha256`,
+`signature_scheme`, `sign_sha256`
 and `check_server_leaf` forward to the immutable credential while validating the
 lease. No owning credential pointer is exposed. DER is an immutable borrow by
 convention, valid only until that lease is released. Native credential failures
@@ -116,7 +117,7 @@ value is 32 bytes. Actual platform sizes are observable through `stats`.
 Acquiring/releasing leases performs no allocation; tests hold the allocator-call
 count constant through 256 cycles.
 
-Eight tests exercise old/new RSA key sizes across rotation, DER lifetime,
+Nine tests exercise old/new RSA key sizes and RSA/ECDSA algorithms across rotation, DER lifetime,
 typed forwarding errors, capacity preservation, stale/foreign/reused handles,
 Busy shutdown, isolated saturating-ID allocation, all three metadata allocation
 positions under five failure modes, full erasure and out-of-lock observation,

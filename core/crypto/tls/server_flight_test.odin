@@ -250,7 +250,7 @@ server_flight_admission_rejections :: proc(t: ^testing.T) {
 		testing.expect_value(
 			t,
 			scheme != 0,
-			algorithm == .RSA_SHA256 || algorithm == .RSA_SHA384 || algorithm == .RSA_SHA512,
+			algorithm == .RSA_SHA256 || algorithm == .RSA_SHA384 || algorithm == .RSA_SHA512 || algorithm == .ECDSA_SHA256,
 		)
 	}
 }

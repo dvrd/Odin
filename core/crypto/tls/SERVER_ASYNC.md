@@ -101,10 +101,10 @@ for releasing its resource according to its own contract.
 
 ## Profile and verification
 
-TLS1.3, AES128GCM-SHA256, X25519/P256, one stateful key-share retry, RSA-PSS
+TLS1.3, AES128GCM-SHA256, X25519/P256, one stateful key-share retry, RSA-PSS/P-256 ECDSA
 credentials and bounded server-preferred ALPN are supported. TCP rejects QUIC
 parameter configuration/presence and early_data. No resumption,0RTT, tickets,
-client authentication, renegotiation, ECDSA server credentials or automatic
+client authentication, renegotiation or automatic
 connection pooling is supplied. QUIC consumes recordless events separately.
 
 Run the actual async TCP gate from the checkout:
@@ -118,11 +118,11 @@ python3 tests/core/crypto/tls/server_tcp.py --odin ./odin \
 Repeat with `--sanitize thread`. Installed offline Go, OpenSSL development files,
 pkg-config, clang and permission for owned ephemeral loopback listeners are
 required. No external network endpoint or downloaded dependency is used. The
-optional `--case` prefix is for diagnosis; acceptance requires all35 cases with
+optional `--case` prefix is for diagnosis; acceptance requires all61 cases with
 no filter. Reports retain passed=false on failure and record compiler digest,
 client versions, per-session memory/leases and exact peer outcomes.
 
-The24 Go and11 OpenSSL cases cover independent authentication, RSA2048/4096,
+The40 Go and21 OpenSSL cases cover independent authentication, RSA2048/4096/P-256 credentials,
 16 padded certificates, both groups/retries,40KiB in both directions, ALPN,
 key updates in both directions, concurrent8 sessions on one executor,
 fragmentation/backpressure, credential rotation during outstanding server output,
@@ -130,12 +130,12 @@ malformed records, bad encrypted Finished, EOF/deadline/cancel/active close and
 exact trust/hostname/time/ALPN rejections. Rotation uses an explicit45-second
 fixture handshake budget for eight serial sanitizer-instrumented RSA4096 signs;
 the production default remains10 seconds. Every close asserts zero owned bytes
-and final store disposal asserts zero leases/generations. The eleven new core
+and final store disposal asserts zero leases/generations. The eleven async core
 tests additionally audit unusual/failing allocations, partial writes, callback
 owner destruction, exact retry budget, control/nonce boundaries and secret
 erasure. Run them with the existing [verification gate](SERVER_VERIFICATION.md)
 which also preserves native client/Surf and isolated consumer checks.
 
 Evidence is restricted to the recorded local toolchain/platform. Broader HTTP
-server adoption, QUIC transport integration, ECDSA and application vendored
+server adoption, QUIC transport integration and application vendored
 copies require their own work and validation.
