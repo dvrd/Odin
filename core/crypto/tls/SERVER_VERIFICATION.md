@@ -15,7 +15,7 @@ Use the matching compiler/standard-library/LLVM pairing in ci/WEBTOOLS_TOOLCHAIN
 All binaries, generated public certificates, pipe/file exchanges and reports use
 temporary storage. Existing credentials are published fixture keys only.
 
-The gate runs the46-test core server package (including deterministic hello
+The gate runs the57-test core server package (including deterministic hello
 mutation/transcript, fragmentation/coalescing, allocator failures and complete-
 grant erasure),23 native client tests,22 Surf tests, the public owner consumer,
 independent Go/OpenSSL peers, and empty/isolated Surf executable consumers. It
@@ -23,6 +23,10 @@ records commands, full outputs, return codes, sanitizer, compiler digest/version
 client versions and measured owner/event/retry-grant sizes. A missing memory
 measurement or failed subprocess fails the gate; failed gates retain a report
 with passed=false. There is no passing skip for a missing client/compiler.
+
+The async server adds eleven core tests; its actual TCP wire gate and measured
+connection budget are documented in [SERVER_ASYNC.md](SERVER_ASYNC.md).
+This recordless peer fixture remains separate from that driver.
 
 The peer-only command remains available as server_flight.py. Without --openssl
 it runs16 Go cases; with an explicit --openssl it also runs11 OpenSSL cases.
@@ -79,6 +83,6 @@ This verifies the current restricted RSA-PSS server engine on the recorded local
 platform. It does not certify non-Darwin execution, throughput, ECDSA credentials,
 client certificates, resumption, stateless cookies or production TCP/QUIC bindings.
 Engine146's restricted-engine acceptance audit is recorded in
-reports/webtools-engine-2026-11-07.md;147/98 and broader96 remain open until their
-bindings/integration gates pass. ECDSA158 remains separate before
+reports/webtools-engine-2026-11-07.md. The async TCP binding has its own gate;
+QUIC98 and broader96 require separate integration evidence. ECDSA158 remains separate before
 a general TLS baseline-compliance claim.

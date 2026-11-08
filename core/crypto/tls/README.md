@@ -1,4 +1,4 @@
-# TLS client
+# Native TLS
 
 Import `core:crypto/tls`. This package implements a TLS 1.3 client using
 X25519 and AES-128-GCM/SHA-256. It authenticates the server with
@@ -76,8 +76,8 @@ record buffering, key updates, authenticated shutdown and truncation detection.
 Client [ALPN](ALPN.md) offers/selections are bounded and shared by blocking and
 asynchronous handshakes. Read authenticated selection through `connection_state`
 or `async_connection_state`; Surf currently permits only HTTP/1.1 offers.
-TLS 1.2, server mode, client certificates, session resumption and 0-RTT
-are not implemented. Certificate policy and revocation capabilities follow
+TLS 1.2, client certificates, session resumption and 0-RTT are not implemented.
+The separate restricted server API is described below. Certificate policy and revocation capabilities follow
 `core:crypto/x509`.
 
 ## Verification
@@ -110,6 +110,8 @@ admits a pinned RSA credential, emits the server flight and traffic secrets,
 and authenticates client Finished before publishing Complete. It supports the
 restricted TLS1.3/X25519-or-P256/AES128GCM/RSA-PSS profile with explicit ALPN/
 opaque QUIC parameter handoff and one key-share retry (SERVER_RETRY.md); no
-resumption, client certificates or production TCP/QUIC binding is provided.
+resumption, client certificates or QUIC binding is provided.
+The [lean async TCP server](SERVER_ASYNC.md) binds these events to the existing
+`net.Async_Connection`/caller executor without a second I/O owner.
 Existing client APIs and behavior are unchanged. See the contract for explicit
 input boundaries, transient erasure and event acceptance requirements.

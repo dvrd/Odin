@@ -1,0 +1,157 @@
+package tls
+
+import "core:crypto"
+import "core:net"
+import "core:time"
+
+@(private)
+server_async_receive_done :: proc(op:^net.Async_Operation) {
+	s:=cast(^Server_Async_Conn)op.user_data
+	remaining:=5-s._rx_header_used if s._rx_into_header else s._rx_expected-s._rx_used
+	n:=op.result.count
+	if n<0 || n>remaining {s._rx_error={kind=.Invalid_Count}} else {
+		if s._rx_into_header {s._rx_header_used+=n} else {s._rx_used+=n}
+		s._rx_error=op.result.err
+		if n==0 && s._rx_error.kind==.None {s._rx_error={kind=.No_Progress}}
+	}
+	server_async_queue(s)
+}
+@(private)
+server_async_receive_error :: proc(s:^Server_Async_Conn) -> bool {
+	e:=s._rx_error;if e.kind==.None {return false}
+	if s._phase==.Established && (e.kind==.Timeout || e.kind==.Cancelled) {
+		s._rx_error={};if s._read_cancel {e={kind=.Cancelled}}
+		server_async_emit(s,.Read,e)
+	} else {
+		kind:=Server_Async_Failure_Kind.Transport
+		if e.kind==.Peer_Closed {kind=.Unexpected_EOF;e={kind=.Protocol_Failed}}
+		server_async_fail(s,e,{kind=kind,transport=s._rx_error})
+	}
+	return true
+}
+@(private)
+server_async_receive_record :: proc(s:^Server_Async_Conn,deadline:time.Time) -> (Record_Header,bool) {
+	if s._rx.pending {return {},false}
+	if s._rx_header_used==5 && s._rx_expected==0 {
+		h,e:=record_header_decode(s._rx_header)
+		if e!=.None {server_async_fail(s,{kind=.Protocol_Failed},{kind=.Record,record=e});return {},false}
+		if h.legacy_version!=LEGACY_TLS_1_2 && !(s._phase==.Handshaking && !s._ccs_allowed && h.content_type==.Handshake && h.legacy_version==LEGACY_TLS_1_0) {
+			server_async_fail(s,{kind=.Protocol_Failed},{kind=.Record,protection=.Invalid_Legacy_Version});return {},false
+		}
+		if h.content_type==.Application_Data {
+			if !s._read_keys {server_async_fail(s,{kind=.Protocol_Failed},{kind=.Record,protection=.Invalid_State});return {},false}
+			if int(h.length)>MAX_CIPHERTEXT_SIZE || int(h.length)<GCM_TAG_SIZE+1 {
+				server_async_fail(s,{kind=.Protocol_Failed},{kind=.Record,protection=.Record_Oversized});return {},false
+			}
+		} else {
+			if error:=record_header_validate_plaintext(h);error!=.None {server_async_fail(s,{kind=.Protocol_Failed},{kind=.Record,record=error});return {},false}
+		}
+		if !server_async_grant(s,&s._rx_wire,RECORD_HEADER_SIZE+MAX_CIPHERTEXT_SIZE) {return {},false}
+		copy(s._rx_wire,s._rx_header[:]);s._rx_used=5;s._rx_expected=5+int(h.length)
+	}
+	if s._rx_expected!=0 && s._rx_used==s._rx_expected {
+		h,_:=record_header_decode(s._rx_header)
+		// Complete authenticated records win transient cancellation/deadline
+		// races. Other trailing transport errors stay visible at the next read.
+		if s._rx_error.kind==.Timeout || s._rx_error.kind==.Cancelled {s._rx_error={}}
+		return h,true
+	}
+	if server_async_receive_error(s) {return {},false}
+	if s._phase==.Established && s._read_cancel {server_async_emit(s,.Read,{kind=.Cancelled});return {},false}
+	if deadline!=(time.Time{}) && time.diff(time.now(),deadline)<=0 {
+		if s._phase==.Established {server_async_emit(s,.Read,{kind=.Timeout})} else {server_async_fail(s,{kind=.Timeout},{kind=.Handshake})}
+		return {},false
+	}
+	s._rx_into_header=s._rx_header_used<5
+	dst:=s._rx_header[s._rx_header_used:]
+	if !s._rx_into_header {dst=s._rx_wire[s._rx_used:s._rx_expected]}
+	e:=net.async_read(s._transport,&s._rx,dst,deadline)
+	if e.kind!=.None {s._rx_error=e;server_async_queue(s)}
+	return {},false
+}
+@(private)
+server_async_record_consumed :: proc(s:^Server_Async_Conn,keep_plain:=false) {
+	if s._stats.read_records<max(int) {s._stats.read_records+=1}
+	if len(s._rx_wire)>0 {crypto.zero_explicit(raw_data(s._rx_wire),len(s._rx_wire))}
+	crypto.zero_explicit(&s._rx_header,size_of(s._rx_header))
+	s._rx_header_used,s._rx_used,s._rx_expected=0,0,0
+	if !keep_plain {server_async_plain_consumed(s)}
+}
+@(private)
+server_async_plain_consumed :: proc(s:^Server_Async_Conn) {
+	if len(s._rx_plain)>0 {crypto.zero_explicit(raw_data(s._rx_plain),len(s._rx_plain))}
+	s._plain_at,s._plain_size=0,0
+}
+@(private)
+server_async_open :: proc(s:^Server_Async_Conn) -> (TLS_Content_Type,[]u8,bool) {
+	if !server_async_grant(s,&s._rx_plain,MAX_CIPHERTEXT_SIZE) {return {},nil,false}
+	kind,body,e:=record_open(&server_async_keys(s).read,s._rx_plain,s._rx_wire[:s._rx_expected])
+	if e!=.None {server_async_fail(s,{kind=.Protocol_Failed},{kind=.Record,protection=e});return {},nil,false}
+	return kind,body,true
+}
+@(private)
+server_async_send_record :: proc(s:^Server_Async_Conn,content:TLS_Content_Type,body:[]u8,kind:Server_Async_Send,deadline:time.Time) -> bool {
+	if !server_async_grant(s,&s._tx_wire,RECORD_HEADER_SIZE+MAX_CIPHERTEXT_SIZE) {return false}
+	n:=0
+	if s._write_keys {
+		size,e:=record_seal(&server_async_keys(s).write,s._tx_wire,content,body)
+		if e!=.None {server_async_fail(s,{kind=.Protocol_Failed},{kind=.Record,protection=e});return false};n=size
+	} else {
+		if len(body)>MAX_PLAINTEXT_SIZE {server_async_fail(s,{kind=.Protocol_Failed},{kind=.Limit});return false}
+		header:=record_header_encode({content_type=content,legacy_version=LEGACY_TLS_1_2,length=u16(len(body))})
+		copy(s._tx_wire,header[:]);copy(s._tx_wire[5:],body);n=5+len(body)
+	}
+	s._tx_kind,s._tx_size=kind,n
+	e:=net.async_write(s._transport,&s._tx,s._tx_wire[:n],deadline)
+	if e.kind!=.None {s._tx.result={err=e};s._tx_done=true;server_async_queue(s)}
+	return true
+}
+@(private)
+server_async_send_done :: proc(op:^net.Async_Operation) {
+	s:=cast(^Server_Async_Conn)op.user_data;s._tx_done=true;server_async_queue(s)
+}
+@(private)
+server_async_send_process :: proc(s:^Server_Async_Conn) {
+	kind:=s._tx_kind;s._tx_kind=.None
+	n,e:=s._tx.result.count,s._tx.result.err
+	if n<0 || n>s._tx_size {e={kind=.Invalid_Count}}
+	if n==s._tx_size && (e.kind==.Cancelled || e.kind==.Timeout) {e={}}
+	if n!=s._tx_size || e.kind!=.None {
+		if e.kind==.None {e={kind=.Write_Failed}}
+		if kind==.Notify {s._close_error=e}
+		server_async_fail(s,e,{kind=.Transport,transport=e,wire_transferred=n});return
+	}
+	if s._stats.written_records<max(int) {s._stats.written_records+=1}
+	if len(s._tx_wire)>0 {crypto.zero_explicit(raw_data(s._tx_wire),len(s._tx_wire))}
+	switch kind {
+	case .Handshake:
+		e:=server_handshake_accept(&s._engine,s._engine_event);s._engine_event=0
+		if e!=.None {server_async_fail(s,{kind=.Protocol_Failed},{kind=.Handshake,engine=e})}
+	case .Data:
+		if s._write_op!=nil {
+			s._write_op.result.count+=s._tx_plain_count
+			if s._write_op.result.count==len(s._write_buffer) {server_async_emit(s,.Write,{})}
+		}
+	case .Key_Update:
+		server_async_rotate(s,.Write)
+		if s._stats.sent_key_updates<max(int) {s._stats.sent_key_updates+=1}
+	case .Notify: s._notify_sent=true
+	case .Fatal_Alert: s._fatal_alert_sent=true
+	case .None:
+	}
+	s._tx_size,s._tx_plain_count=0,0
+}
+@(private)
+server_async_install :: proc(s:^Server_Async_Conn,direction:Server_Handshake_Direction,secret:[32]u8) {
+	key,iv:=traffic_key_iv(secret)
+	defer crypto.zero_explicit(&key,size_of(key));defer crypto.zero_explicit(&iv,size_of(iv))
+	keys:=server_async_keys(s)
+	if direction==.Read {record_protection_init(&keys.read,key,iv);s._read_keys=true} else {record_protection_init(&keys.write,key,iv);s._write_keys=true}
+}
+@(private)
+server_async_rotate :: proc(s:^Server_Async_Conn,direction:Server_Handshake_Direction) {
+	keys:=server_async_keys(s)
+	if direction==.Read {keys.application_read=traffic_secret_update(keys.application_read);server_async_install(s,.Read,keys.application_read)} else {
+		keys.application_write=traffic_secret_update(keys.application_write);server_async_install(s,.Write,keys.application_write)
+	}
+}
