@@ -54,11 +54,12 @@ allocate_in_scope :: proc(
 		max(alignment, align_of(Header)),
 		state.backing,
 	)
-	if ae != nil || len(storage) != int(cost) || raw_data(storage) == nil {
-		if ae == nil {
-			if raw_data(storage) != nil do delete(storage, state.backing)
-			ae = .Out_Of_Memory
-		}
+	if ae != nil || len(storage) != int(cost) || raw_data(storage) == nil ||
+	   uintptr(raw_data(storage)) % uintptr(max(alignment, align_of(Header))) != 0 {
+		// An error does not transfer disposal responsibility back to the
+		// allocator. Release every reported grant before dropping its charge.
+		if raw_data(storage) != nil do delete(storage, state.backing)
+		if ae == nil do ae = .Out_Of_Memory
 		scopes.release(&lease); record_failure(state, true); release_state(state)
 		return nil, {kind = .Allocation_Failed, allocation = ae}
 	}
