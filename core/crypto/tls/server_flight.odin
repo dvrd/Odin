@@ -250,7 +250,8 @@ server_flight_next :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 		f.stage = .End
 		return server_flight_secret(owner, f.application.client_traffic_secret[:], .Read, true)
 	case .End:
-		_ = credential_store.release(f.store, &f.lease); f.store = nil
+		// Keep the admitted generation pinned through client Finished. Shared
+		// cleanup releases it on verified completion or any terminal failure.
 		crypto.zero_explicit(&f.application, size_of(f.application))
 		f.stage = .None; owner._phase = .Await_Client_Finished
 		return .None

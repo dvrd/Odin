@@ -135,3 +135,27 @@ server_finished_wrong_level_partial_cancel_and_pending_complete_teardown :: proc
 		}
 	}
 }
+
+@(test)
+server_finished_retains_credential_generation_through_authentication :: proc(t:^testing.T) {
+	for mode in 0..<5 {
+		store:=flight_test_store(t)
+		a:=Owner_Test_Audit{backing=context.allocator};o:Server_Handshake
+		wire:=finished_test_start(t,&o,&a,store)
+		ss,_:=credential_store.stats(store);testing.expect_value(t,ss.active_leases,1)
+		// Host retirement cannot free the pinned immutable generation before
+		// authentication/abort, even with all DER/output events accepted.
+		testing.expect_value(t,credential_store.close(store).kind,.None)
+		ss,_=credential_store.stats(store);testing.expect_value(t,ss.generations,1)
+		if mode<2 {
+			if mode==1 {wire[35]~=1}
+			_,_,e:=server_handshake_feed(&o,.Handshake,wire[:]);testing.expect_value(t,e,.None if mode==0 else .Finished_Failed)
+		} else if mode==2 {server_handshake_abort(&o)} else if mode==3 {server_handshake_destroy(&o)} else {
+			_,_,e:=server_handshake_feed(&o,.Initial,wire[:]);testing.expect_value(t,e,.Wrong_Level)
+		}
+		ss,_=credential_store.stats(store);testing.expect_value(t,ss.active_leases,0);testing.expect_value(t,ss.generations,0)
+		server_handshake_destroy(&o);owner_test_clean(t,&a)
+		ss,_=credential_store.stats(store);testing.expect_value(t,ss.active_leases,0)
+		credential_store.destroy(&store)
+	}
+}

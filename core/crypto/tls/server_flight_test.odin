@@ -154,7 +154,7 @@ server_flight_crypto_order_streaming_and_pin :: proc(t: ^testing.T) {
 				testing.expect_value(t, credential_store.close(store).kind, .None)
 			}
 			stats, _ := credential_store.stats(store)
-			testing.expect_value(t, stats.active_leases, 0 if secret_index == 4 else 1)
+			testing.expect_value(t, stats.active_leases, 1)
 		}
 		testing.expect_value(t, secret_index, 4)
 		testing.expect_value(t, o._phase, .Await_Client_Finished)
@@ -163,8 +163,8 @@ server_flight_crypto_order_streaming_and_pin :: proc(t: ^testing.T) {
 			t,
 			mem.check_zero_ptr(&o._flight.application, size_of(o._flight.application)),
 		)
-		ss, _ := credential_store.stats(store); testing.expect_value(t, ss.active_leases, 0)
-		testing.expect_value(t, ss.generations, 0)
+		ss, _ := credential_store.stats(store); testing.expect_value(t, ss.active_leases, 1)
+		testing.expect_value(t, ss.generations, 1)
 		// Decode concatenated test output independently of producer stages.
 		at := 0; expected_types := []u8{8, 11, 15, 20}
 		verify_transcript: Handshake_Transcript; transcript_init(&verify_transcript)
@@ -213,6 +213,7 @@ server_flight_crypto_order_streaming_and_pin :: proc(t: ^testing.T) {
 			time.tick_since(started),
 		)
 		server_handshake_destroy(&o); owner_test_clean(t, &a)
+		ss,_ = credential_store.stats(store); testing.expect_value(t,ss.active_leases,0); testing.expect_value(t,ss.generations,0)
 	}
 }
 

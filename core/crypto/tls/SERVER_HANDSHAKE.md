@@ -46,14 +46,15 @@ event may produce one event, allocate scratch or synchronously sign; while an
 event is pending, repeated peeks never advance or hash it again. Signing uses
 OS entropy and is synchronous/non-preemptible; caller owns that latency policy.
 
-Accepting the last application-secret event releases the credential lease and
-erases the handshake/application schedules. The owner then enters its
-Await_Client_Finished phase, retaining the client handshake secret and transcript
-until client Finished authentication. Feed exactly one Finished at Handshake
-level; its 32-byte MAC is checked in constant time against the accepted transcript
-through server Finished and the client handshake traffic secret. No client
-certificate authentication is requested/supplied. Possession of application
-secrets or tentative peer offers never authorizes application delivery.
+Accepting the last application-secret event erases the handshake/application
+schedules and enters Await_Client_Finished. The owner retains the credential
+lease, client handshake secret and transcript until authentication. Feed exactly
+one Finished at Handshake level; its32-byte MAC is checked in constant time
+against the accepted transcript through server Finished and the client handshake
+traffic secret. Verified Finished (after all output acceptance) releases the
+credential lease through shared cleanup; failure/abort/destroy release it too.
+No client certificate authentication is requested/supplied. Possession of
+application secrets or tentative peer offers never authorizes application delivery.
 
 On successful verification and with every flight event accepted, the engine
 wipes/frees handshake input/output grants, partial input, secrets and transcript,
@@ -62,8 +63,8 @@ as authenticated until Complete acceptance wipes/frees their separate grant.
 Copy required durable state and accept
 that event before the binding delivers application data. Complete is repeatably
 peekable until accepted; stale/duplicate acceptance fails. No subsequent Complete
-is generated. Engine146, independent matrix157 and
-TCP147/QUIC98 remain open.
+is generated. Independent engine verification is documented separately; production
+TCP147/QUIC98 bindings remain open.
 
 ## Feed and event ownership
 
@@ -118,7 +119,8 @@ Every output borrow, including copied event structs, ends at accept/abort/destro
 The private producer seam copies at most 2,048 bytes into reusable scratch or
 borrows an immutable pinned certificate fragment. Shared DER is never wiped by
 the owner. Its credential lease stays live through all DER borrows and is
-released exactly once after the flight or during failure/abort/destroy. The seam has no public
+released exactly once after accepted output plus verified client Finished, or
+during failure/abort/destroy. The seam has no public
 injection API and refuses Complete even internally. Only the Finished consumer
 can publish success after authentication. The flight producer enforces protocol
 state/order.

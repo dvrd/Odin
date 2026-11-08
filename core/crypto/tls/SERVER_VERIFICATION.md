@@ -15,7 +15,7 @@ Use the matching compiler/standard-library/LLVM pairing in ci/WEBTOOLS_TOOLCHAIN
 All binaries, generated public certificates, pipe/file exchanges and reports use
 temporary storage. Existing credentials are published fixture keys only.
 
-The gate runs the45-test core server package (including deterministic hello
+The gate runs the46-test core server package (including deterministic hello
 mutation/transcript, fragmentation/coalescing, allocator failures and complete-
 grant erasure),23 native client tests,22 Surf tests, the public owner consumer,
 independent Go/OpenSSL peers, and empty/isolated Surf executable consumers. It
@@ -55,7 +55,9 @@ Handshakes use deterministic record cuts across message headers/DER/CV and
 byte-at-a-time native ClientHello/Finished input, with all CH2 splits, coalesced
 suffixes and changed transcript/MAC positions in core package tests. Failure and
 cancellation audit full reported allocator grants, including unusual grants,
-plus stable event identity and credential pins. This is bounded deterministic
+plus stable event identity and credential pins. A finished-lifetime regression
+retains one retired credential generation through client authentication, then
+requires exact release on success, bad MAC, abort, destroy or wrong level. This is bounded deterministic
 coverage rather than exhaustive fuzzing or a complete crypto/security review.
 
 The adapter performs its own close_notify exchange and tears down listener,
@@ -76,6 +78,7 @@ stack/register copies, RSS and consumer copies are outside engine measurements.
 This verifies the current restricted RSA-PSS server engine on the recorded local
 platform. It does not certify non-Darwin execution, throughput, ECDSA credentials,
 client certificates, resumption, stateless cookies or production TCP/QUIC bindings.
-Engine146's rollup requires its own acceptance audit;147/98 and broader96 remain
-open until their bindings/integration gates pass. ECDSA158 remains separate before
+Engine146's restricted-engine acceptance audit is recorded in
+reports/webtools-engine-2026-11-07.md;147/98 and broader96 remain open until their
+bindings/integration gates pass. ECDSA158 remains separate before
 a general TLS baseline-compliance claim.

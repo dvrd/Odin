@@ -76,8 +76,8 @@ recordless exchange: fragmented handshake bytes, both opaque parameter blobs,
 four matching directional secrets and actual client Finished/native Complete.
 The QUIC fixture's deliberately opaque test bytes are not semantic validation of
 transport parameters. It implements no packets, recovery, application transport,
-TCP driver or HTTP versions. Engine146, independent matrix157,
-ECDSA158 and bindings147/98 remain separate open gates.
+TCP driver or HTTP versions. Independent verification is documented in
+SERVER_VERIFICATION.md; ECDSA158 and bindings147/98 remain separate open gates.
 
 References: [RFC7301 section3.2](https://www.rfc-editor.org/rfc/rfc7301.html#section-3.2),
 [RFC9001 section8](https://www.rfc-editor.org/rfc/rfc9001.html#section-8),
