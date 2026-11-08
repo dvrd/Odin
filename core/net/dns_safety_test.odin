@@ -320,7 +320,7 @@ dns_bounded_deterministic_mutations_do_not_escape_tracking_or_bounds :: proc(t: 
 		data := []u8{0xc0, 12}
 		if kind == .IP4 {data = []u8{192, 0, 2, 7}}
 		f := dns_safety_fixture(kind, data, 2)
-		for mutation in 0..<1+iteration%4 {
+		for _ in 0..<1+iteration%4 {
 			seed = seed*1664525+1013904223
 			at := int(seed%u32(f.length))
 			f.bytes[at] = u8(seed>>24)
