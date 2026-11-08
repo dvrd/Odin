@@ -23,6 +23,8 @@ def main():
             go_cases=[('x25519',*base,1,'normal'),('rsa4096',fixtures/'rsa4096-valid.pem',fixtures/'rsa4096.pem',1,'normal'),('chain16',chain,base[1],1,'normal')]+[(mode,*base,8 if mode in ['rotate','concurrent'] else 1,'normal' if mode=='concurrent' else mode) for mode in ['p256','retry','retry-p256','concurrent','key-update','fragment','backpressure','rotate','raw-oversize','raw-type','raw-truncate','timeout','cancel','close-active','trust','hostname','time','before','no-alpn','no-overlap','bad-record']]
             ec=(fixtures/'p256-valid.pem',fixtures/'p256.pem')
             go_cases += [('ecdsa',*ec,1,'normal'),('ecdsa-sec1',ec[0],fixtures/'p256-sec1.pem',1,'normal')]+[('ecdsa-'+mode,*ec,8 if mode in ['rotate','concurrent'] else 1,'normal' if mode=='concurrent' else mode) for mode in ['p256','retry','retry-p256','key-update','fragment','backpressure','rotate','concurrent','bad-record','trust','hostname','time','before','no-overlap']]
+            pss_rsa=(fixtures/'pss-rsa-chain.pem',fixtures/'rsa2048.pem');pss_ec=(fixtures/'pss-ec-chain.pem',fixtures/'p256.pem')
+            go_cases += [('pss-rsa',*pss_rsa,1,'normal'),('pss-ec',*pss_ec,1,'normal'),('pss-rsa-p256',*pss_rsa,1,'p256'),('pss-ec-retry',*pss_ec,1,'retry'),('pss-rsa-fragment',*pss_rsa,1,'fragment'),('pss-ec-key-update',*pss_ec,1,'key-update')]+[('pss-unsupported-'+profile,fixtures/('pss-'+profile+'-chain.pem'),pss_rsa[1],1,'unsupported-certificate') for profile in ['salt20','sha384','mgf384','wrong-issuer']]+[('pss-tampered',fixtures/'pss-tampered-chain.pem',pss_rsa[1],1,'bad-chain')]
             for name,cert,key,count,mode in go_cases:
                 if a.case and not ('go-'+name).startswith(a.case):continue
                 command=[peer,native,cert,key,str(count),mode]
@@ -31,13 +33,14 @@ def main():
                 report['cases'].append({'name':'go-'+name,'result':'pass','seconds':time.monotonic()-start,'output':output.strip()});print('go-'+name+': pass',flush=True)
             openssl_cases=[('x25519',*base,'X25519','normal'),('rsa4096',fixtures/'rsa4096-valid.pem',fixtures/'rsa4096.pem','X25519','normal'),('chain16',chain,base[1],'X25519','normal')]+[(mode,*base,groups,'key-update-peer' if mode=='key-update' else 'normal') for mode,groups in [('p256','P-256'),('retry','P-256:X25519'),('retry-p256','P-384:P-256'),('key-update','X25519')]]+[(mode,*base,'X25519','peer-reject') for mode in ['trust','hostname','time','before']]
             openssl_cases += [('ecdsa',*ec,'X25519','normal'),('ecdsa-sec1',ec[0],fixtures/'p256-sec1.pem','X25519','normal')]+[('ecdsa-'+mode,*ec,groups,'key-update-peer' if mode=='key-update' else 'normal') for mode,groups in [('p256','P-256'),('retry','P-256:X25519'),('retry-p256','P-384:P-256'),('key-update','X25519')]]+[('ecdsa-'+mode,*ec,'X25519','peer-reject') for mode in ['trust','hostname','time','before']]
+            openssl_cases += [('pss-rsa',*pss_rsa,'X25519','normal'),('pss-ec',*pss_ec,'X25519','normal'),('pss-rsa-p256',*pss_rsa,'P-256','normal'),('pss-ec-retry',*pss_ec,'P-256:X25519','normal'),('pss-ec-key-update',*pss_ec,'X25519','key-update-peer')]+[('pss-unsupported-'+profile,fixtures/('pss-'+profile+'-chain.pem'),pss_rsa[1],'X25519','peer-reject') for profile in ['salt20','sha384','mgf384','wrong-issuer']]+[('pss-ec-no-offer',*pss_ec,'X25519','peer-reject'),('pss-tampered',fixtures/'pss-tampered-chain.pem',pss_rsa[1],'X25519','peer-reject')]
             for name,cert,key,groups,mode in openssl_cases:
                 if a.case and not ('openssl-'+name).startswith(a.case):continue
                 server=subprocess.Popen([str(x) for x in [native,cert,key,'1',mode]],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
                 try:
                     ready,_,_=select.select([server.stdout],[],[],5);assert ready,'no owned listener readiness'
                     line=server.stdout.readline();assert line.startswith('READY '),line
-                    ca=fixtures/'rsa4096-valid.pem' if name.endswith('trust') else cert
+                    ca=fixtures/'rsa4096-valid.pem' if name.endswith('trust') else (fixtures/'pss-root.pem' if name.startswith('pss-') else cert)
                     output=run([client,line.strip().split()[1],ca,groups,name],env)
                     stdout,stderr=server.communicate(timeout=25)
                     if server.returncode:raise RuntimeError(f'native OpenSSL case {name}: {stdout}\n{stderr}')

@@ -85,14 +85,24 @@ server_handshake_start_flight :: proc(
 		if de.kind != .None || me.kind != .None {
 			server_handshake_fail(owner, .Credential_Failed); return .Credential_Failed
 		}
-		// Conservative chain profile: RSA PKCS1 SHA256/384/512 or ECDSA
-		// SHA256 with a supplied P-256 issuer. Signature policy is separate
+		// Conservative chain profile: RSA PKCS1 SHA256/384/512, PSS SHA256
+		// with an RSAE issuer, or ECDSA SHA256/P-256. Signature policy is separate
 		// from the leaf's CertificateVerify key. Even roots must match here.
 		scheme := server_flight_certificate_scheme(metadata.signature)
-		if metadata.signature==.ECDSA_SHA256 {
+		if metadata.signature==.ECDSA_SHA256 || metadata.signature==.RSA_PSS {
 			issuer_index:=min(index+1,count-1)
 			issuer,ie:=credential_store.certificate_algorithms(store,lease,issuer_index)
-			if ie.kind!=.None || issuer.subject_key!=.ECDSA_P256 {server_handshake_fail(owner,.Unsupported);return .Unsupported}
+			if ie.kind!=.None {server_handshake_fail(owner,.Credential_Failed);return .Credential_Failed}
+			if metadata.signature==.ECDSA_SHA256 {
+				if issuer.subject_key!=.ECDSA_P256 {server_handshake_fail(owner,.Unsupported);return .Unsupported}
+			} else {
+				parameters,pe:=credential_store.certificate_pss_parameters(store,lease,index)
+				if pe.kind!=.None {server_handshake_fail(owner,.Credential_Failed);return .Credential_Failed}
+				if issuer.subject_key!=.RSA || parameters.digest!=.SHA256 || parameters.mgf_digest!=.SHA256 || parameters.salt_length!=32 {
+					server_handshake_fail(owner,.Unsupported);return .Unsupported
+				}
+				scheme=0x0804
+			}
 		}
 		if scheme == 0 || !server_hello_offer_contains(offers, scheme) {
 			server_handshake_fail(owner, .Unsupported); return .Unsupported

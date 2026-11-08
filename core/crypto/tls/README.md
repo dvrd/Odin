@@ -115,3 +115,7 @@ The [lean async TCP server](SERVER_ASYNC.md) binds these events to the existing
 `net.Async_Connection`/caller executor without a second I/O owner.
 Existing client APIs and behavior are unchanged. See the contract for explicit
 input boundaries, transient erasure and event acceptance requirements.
+
+The [server acceptance contract](SERVER_BASELINE.md) maps native credential,
+recordless and async TCP behavior to their validation boundaries, including
+PSS-SHA256 certificate-chain admission without weakening authentication.

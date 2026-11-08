@@ -52,6 +52,8 @@ def main():
             flags = ['-warnings-as-errors', '-sanitize:' + args.sanitize,
                      '-define:ODIN_TEST_THREADS=1', '-define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true']
             for name, package in [('server', root/'core/crypto/tls'),
+                                  ('x509-parameters', root/'core/crypto/x509'),
+                                  ('x509', source_root/'tests/core/crypto/x509'),
                                   ('credentials', root/'core/crypto/tls/credentials'),
                                   ('credential-store', root/'core/crypto/tls/credentials/store'),
                                   ('native-client', source_root/'tests/core/crypto/tls')]:

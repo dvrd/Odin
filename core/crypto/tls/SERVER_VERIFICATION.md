@@ -15,11 +15,11 @@ Use the matching compiler/standard-library/LLVM pairing in ci/WEBTOOLS_TOOLCHAIN
 All binaries, generated public certificates, pipe/file exchanges and reports use
 temporary storage. Existing credentials are published fixture keys only.
 
-The gate runs the58-test core server package (including deterministic hello
+The gate runs the59-test core server package (including deterministic hello
 mutation/transcript, fragmentation/coalescing, allocator failures and complete-
-grant erasure),10 credential/9 store tests,23 native client tests,22 Surf tests,
+grant erasure),1 private PSS-parameter/44 public X509 tests,11 credential/10 store tests,23 native client tests,22 Surf tests,
 the public owner consumer,
-27 recordless Go/OpenSSL peers,61 actual async TCP peer cases,192 concurrent
+27 recordless Go/OpenSSL peers,83 actual async TCP peer cases,192 concurrent
 signatures independently verified by both Go and OpenSSL, and empty/isolated Surf
 executable consumers. It
 records commands, full outputs, return codes, sanitizer, compiler digest/version,
@@ -88,7 +88,9 @@ binding on the recorded local platform. It does not certify non-Darwin execution
 throughput, client certificates, resumption, stateless cookies or QUIC binding.
 Engine146's restricted-engine acceptance audit is recorded in
 reports/webtools-engine-2026-11-07.md. The async TCP binding also has a standalone gate;
-QUIC98 and broader96 require separate integration evidence. P-256/ECDSA
-is added; the conservative chain policy still rejects RSA-PSS certificate
-signatures. Full section9.1 admission/general TLS compliance requires its own
-protocol/policy/platform audit.
+The parent96 acceptance audit is documented in [SERVER_BASELINE.md](SERVER_BASELINE.md).
+PSS-SHA256 certificate admission is tested through real RSA/ECDSA leaf chains
+with issuer-root-only trust. Both clients reject tampered chain signatures, and
+unsupported salt/hash/MGF/issuer/offer profiles fail before application delivery.
+QUIC98 still requires transport integration; general TLS compliance requires
+its own protocol/policy/platform audit.

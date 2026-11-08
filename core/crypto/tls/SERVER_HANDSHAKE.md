@@ -24,8 +24,9 @@ The restricted profile is TLS1.3/AES128GCM-SHA256 with X25519 or P-256, RSA-PSS-
 or ECDSA-P256-SHA256 CertificateVerify, and RSA2048–4096/P-256 credentials. Each transmitted certificate's
 parsed signature metadata must match `signature_algorithms_cert`, falling back
 to `signature_algorithms` only when absent. The conservative chain policy supports
-RSA PKCS1 SHA256/384/512 and ECDSA-SHA256 with a supplied P-256 issuer, including
-roots: other signatures are
+RSA PKCS1 SHA256/384/512, PSS-SHA256 with an RSA-encryption issuer, and
+ECDSA-SHA256 with a supplied P-256 issuer, including roots. PSS requires parsed
+SHA256/MGF1-SHA256/salt32 parameters; X509 validates the DER/trailer. Other signatures are
 `Unsupported`, even when X509 can parse them. It never assumes a compatible
 chain from the leaf key. The pinned credential determines the exact offered
 CertificateVerify scheme at admission and again at signing; hello views are

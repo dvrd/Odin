@@ -31,6 +31,24 @@ func must(e error) {
 	}
 }
 
+// Only the independently supplied final issuer is trusted, never the leaf of a
+// real chain. Repeated one-certificate padding fixtures retain their old anchor.
+func finalAnchor(data []byte) []byte {
+	var last *pem.Block
+	for len(bytes.TrimSpace(data)) > 0 {
+		var p *pem.Block
+		p, data = pem.Decode(data)
+		if p == nil || p.Type != "CERTIFICATE" {
+			panic("invalid anchor PEM")
+		}
+		last = p
+	}
+	if last == nil {
+		panic("missing anchor")
+	}
+	return pem.EncodeToMemory(last)
+}
+
 type splitConn struct {
 	net.Conn
 	fragment int
@@ -102,7 +120,7 @@ func main() {
 		panic("native cert key count mode [newcert newkey]")
 	}
 	mode := os.Args[5]
-	negative := mode == "trust" || mode == "hostname" || mode == "time" || mode == "before" || mode == "no-alpn" || mode == "no-overlap"
+	negative := mode == "trust" || mode == "hostname" || mode == "time" || mode == "before" || mode == "no-alpn" || mode == "no-overlap" || mode == "unsupported-certificate" || mode == "bad-chain"
 	count, e := strconv.Atoi(os.Args[4])
 	must(e)
 	nativeMode := "normal"
@@ -143,23 +161,31 @@ func main() {
 	}
 	endpoint := strings.TrimSpace(strings.TrimPrefix(line, "READY "))
 	root := x509.NewCertPool()
+	trustedAnchors := map[string]bool{}
+	addAnchor := func(data []byte) bool {
+		anchor := finalAnchor(data)
+		p, _ := pem.Decode(anchor)
+		trustedAnchors[string(p.Bytes)] = true
+		return root.AppendCertsFromPEM(anchor)
+	}
 	cert, e := os.ReadFile(os.Args[2])
 	must(e)
-	if !root.AppendCertsFromPEM(cert) {
+	if !addAnchor(cert) {
 		panic("roots")
 	}
 	if mode == "trust" {
 		root = x509.NewCertPool()
+		trustedAnchors = map[string]bool{}
 		b, e := os.ReadFile(filepath.Join(filepath.Dir(os.Args[2]), "rsa4096-valid.pem"))
 		must(e)
-		if !root.AppendCertsFromPEM(b) {
+		if !addAnchor(b) {
 			panic("wrong roots")
 		}
 	}
 	if mode == "rotate" {
 		b, e := os.ReadFile(os.Args[6])
 		must(e)
-		if !root.AppendCertsFromPEM(b) {
+		if !addAnchor(b) {
 			panic("rotation roots")
 		}
 	}
@@ -271,7 +297,7 @@ func main() {
 					var host x509.HostnameError
 					var trust x509.UnknownAuthorityError
 					var invalid x509.CertificateInvalidError
-					if mode == "hostname" && errors.As(e, &host) || mode == "trust" && errors.As(e, &trust) || (mode == "time" || mode == "before") && errors.As(e, &invalid) && invalid.Reason == x509.Expired || (mode == "no-alpn" || mode == "no-overlap") && strings.Contains(e.Error(), "no application protocol") {
+					if mode == "hostname" && errors.As(e, &host) || (mode == "trust" || mode == "bad-chain") && errors.As(e, &trust) || (mode == "time" || mode == "before") && errors.As(e, &invalid) && invalid.Reason == x509.Expired || (mode == "no-alpn" || mode == "no-overlap") && strings.Contains(e.Error(), "no application protocol") || mode == "unsupported-certificate" && strings.Contains(e.Error(), "remote error: tls: handshake failure") {
 						results <- nil
 					} else {
 						results <- e
@@ -299,6 +325,24 @@ func main() {
 				}
 				return
 			}
+			state := c.ConnectionState()
+			if len(state.VerifiedChains) == 0 || len(state.VerifiedChains[0]) == 0 {
+				results <- fmt.Errorf("verified chain missing")
+				return
+			}
+			path := state.VerifiedChains[0]
+			if !trustedAnchors[string(path[len(path)-1].Raw)] {
+				results <- fmt.Errorf("verified path uses an unconfigured anchor")
+				return
+			}
+			if !trustedAnchors[string(state.PeerCertificates[0].Raw)] {
+				if len(path) < 2 {
+					results <- fmt.Errorf("issuer-only trust path missing")
+					return
+				}
+				fmt.Printf("issuer-only trust verified path depth=%d\n", len(path))
+			}
+
 			if c.ConnectionState().NegotiatedProtocol != "http/1.1" {
 				results <- fmt.Errorf("ALPN")
 				return
@@ -384,5 +428,5 @@ func main() {
 		}
 	}
 
-	fmt.Printf("Go native async TLS %s clients=%d key_sizes=%v PASS\n%s%s", mode, count, sizes, rest.String(), diagnostics.String())
+	fmt.Printf("Go native async TLS %s clients=%d key_sizes=%v trust=explicit-anchor-set PASS\n%s%s", mode, count, sizes, rest.String(), diagnostics.String())
 }

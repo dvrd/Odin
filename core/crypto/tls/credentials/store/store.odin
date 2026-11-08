@@ -533,3 +533,10 @@ sign_sha256 :: proc(store:^Store, lease:Lease, scheme:credentials.Signature_Sche
 	n,cause:=credentials.sign_sha256(credential,scheme,message,out)
 	return n, Error{} if cause==.None else Error{kind=.Credential_Failed,credential=cause}
 }
+
+certificate_pss_parameters :: proc(store:^Store, lease:Lease, index:int) -> (credentials.Certificate_PSS_Parameters,Error) {
+	credential,error:=borrow(store,lease)
+	if error.kind!=.None {return {},error}
+	metadata,cause:=credentials.certificate_pss_parameters(credential,index)
+	return metadata, Error{} if cause==.None else Error{kind=.Credential_Failed,credential=cause}
+}

@@ -117,7 +117,7 @@ value is 32 bytes. Actual platform sizes are observable through `stats`.
 Acquiring/releasing leases performs no allocation; tests hold the allocator-call
 count constant through 256 cycles.
 
-Nine tests exercise old/new RSA key sizes and RSA/ECDSA algorithms across rotation, DER lifetime,
+Ten tests exercise old/new RSA key sizes and RSA/ECDSA algorithms across rotation, DER lifetime,
 typed forwarding errors, capacity preservation, stale/foreign/reused handles,
 Busy shutdown, isolated saturating-ID allocation, all three metadata allocation
 positions under five failure modes, full erasure and out-of-lock observation,
@@ -131,3 +131,8 @@ lock contention or full TLS interoperability claim follows from these tests.
 odin test core/crypto/tls/credentials/store -sanitize:address -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:ODIN_TEST_THREADS=1
 odin test core/crypto/tls/credentials/store -sanitize:thread -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:ODIN_TEST_THREADS=1
 ```
+
+`certificate_pss_parameters` forwards construction-time PSS metadata by value
+under a live lease, including a retired generation after replacement or store
+close. It introduces no DER reparse or lasting borrow. Stale/released leases and
+wrong certificate index/type retain typed forwarding errors.

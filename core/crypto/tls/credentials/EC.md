@@ -66,13 +66,13 @@ All accepted heap grants, including rejected abnormal grants, are fully erased
 before release. Fixed raw/DER signature arrays are explicitly erased. Native
 transitive stack/register copies and caller inputs remain outside that guarantee.
 
-Ten credential tests cover both formats, exact budget boundaries, unusual grants,
+Eleven credential tests cover both formats, exact budget boundaries, unusual grants,
 zero/order/oversized scalars, malformed points, strict SEC1/PKCS8 profiles,
-message/signature mutation and alias/output contracts. Nine store tests include
+message/signature mutation and alias/output contracts. Ten store tests include
 cross-algorithm rotation and signing after publication close through live leases.
 The concurrency fixture runs8 workers x8 signatures for each of RSA2048/RSA4096/
 P-256; both independent Go and OpenSSL verify every signature. Actual async TCP
-coverage includes26 ECDSA Go/OpenSSL cases (61 total), ECDSA-only OpenSSL offers,
+coverage includes26 ECDSA Go/OpenSSL cases (83 total), ECDSA-only OpenSSL offers,
 authentication, retries, KU, fragments, concurrent sessions and rotation. The
 full [server gate](../SERVER_VERIFICATION.md) records toolchain and sanitizer
 receipts. The fixture key scalars1/2 are deliberately public test keys.
@@ -81,7 +81,7 @@ Primary encoding/protocol references: [RFC5915](https://www.rfc-editor.org/rfc/r
 [RFC5480](https://www.rfc-editor.org/rfc/rfc5480),
 [RFC8446 section4.4.3](https://www.rfc-editor.org/rfc/rfc8446#section-4.4.3), and
 [section9.1](https://www.rfc-editor.org/rfc/rfc8446#section-9.1).
-The required P-256/ECDSA capability is added. The conservative server chain
-policy still rejects RSA-PSS certificate signatures; full section9.1 admission
-and general TLS compliance remain separate audit work. No platform, trust-policy
-or production application certification follows from this capability.
+P-256/ECDSA and the required RSAE-PSS-SHA256 certificate profile are now
+admitted; see [SERVER_BASELINE.md](../SERVER_BASELINE.md). General TLS compliance
+remains separate audit work. No platform, trust-policy or production application
+certification follows from these capabilities.

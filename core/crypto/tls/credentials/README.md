@@ -100,7 +100,7 @@ python3 tests/core/crypto/tls/credentials/concurrency.py --odin /path/to/odin --
 python3 tests/core/crypto/tls/credentials/concurrency.py --odin /path/to/odin --go /path/to/local/go --sanitize thread --report /path/to/report-tsan.json
 ```
 
-Ten tests cover ownership, every fixture allocation failure position, unusual
+Eleven tests cover ownership, every fixture allocation failure position, unusual
 allocator grants/full wiping, exact peak limits, 16/17 certificate bounds, malformed
 profiles, explicit leaf policy and output/alias contracts. Independent Go and
 OpenSSL verify 8 workers × 8 native signatures for each of RSA2048/RSA4096/P-256 under
@@ -121,3 +121,11 @@ canonical ECDSA DER without allocating. Wrong schemes fail unchanged. The legacy
 RSA digest signer remains unchanged for RSA and rejects ECDSA. See [EC.md](EC.md)
 for encoding, entropy, measured owner representation and limits. The concurrency
 harness accepts `--go-root` and `--openssl` for explicitly installed offline tools.
+
+`certificate_pss_parameters(index)` returns a `Certificate_PSS_Parameters` value
+(digest, MGF digest, salt length) from the immutable parsed certificate. Nil and
+invalid index are typed errors; non-PSS certificates return
+`Unsupported_Signature_Scheme`. The accessor does not reparse DER, allocate,
+expose private keys, establish trust or approve TLS policy. X509 has already
+validated parameter framing and trailer. The server separately requires
+SHA256/MGF1-SHA256/salt32 and an RSA-encryption issuer before assigning0x0804.

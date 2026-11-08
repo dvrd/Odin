@@ -330,6 +330,21 @@ _hash_from_oid :: proc(oid: []byte) -> (hash.Algorithm, bool) {
 	return .Invalid, false
 }
 
+// RFC4055 section2.1: hash parameters may be absent or DER NULL only.
+// Generic AlgorithmIdentifier parsing deliberately accepts arbitrary parameters;
+// PSS must validate their hash-specific semantics before publishing metadata.
+@(private)
+_pss_hash_algorithm :: proc(cursor:^asn1.Cursor) -> (hash.Algorithm,Error) {
+	oid,parameters,e:=_read_algorithm_identifier(cursor)
+	if e!=.None || asn1.done(cursor)!=.None {return .Invalid,.Malformed}
+	if len(parameters)!=0 {
+		value:=asn1.Cursor{data=parameters}
+		if asn1.read_null(&value)!=.None || asn1.done(&value)!=.None {return .Invalid,.Malformed}
+	}
+	algorithm,_:=_hash_from_oid(oid)
+	return algorithm,.None
+}
+
 // _parse_pss_params decodes RSASSA-PSS-params (RFC 4055 section 3.1) from the
 // signatureAlgorithm parameters into cert.pss_*:
 //   SEQUENCE { hashAlgorithm [0], maskGenAlgorithm [1], saltLength [2] INTEGER,
@@ -358,11 +373,11 @@ _parse_pss_params :: proc(cert: ^Certificate, params: []byte) -> Error {
 	if inner, present, ie := asn1.read_explicit(&seq, 0); ie != .None {
 		return .Malformed
 	} else if present {
-		oid, _, oe := _read_algorithm_identifier(&inner)
-		if oe != .None || asn1.done(&inner) != .None {
+		algorithm, oe := _pss_hash_algorithm(&inner)
+		if oe != .None {
 			return .Malformed
 		}
-		cert.pss_hash, _ = _hash_from_oid(oid) // .Invalid when unrecognized
+		cert.pss_hash = algorithm // .Invalid when unrecognized
 	}
 
 	// maskGenAlgorithm [1] EXPLICIT AlgorithmIdentifier { id-mgf1, hashAlgorithm }
@@ -378,11 +393,11 @@ _parse_pss_params :: proc(cert: ^Certificate, params: []byte) -> Error {
 		} else {
 			mp: asn1.Cursor
 			asn1.cursor_init(&mp, mgf_params)
-			hoid, _, he := _read_algorithm_identifier(&mp)
-			if he != .None || asn1.done(&mp) != .None {
+			algorithm, he := _pss_hash_algorithm(&mp)
+			if he != .None {
 				return .Malformed
 			}
-			cert.pss_mgf_hash, _ = _hash_from_oid(hoid)
+			cert.pss_mgf_hash = algorithm
 		}
 	}
 

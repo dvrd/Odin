@@ -118,11 +118,11 @@ python3 tests/core/crypto/tls/server_tcp.py --odin ./odin \
 Repeat with `--sanitize thread`. Installed offline Go, OpenSSL development files,
 pkg-config, clang and permission for owned ephemeral loopback listeners are
 required. No external network endpoint or downloaded dependency is used. The
-optional `--case` prefix is for diagnosis; acceptance requires all61 cases with
+optional `--case` prefix is for diagnosis; acceptance requires all83 cases with
 no filter. Reports retain passed=false on failure and record compiler digest,
 client versions, per-session memory/leases and exact peer outcomes.
 
-The40 Go and21 OpenSSL cases cover independent authentication, RSA2048/4096/P-256 credentials,
+The51 Go and32 OpenSSL cases cover independent authentication, RSA2048/4096/P-256 credentials,
 16 padded certificates, both groups/retries,40KiB in both directions, ALPN,
 key updates in both directions, concurrent8 sessions on one executor,
 fragmentation/backpressure, credential rotation during outstanding server output,
@@ -139,3 +139,9 @@ which also preserves native client/Surf and isolated consumer checks.
 Evidence is restricted to the recorded local toolchain/platform. Broader HTTP
 server adoption, QUIC transport integration and application vendored
 copies require their own work and validation.
+
+PSS-SHA256 certificate chains require SHA256/MGF1-SHA256/salt32 and supplied
+RSA-encryption issuer keys; certificate and CertificateVerify schemes are
+validated separately. The22 PSS additions exercise separate issuer-only trust,
+RSA/ECDSA leaves, groups/retry/KU, fragments, wrong salt/hash/MGF/issuer/offers
+and tampered signatures. See [SERVER_BASELINE.md](SERVER_BASELINE.md).

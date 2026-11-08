@@ -607,3 +607,21 @@ store_typed_algorithms_survive_cross_algorithm_rotation_and_close :: proc(t:^tes
 	for b in out {testing.expect_value(t,b,u8(0xa5))}
 	stats,_:=stats(store);testing.expect_value(t,stats.generations,0);testing.expect_value(t,stats.active_leases,0)
 }
+
+@(test)
+store_pss_parameters_follow_pinned_generation_without_borrows :: proc(t:^testing.T) {
+	store:=make_store();defer destroy(&store)
+	pss,e:=credentials.create(#load("../../../../../tests/core/crypto/tls/credentials/testdata/pss-rsa-chain.pem"),fixture_key,{},context.allocator);assert(e==.None)
+	assert(replace(store,&pss).kind==.None)
+	lease,le:=acquire(store);assert(le.kind==.None)
+	metadata,me:=certificate_pss_parameters(store,lease,0);testing.expect_value(t,me.kind,.None);testing.expect_value(t,metadata,credentials.Certificate_PSS_Parameters{.SHA256,.SHA256,32})
+	next:=make_credential();assert(replace(store,&next).kind==.None)
+	newer,ne:=acquire(store);assert(ne.kind==.None)
+	_,not_pss:=certificate_pss_parameters(store,newer,0);testing.expect_value(t,not_pss.credential,.Unsupported_Signature_Scheme)
+	assert(close(store).kind==.None)
+	again,ae:=certificate_pss_parameters(store,lease,0);testing.expect_value(t,ae.kind,.None);testing.expect_value(t,again,metadata)
+	_,invalid:=certificate_pss_parameters(store,lease,2);testing.expect_value(t,invalid.credential,.Invalid_Index)
+	stale:=lease;assert(release(store,&lease).kind==.None);assert(release(store,&newer).kind==.None)
+	_,gone:=certificate_pss_parameters(store,stale,0);testing.expect(t,gone.kind!=.None)
+	stats,_:=stats(store);testing.expect_value(t,stats.active_leases,0);testing.expect_value(t,stats.generations,0)
+}
