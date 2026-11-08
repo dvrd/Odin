@@ -46,6 +46,31 @@ Offline OpenSSL MemoryBIO peers independently exercise RSA/ECDSA and X25519/P256
 Hello negotiation; that probe stops before certificate/Finished authentication.
 Darwin sanitizer results do not certify Linux runtime or full legacy parity.
 
+Additional client prerequisites provide TLS1.2 Certificate-list parsing and
+ServerKeyExchange authentication. Parsed certificates own tables while borrowing
+immutable DER; failed parses return an empty owner after releasing every partial
+entry. Signature verification reparses exact message bytes, binds both randoms
+and EC parameters to the offered scheme/curve and selected certificate/cipher,
+and enforces RSA2048..4096 or P256 keys. The atomic native-policy entrypoint first
+checks chain, hostname, time and ServerAuth usage. The separate signature-only
+entrypoint requires the caller to establish trust independently. Neither derives
+an ECDH secret or establishes a connection. Independent OpenSSL flights exercise
+RSA-PKCS1, RSA-PSS and ECDSA with X25519 and P256.
+
+A caller-buffer handshake framer handles fragmented headers/bodies and coalesced
+record tails without allocating or retaining source input. Its complete-message
+view borrows output storage. Owners must keep Certificate DER unchanged through
+validation; resetting and overwriting that buffer for SKE would invalidate the
+certificates. Use stable append-only aggregate flight storage with an explicit
+total cap. Framing does not validate record protection, handshake order or trust.
+
+The existing TLS1.3 cookie-retry assembler now locates ClientHello vectors and
+extension lengths structurally. Current offers and CH2/transcript bytes remain
+unchanged. Extra suites in structural tests do not enable a dual-version client:
+version dispatch, capacities, P256 key-share retry and complete TLS1.2 sequencing
+remain separate work. Malformed layouts and output/input aliases reject before
+mutating retry output.
+
 References:
 - https://www.rfc-editor.org/rfc/rfc5246.html (PRF, records and handshake framing)
 - https://www.rfc-editor.org/rfc/rfc5288.html (AES-GCM nonce and key layout)

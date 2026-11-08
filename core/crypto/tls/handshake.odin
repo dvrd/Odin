@@ -1032,42 +1032,41 @@ hello_is_retry :: proc(wire: []u8) -> bool {
 // Prepare CH2 and the transcript prefix atomically after validating HRR.
 // RFC 8446 section 4.4.1 replaces CH1 with message_hash(Hash(CH1)).
 client_hello_retry_prepare :: proc(conn: ^Conn, retry: []u8, cookie: []u8) -> Server_Hello_Error {
+	if conn == nil do return .Invalid_Retry_Client_Hello
 	if conn.retry_transcript_size != 0 {
 		return .Repeated_Hello_Retry
 	}
 
 	size := conn.client_hello_size
-	if size < 47 || size > MAX_CLIENT_HELLO_SIZE {
+	if size < 47 || size > len(conn.client_hello) {
 		return .Invalid_Retry_Client_Hello
 	}
-
 	first := conn.client_hello[:size]
-	if first[0] != cast(u8)Handshake_Type.Client_Hello ||
-	   handshake_body_size(first) + 4 != size ||
-	   first[38] != 0 ||
-	   retry_u16(first, 39) != 2 ||
-	   retry_u16(first, 41) != cast(u16)Cipher_Suite.AES_128_GCM_SHA256 ||
-	   first[43] != 1 ||
-	   first[44] != 0 ||
-	   cast(int)retry_u16(first, 45) != size - 47 {
+	layout, valid := client_hello_layout_decode(first)
+	if !valid || layout.session_size != 0 || layout.has_cookie ||
+	   !client_hello_layout_has_cipher(first, layout, u16(Cipher_Suite.AES_128_GCM_SHA256)) {
 		return .Invalid_Retry_Client_Hello
 	}
-
 	if len(cookie) == 0 || len(cookie) > MAX_RETRY_COOKIE_SIZE {
 		return .Invalid_Retry_Cookie
 	}
-
 	if len(retry) > MAX_HELLO_RETRY_REQUEST_SIZE {
 		return .Retry_Cookie_Oversized
 	}
 
 	new_size := size + 6 + len(cookie)
+	extensions_size := layout.extensions_size + 6 + len(cookie)
+	if new_size > len(conn.retry_client_hello) || extensions_size > 65535 ||
+	   36 + len(retry) > len(conn.retry_transcript) ||
+	   !client_hello_retry_inputs_disjoint(conn, retry, cookie, new_size) {
+		return .Invalid_Retry_Client_Hello
+	}
 	copy(conn.retry_client_hello[:], first)
 	retry_put_u24(conn.retry_client_hello[:], 1, new_size - 4)
-	retry_put_u16(conn.retry_client_hello[:], 45, cast(u16)(new_size - 47))
+	retry_put_u16(conn.retry_client_hello[:], layout.extensions_length_offset, u16(extensions_size))
 	retry_put_u16(conn.retry_client_hello[:], size, RETRY_COOKIE_EXTENSION)
-	retry_put_u16(conn.retry_client_hello[:], size + 2, cast(u16)(2 + len(cookie)))
-	retry_put_u16(conn.retry_client_hello[:], size + 4, cast(u16)len(cookie))
+	retry_put_u16(conn.retry_client_hello[:], size + 2, u16(2 + len(cookie)))
+	retry_put_u16(conn.retry_client_hello[:], size + 4, u16(len(cookie)))
 	copy(conn.retry_client_hello[size + 6:], cookie)
 	conn.retry_client_hello_size = new_size
 
