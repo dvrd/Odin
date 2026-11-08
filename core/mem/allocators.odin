@@ -1895,8 +1895,16 @@ _dynamic_arena_cycle_new_block :: proc(a: ^Dynamic_Arena, alignment: int, loc :=
 	if a.block_allocator.procedure == nil {
 		panic("You must call `dynamic_arena_init` on a Dynamic Arena before using it.", loc)
 	}
-	if a.current_block != nil {
-		append(&a.used_blocks, a.current_block, loc=loc) or_return
+	// Retain the previous owner before replacing it. Failure must leave both
+	// the current block and its position intact so a later allocation can retry.
+	previous_saved := a.current_block != nil
+	if previous_saved {
+		count, save_error := append(&a.used_blocks, a.current_block, loc=loc)
+		if save_error != nil || count != 1 {
+			if count == 1 do pop(&a.used_blocks)
+			if save_error != nil do return save_error
+			return .Out_Of_Memory
+		}
 	}
 	new_block: rawptr
 	if len(a.unused_blocks) > 0 {
@@ -1910,15 +1918,13 @@ _dynamic_arena_cycle_new_block :: proc(a: ^Dynamic_Arena, alignment: int, loc :=
 			max(a.minimum_alignment, alignment),
 			nil,
 			0,
+			loc,
 		)
-		// sanitizer.address_poison(data)
 		new_block = raw_data(data)
 		if err != nil || new_block == nil {
-			// Without a new block, the current one stays current.
-			if a.current_block != nil {
-				pop(&a.used_blocks)
-			}
-			return err if err != nil else .Out_Of_Memory
+			if previous_saved do pop(&a.used_blocks)
+			if err != nil do return err
+			return .Out_Of_Memory
 		}
 	}
 	a.bytes_left    = a.block_size
@@ -1988,14 +1994,19 @@ dynamic_arena_alloc_bytes_non_zeroed :: proc(a: ^Dynamic_Arena, size: int, align
 	if size >= a.out_band_size || n > a.block_size {
 		assert(a.out_band_allocations.allocator.procedure != nil, "Backing array allocator must be initialized", loc=loc)
 		memory, err := alloc_bytes_non_zeroed(size, actual_alignment, a.out_band_allocations.allocator, loc)
-		if memory != nil {
-			if _, err = append(&a.out_band_allocations, raw_data(memory), loc = loc); err != nil {
-				// Untracked, it would never be freed.
-				free(raw_data(memory), a.out_band_allocations.allocator, loc = loc)
-				return nil, err
-			}
+		if err != nil do return nil, err
+		if memory == nil {
+			if size > 0 do return nil, .Out_Of_Memory
+			return nil, nil
 		}
-		return memory, err
+		count, save_error := append(&a.out_band_allocations, raw_data(memory), loc = loc)
+		if save_error != nil || count != 1 {
+			if count == 1 do pop(&a.out_band_allocations)
+			free(raw_data(memory), a.out_band_allocations.allocator, loc=loc)
+			if save_error != nil do return nil, save_error
+			return nil, .Out_Of_Memory
+		}
+		return memory, nil
 	}
 	memory := align_forward(a.current_pos, uintptr(actual_alignment))
 	margin := int(uintptr(memory) - uintptr(a.current_pos))
@@ -2025,18 +2036,17 @@ This procedure frees all the allocations owned by the dynamic arena, excluding
 the unused blocks.
 */
 dynamic_arena_reset :: proc(a: ^Dynamic_Arena, loc := #caller_location) {
-	// A block that can't be kept for reuse is freed.
-	if a.current_block != nil {
-		// sanitizer.address_poison(a.current_block, a.block_size)
-		if _, err := append(&a.unused_blocks, a.current_block, loc=loc); err != nil {
-			free(a.current_block, a.block_allocator, loc)
-		}
-		a.current_block = nil
-	}
-	for block in a.used_blocks {
-		// sanitizer.address_poison(block, a.block_size)
-		if _, err := append(&a.unused_blocks, block, loc=loc); err != nil {
-			free(block, a.block_allocator, loc)
+	// Reuse the existing pointer tables: reset and teardown must remain safe
+	// when the backing allocator cannot admit another bookkeeping allocation.
+	if len(a.unused_blocks) == 0 {
+		a.used_blocks, a.unused_blocks = a.unused_blocks, a.used_blocks
+	} else {
+		for block in a.used_blocks {
+			if len(a.unused_blocks) < cap(a.unused_blocks) {
+				append(&a.unused_blocks, block, loc=loc)
+			} else {
+				free(block, a.block_allocator, loc=loc)
+			}
 		}
 	}
 	clear(&a.used_blocks)
@@ -2044,7 +2054,10 @@ dynamic_arena_reset :: proc(a: ^Dynamic_Arena, loc := #caller_location) {
 		free(allocation, a.out_band_allocations.allocator, loc=loc)
 	}
 	clear(&a.out_band_allocations)
-	a.bytes_left = 0 // Make new allocations call `_dynamic_arena_cycle_new_block` again.
+	// The current block is itself a reusable cache slot, requiring no table
+	// growth. Allocation rechecks alignment and space before using it again.
+	a.current_pos = a.current_block
+	a.bytes_left = a.block_size if a.current_block != nil else 0
 }
 
 /*
@@ -2054,12 +2067,18 @@ This procedure frees all the allocations owned by the dynamic arena, including
 the unused blocks.
 */
 dynamic_arena_free_all :: proc(a: ^Dynamic_Arena, loc := #caller_location) {
-	dynamic_arena_reset(a)
-	for block in a.unused_blocks {
-		// sanitizer.address_unpoison(block, a.block_size)
-		free(block, a.block_allocator, loc)
+	// Free owners directly instead of moving them through reset's cache.
+	if a.current_block != nil do free(a.current_block, a.block_allocator, loc=loc)
+	for block in a.used_blocks do free(block, a.block_allocator, loc=loc)
+	for block in a.unused_blocks do free(block, a.block_allocator, loc=loc)
+	for allocation in a.out_band_allocations {
+		free(allocation, a.out_band_allocations.allocator, loc=loc)
 	}
+	clear(&a.used_blocks)
 	clear(&a.unused_blocks)
+	clear(&a.out_band_allocations)
+	a.current_block, a.current_pos = nil, nil
+	a.bytes_left = 0
 }
 
 /*
