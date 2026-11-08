@@ -9,6 +9,7 @@ import "core:time"
 main :: proc() {
 	assert(len(os.args) == 5 || len(os.args) == 6)
 	bad := len(os.args) == 6 && os.args[5] == "bad"
+	reject := len(os.args) == 6 && os.args[5] == "reject"
 	select_parameters := len(os.args) == 6 && (os.args[5] == "alpn" || os.args[5] == "quic")
 	quic := select_parameters && os.args[5] == "quic"
 	ch, re := os.read_entire_file(os.args[1], context.allocator); assert(re == nil)
@@ -93,6 +94,16 @@ main :: proc() {
 	assert(status == .Need_Input && e == .None)
 	assert(os.write_entire_file(os.args[4], output[:]) == nil)
 	fmt.println("READY")
+	if reject {
+		control:[1]u8;n,e:=os.read(os.stdin,control[:]);assert(e==nil && n==1 && control[0]==1)
+		event,_:=tls.server_handshake_peek(&o);assert(event.kind==.None)
+		assert(tls.server_handshake_abort(&o)==.None)
+		stats,_:=tls.server_handshake_stats(&o);assert(stats.live_bytes==0)
+		ss,_:=store.stats(s);assert(ss.active_leases==0)
+		fmt.eprintf("public rejection: owner=%d peak=%d allocations=%d live=%d\n",size_of(o),stats.peak_bytes,stats.allocation_attempts,stats.live_bytes)
+		fmt.println("REJECTED")
+		return
+	}
 	// The independent peer returns its actual Finished over a bounded pipe.
 	finished: [36]u8
 	for at:=0; at<len(finished); {

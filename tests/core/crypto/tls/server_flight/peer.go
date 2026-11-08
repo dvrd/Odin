@@ -16,6 +16,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/binary"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -90,10 +91,16 @@ func (p *protection) send(c net.Conn, kind byte, b []byte) {
 	must(e)
 }
 func (p *protection) recv(c net.Conn) (byte, []byte) {
+	return p.recvWithAlert(c, false)
+}
+func (p *protection) recvWithAlert(c net.Conn, allowPlainAlert bool) (byte, []byte) {
 	for {
 		kind, b := readRecord(c)
 		if kind == 20 {
 			continue
+		}
+		if allowPlainAlert && kind == 21 {
+			return kind, b
 		}
 		if kind != 23 {
 			panic("expected ciphertext")
@@ -133,6 +140,11 @@ func main() {
 		panic("peer binary cert key tempdir")
 	}
 	bad := os.Getenv("WEBTOOLS_BAD_FINISHED") == "1"
+	if os.Getenv("WEBTOOLS_OPENSSL") != "" {
+		runOpenSSL()
+		return
+	}
+	negative := os.Getenv("WEBTOOLS_NEGATIVE")
 	if os.Getenv("WEBTOOLS_PARAMETERS") == "quic" {
 		runQUIC()
 		return
@@ -160,16 +172,52 @@ func main() {
 	if !roots.AppendCertsFromPEM(cert) {
 		panic("roots")
 	}
+	if negative == "trust" {
+		wrong, e := os.ReadFile(filepath.Join(filepath.Dir(os.Args[2]), "rsa4096-valid.pem"))
+		must(e)
+		roots = x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(wrong) {
+			panic("wrong roots")
+		}
+	}
 	a, b := net.Pipe()
 	defer a.Close()
 	defer b.Close()
 	must(a.SetDeadline(time.Now().Add(15 * time.Second)))
 	must(b.SetDeadline(time.Now().Add(15 * time.Second)))
-	client := tls.Client(a, &tls.Config{MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13, CurvePreferences: curves, ServerName: "synthetic.invalid", RootCAs: roots, NextProtos: names, Time: func() time.Time { return time.Unix(1790000000, 0) }})
+	client := tls.Client(a, &tls.Config{MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13, CurvePreferences: curves, ServerName: func() string {
+		if negative == "hostname" {
+			return "wrong.invalid"
+		}
+		return "synthetic.invalid"
+	}(), RootCAs: roots, NextProtos: names, Time: func() time.Time {
+		if negative == "time" {
+			return time.Unix(2000000000, 0)
+		}
+		if negative == "before" {
+			return time.Unix(0, 0)
+		}
+		return time.Unix(1790000000, 0)
+	}})
 	done := make(chan error, 1)
 	go func() {
 		if e := client.Handshake(); e != nil {
-			done <- e
+			if negative != "" {
+				var hostname x509.HostnameError
+				var trust x509.UnknownAuthorityError
+				var invalid x509.CertificateInvalidError
+				if negative == "hostname" && errors.As(e, &hostname) || negative == "trust" && errors.As(e, &trust) || (negative == "time" || negative == "before") && errors.As(e, &invalid) && invalid.Reason == x509.Expired {
+					done <- nil
+				} else {
+					done <- e
+				}
+			} else {
+				done <- e
+			}
+			return
+		}
+		if negative != "" {
+			done <- fmt.Errorf("expected certificate rejection")
 			return
 		}
 		expectedALPN := ""
@@ -208,7 +256,9 @@ func main() {
 	out := filepath.Join(dir, "events.bin")
 	must(os.WriteFile(in, ch, 0600))
 	cmd := exec.Command(os.Args[1], in, os.Args[2], os.Args[3], out)
-	if bad {
+	if negative != "" {
+		cmd.Args = append(cmd.Args, "reject")
+	} else if bad {
 		cmd.Args = append(cmd.Args, "bad")
 	} else if selected != "" {
 		cmd.Args = append(cmd.Args, "alpn")
@@ -305,15 +355,36 @@ func main() {
 	hsWrite := protect(secrets[0])
 	hsRead := protect(secrets[1])
 	// Deliberately split encrypted handshake records inside headers, DER and CV.
-	for at := 0; at < len(flight); {
-		n := 1 + (at % 127)
-		if n > len(flight)-at {
-			n = len(flight) - at
+	if negative != "" {
+		hsWrite.send(b, 22, flight)
+	} else {
+		for at := 0; at < len(flight); {
+			n := 1 + (at % 127)
+			if n > len(flight)-at {
+				n = len(flight) - at
+			}
+			hsWrite.send(b, 22, flight[at:at+n])
+			at += n
 		}
-		hsWrite.send(b, 22, flight[at:at+n])
-		at += n
 	}
 	kind, finished := hsRead.recv(b)
+	if negative != "" {
+		if kind != 21 || len(finished) != 2 || finished[0] != 2 {
+			panic("expected certificate alert")
+		}
+		must(<-done)
+		_, e = stdin.Write([]byte{1})
+		must(e)
+		state, e := reader.ReadString('\n')
+		must(e)
+		if state != "REJECTED\n" {
+			panic("native rejection cleanup")
+		}
+		must(stdin.Close())
+		must(cmd.Wait())
+		fmt.Printf("independent Go typed %s rejection, native abort/no Complete/zero grants PASS; %s", negative, log.String())
+		return
+	}
 	if kind != 22 || len(finished) != 36 || finished[0] != 20 {
 		panic("client Finished")
 	}

@@ -190,3 +190,7 @@ the native owner consumes it one byte at a time and must publish Complete before
 the adapter permits bidirectional application exchange. No OpenSSL/non-Darwin
 matrix or production
 server claim follows; those remain157/147 gates.
+
+The full independent Go/OpenSSL and sanitizer gate is documented in
+[SERVER_VERIFICATION.md](SERVER_VERIFICATION.md). It records local capability
+limits and does not provide a production record/async binding.
