@@ -26,6 +26,7 @@ Error :: struct {kind: Error_Kind, allocation: mem.Allocator_Error}
 // prove allocator provenance or protect against separately copied aliases.
 valid :: proc(chunk: ^Chunk) -> bool {
 	if chunk == nil {return false}
+	if len(chunk.data) < 0 || len(chunk.storage) < 0 {return false}
 	custom := chunk.release != nil
 	allocated := chunk.allocator.procedure != nil
 	if custom == allocated {return false}
@@ -62,6 +63,7 @@ copy_bounded :: proc(data: []u8, limit: int, allocator := context.allocator) -> 
 // allocated with allocator and must be individually releasable by that owner.
 take_slice :: proc(source: ^[]u8, allocator := context.allocator) -> (chunk: Chunk, error: Error) {
 	if source == nil || allocator.procedure == nil {return {}, {kind=.Invalid_Input}}
+	if len(source^) < 0 {return {}, {kind=.Invalid_Input}}
 	if len(source^) > 0 && raw_data(source^) == nil {return {}, {kind=.Invalid_Input}}
 	chunk = {data=source^, storage=source^, allocator=allocator}
 	source^ = nil
