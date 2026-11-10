@@ -2,7 +2,6 @@ package tls
 
 import "core:crypto"
 import transport "core:net"
-import "core:net"
 import "core:time"
 
 // Bounds memory and processing for peers that never produce application data.

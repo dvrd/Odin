@@ -1,5 +1,7 @@
 package tls
 
+import "core:mem"
+
 // Local policy ceilings, not RFC transport-parameter limits. Both peer and
 // server parameter blobs are opaque: only the QUIC binding knows their meaning.
 SERVER_QUIC_PARAMETERS_CAP :: 1024
@@ -123,5 +125,5 @@ server_parameters_extensions :: proc(owner: ^Server_Handshake) -> Server_Handsha
 	}
 	wire[0] = 8; server_flight_put24(wire[1:4], at-4)
 	wire[4], wire[5] = u8((at-6)>>8), u8(at-6)
-	return server_flight_bytes(owner, transmute([]u8)wire[:at])
+	return server_flight_bytes(owner, mem.slice_ptr(cast(^u8)(cast(rawptr)&wire),at))
 }

@@ -1,5 +1,7 @@
 package tls
 
+import "core:mem"
+
 import "core:crypto"
 import "core:crypto/ecdh"
 import "core:crypto/x509"
@@ -143,6 +145,8 @@ server_flight_cleanup :: proc(owner: ^Server_Handshake) {
 server_flight_put24 :: proc(dst: []u8, value: int) {
 	dst[0], dst[1], dst[2] = u8(value >> 16), u8(value >> 8), u8(value)
 }
+// Explicit pointer views at stack-backed call sites preserve the copy contract:
+// publish uses borrow_bytes=false and copies bytes before returning.
 @(private)
 server_flight_bytes :: proc(
 	owner: ^Server_Handshake,
@@ -206,7 +210,7 @@ server_flight_next :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 		server_flight_put24(header[1:4], 4 + f.certificate_bytes)
 		server_flight_put24(header[5:8], f.certificate_bytes)
 		f.stage = .Certificate_Entry
-		return server_flight_bytes(owner, transmute([]u8)header[:])
+		return server_flight_bytes(owner, mem.slice_ptr(cast(^u8)(cast(rawptr)&header),len(header)))
 	case .Certificate_Entry:
 		der, e := credential_store.certificate_der(f.store, f.lease, f.index)
 		if e.kind != .None {
@@ -214,7 +218,7 @@ server_flight_next :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 		}
 		header: [3]u8; server_flight_put24(header[:], len(der))
 		f.offset = 0; f.stage = .Certificate_DER
-		return server_flight_bytes(owner, transmute([]u8)header[:])
+		return server_flight_bytes(owner, mem.slice_ptr(cast(^u8)(cast(rawptr)&header),len(header)))
 	case .Certificate_DER:
 		der, e := credential_store.certificate_der(f.store, f.lease, f.index)
 		if e.kind != .None {
@@ -234,7 +238,7 @@ server_flight_next :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 		f.index += 1
 		f.stage = .Verify if f.index == f.count else .Certificate_Entry
 		wire: [2]u8
-		return server_flight_bytes(owner, transmute([]u8)wire[:])
+		return server_flight_bytes(owner, mem.slice_ptr(cast(^u8)(cast(rawptr)&wire),len(wire)))
 	case .Verify:
 		wire: [520]u8; defer crypto.zero_explicit(&wire, size_of(wire))
 		signed := certificate_verify_input(transcript_snapshot(&owner._transcript), true)
@@ -249,7 +253,7 @@ server_flight_next :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 		wire[0] = 15; server_flight_put24(wire[1:4], 4 + n)
 		wire[4], wire[5], wire[6], wire[7] = u8(u16(scheme)>>8), u8(scheme), u8(n >> 8), u8(n)
 		f.stage = .Finished
-		return server_flight_bytes(owner, transmute([]u8)wire[:8 + n])
+		return server_flight_bytes(owner, mem.slice_ptr(cast(^u8)(cast(rawptr)&wire),8 + n))
 	case .Finished:
 		wire: [36]u8; defer crypto.zero_explicit(&wire, size_of(wire))
 		n, e := finished_encode(
@@ -261,7 +265,7 @@ server_flight_next :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 			return .Invalid_State
 		}
 		f.stage = .Application_Write
-		return server_flight_bytes(owner, transmute([]u8)wire[:n])
+		return server_flight_bytes(owner, mem.slice_ptr(cast(^u8)(cast(rawptr)&wire),n))
 	case .Application_Write:
 		f.application = application_secrets_derive(
 			f.handshake.handshake_secret,
@@ -333,7 +337,7 @@ server_flight_prepare_ecdh :: proc(owner: ^Server_Handshake, private: ^ecdh.Priv
 	defer crypto.zero_explicit(&secrets,size_of(secrets))
 	if e != .None {return .Malformed}
 	f.handshake=secrets
-	e2:=server_flight_bytes(owner,transmute([]u8)wire[:n],true)
+	e2:=server_flight_bytes(owner,mem.slice_ptr(cast(^u8)(cast(rawptr)&wire),n),true)
 	if e2 != .None {return e2}
 	server_handshake_release_input(owner)
 	f.stage=.Handshake_Write

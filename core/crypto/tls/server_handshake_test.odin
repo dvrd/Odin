@@ -98,8 +98,8 @@ server_owner_fragmentation_borrows_and_suffix :: proc(t: ^testing.T) {
 		if split < len(wire) {
 			// Overwrite and free the remaining caller input after feed returns.
 			input := make([]u8,len(wire)-split+3); copy(input,wire[split:]); input[len(input)-1]=0xff
-			n,status,e := server_handshake_feed(&o,.Initial,input)
-			testing.expect_value(t,n,len(wire)-split); testing.expect_value(t,status,.Need_Event_Drain); testing.expect_value(t,e,.None)
+			consumed,status,feed_error := server_handshake_feed(&o,.Initial,input)
+			testing.expect_value(t,consumed,len(wire)-split); testing.expect_value(t,status,.Need_Event_Drain); testing.expect_value(t,feed_error,.None)
 			for &b in input {b = 0xcc}; delete(input)
 		}
 		event,_ := server_handshake_peek(&o)
@@ -110,8 +110,8 @@ server_owner_fragmentation_borrows_and_suffix :: proc(t: ^testing.T) {
 			peek,_ := server_handshake_peek(&o)
 			testing.expect_value(t,peek.id,event.id)
 			testing.expect(t,raw_data(peek.peer.server_name)==raw_data(event.peer.server_name))
-			n,status,_ := server_handshake_feed(&o,.Handshake,([]u8){20,0,0,32})
-			testing.expect_value(t,n,0); testing.expect_value(t,status,.Need_Event_Drain)
+			consumed,status,_ := server_handshake_feed(&o,.Handshake,([]u8){20,0,0,32})
+			testing.expect_value(t,consumed,0); testing.expect_value(t,status,.Need_Event_Drain)
 		}
 		testing.expect_value(t,server_handshake_accept(&o,event.id+1),.Invalid_Event)
 		testing.expect_value(t,transcript_snapshot(&o._transcript),digest)

@@ -587,9 +587,9 @@ async_shutdown_drive :: proc(conn: ^Async_Conn) {
 	}
 	if !conn.transport_closing {
 		conn.transport_closing = true
-		error := net.async_close(conn.transport, &conn.shutdown)
-		if error.kind != .None {
-			conn.close_error = error; conn.transport_closed = true
+		close_error := net.async_close(conn.transport, &conn.shutdown)
+		if close_error.kind != .None {
+			conn.close_error = close_error; conn.transport_closed = true
 		}
 	}
 	if !conn.transport_closed || conn.queued do return

@@ -156,7 +156,7 @@ allocate :: proc(allocator: mem.Allocator, size, alignment: int) -> ([]u8, mem.A
 // Allocates all store metadata up front. This does not load files, parse a key,
 // choose a clock/policy or take ownership of any credential.
 create :: proc(config: Config, allocator: mem.Allocator) -> (^Store, Error) {
-	config, valid := normalize(config)
+	normalized, valid := normalize(config)
 	if !valid || allocator.procedure == nil {
 		return nil, {kind = .Invalid_Config}
 	}
@@ -165,7 +165,7 @@ create :: proc(config: Config, allocator: mem.Allocator) -> (^Store, Error) {
 		return nil, {kind = .Allocation_Failed, allocation = allocation}
 	}
 	owner := cast(^Owner)raw_data(storage)
-	owner.allocator = allocator; owner.config = config; owner.current = -1
+	owner.allocator = allocator; owner.config = normalized; owner.current = -1
 	success := false
 	defer if !success {
 		wipe_free(allocator, mem.slice_data_cast([]u8, owner.generations), align_of(Generation))
@@ -174,7 +174,7 @@ create :: proc(config: Config, allocator: mem.Allocator) -> (^Store, Error) {
 	}
 	generation_storage, ge := allocate(
 		allocator,
-		config.max_generations * size_of(Generation),
+		normalized.max_generations * size_of(Generation),
 		align_of(Generation),
 	)
 	if ge != nil {
@@ -183,7 +183,7 @@ create :: proc(config: Config, allocator: mem.Allocator) -> (^Store, Error) {
 	owner.generations = mem.slice_data_cast([]Generation, generation_storage)
 	lease_storage, le := allocate(
 		allocator,
-		config.max_leases * size_of(Lease_Record),
+		normalized.max_leases * size_of(Lease_Record),
 		align_of(Lease_Record),
 	)
 	if le != nil {

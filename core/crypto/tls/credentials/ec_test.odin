@@ -26,7 +26,7 @@ p256_credentials_formats_signatures_and_budgets :: proc(t:^testing.T) {
 		fmt.printf("P256 credential owner=%d key union=%d native EC=%d retained=%d peak=%d allocations=%d\n",size_of(Owner),size_of(owner.private),size_of(ecdsa.Private_Key),before.retained_bytes,before.peak_bytes,a.calls)
 		message:=[]u8{1,2,3,4,5};out:[80]u8
 		for &b in out {b=0xa5}
-		for i in 0..<8 {
+		for _ in 0..<8 {
 			n:int;se:Error
 			{context.allocator=mem.panic_allocator();n,se=sign_sha256(h,.ECDSA_SECP256R1_SHA256,message,out[:])};testing.expect_value(t,se,.None);testing.expect(t,n>=8 && n<=72)
 			pub:ecdsa.Public_Key;assert(ecdsa.public_key_set_bytes(&pub,.SECP256R1,owner.certs[0].ec_point))
@@ -125,7 +125,7 @@ rsa_typed_message_signing_matches_legacy_digest_contract :: proc(t:^testing.T) {
 	pub:rsa.Public_Key;assert(rsa.public_key_set_bytes(&pub,owner.certs[0].rsa_n,owner.certs[0].rsa_e));defer rsa.public_key_clear(&pub)
 	testing.expect(t,rsa.verify_pss(&pub,.SHA256,32,digest[:],out[:n],is_prehashed=true,mgf1_algo=.SHA256))
 	testing.expect_value(t,n,256)
-	{context.allocator=mem.panic_allocator();_,se:=sign_sha256(h,.RSA_PSS_RSAE_SHA256,[]u8{1,2,3},out[:]);testing.expect_value(t,se,.None)}
+	{context.allocator=mem.panic_allocator();_,sign_error:=sign_sha256(h,.RSA_PSS_RSAE_SHA256,[]u8{1,2,3},out[:]);testing.expect_value(t,sign_error,.None)}
 }
 
 @(test)

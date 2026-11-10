@@ -1,6 +1,5 @@
 package tls
 
-import "core:crypto"
 import "core:crypto/x25519"
 import "core:fmt"
 import "core:mem"

@@ -127,8 +127,8 @@ server_finished_wrong_level_partial_cancel_and_pending_complete_teardown :: proc
 			testing.expect_value(t,n,stop); testing.expect_value(t,e,.None)
 			if stop < 36 && mode < 2 {
 				level:=Server_Handshake_Level.Initial if mode==0 else .Application
-				n,status,e:=server_handshake_feed(&o,level,wire[stop:])
-				testing.expect_value(t,n,0); testing.expect_value(t,status,.Terminal); testing.expect_value(t,e,.Wrong_Level)
+				consumed,status,feed_error:=server_handshake_feed(&o,level,wire[stop:])
+				testing.expect_value(t,consumed,0); testing.expect_value(t,status,.Terminal); testing.expect_value(t,feed_error,.Wrong_Level)
 			} else if mode % 2 == 0 {server_handshake_abort(&o)} else {server_handshake_destroy(&o)}
 			finished_test_erased(t,&o,&a,store)
 			server_handshake_abort(&o); server_handshake_destroy(&o); finished_test_erased(t,&o,&a,store)

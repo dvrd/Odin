@@ -2,7 +2,6 @@ package tls
 
 import "core:crypto/ecdh"
 import "core:fmt"
-import "core:mem"
 import "core:testing"
 import "core:time"
 import credential_store "credentials/store"
@@ -67,8 +66,8 @@ server_retry_owner_size_every_split_and_transcript :: proc(t:^testing.T) {
 			for &b in prefix {b=0xee};delete(prefix)
 			if split<len(ch2) {
 				suffix:=make([]u8,len(ch2)-split+2);copy(suffix,ch2[split:])
-				n,st,e:=server_handshake_feed(&o,.Initial,suffix)
-				testing.expect_value(t,n,len(ch2)-split);testing.expect_value(t,st,.Need_Event_Drain);testing.expect_value(t,e,.None)
+				consumed,st,feed_error:=server_handshake_feed(&o,.Initial,suffix)
+				testing.expect_value(t,consumed,len(ch2)-split);testing.expect_value(t,st,.Need_Event_Drain);testing.expect_value(t,feed_error,.None)
 				for &b in suffix {b=0xdd};delete(suffix)
 			}
 			transcript_update(&reference,ch2);testing.expect_value(t,transcript_snapshot(&o._transcript),transcript_snapshot(&reference))
@@ -177,12 +176,12 @@ server_retry_maximum_grants_and_invalid_p256_point :: proc(t:^testing.T) {
 		if mode==1 {for &b in point[1:] {b=0xff}}
 		if mode==2 {point[0]=2}
 		server_handshake_init(&p,SERVER_HANDSHAKE_DEFAULT_CONFIG,owner_test_allocator(&b))
-		_,_,e:=server_handshake_feed(&p,.Initial,wire)
+		_,_,feed_error:=server_handshake_feed(&p,.Initial,wire)
 		if mode<2 {
-			testing.expect_value(t,e,.None);peer,_:=server_handshake_peek(&p);server_handshake_accept(&p,peer.id)
+			testing.expect_value(t,feed_error,.None);peer,_:=server_handshake_peek(&p);server_handshake_accept(&p,peer.id)
 			testing.expect_value(t,server_handshake_start_flight(&p,store,time.from_nanoseconds(1790000000*1000000000)),.None)
 			fatal,_:=server_handshake_peek(&p);testing.expect_value(t,fatal.kind,.Fatal);testing.expect_value(t,fatal.error,.Malformed)
-		} else {testing.expect_value(t,e,.Malformed)}
+		} else {testing.expect_value(t,feed_error,.Malformed)}
 		server_handshake_destroy(&p);owner_test_clean(t,&b)
 		ss,_:=credential_store.stats(store);testing.expect_value(t,ss.active_leases,0)
 	}

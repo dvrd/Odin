@@ -98,7 +98,7 @@ tls12_finished_framing_and_authentication :: proc(t:^testing.T) {
   changed:=message;changed[i]~=1
   testing.expect(t,tls12_finished_verify(changed[:],master,hash,false)!=.None)
  }
- for n in 0..<16 {testing.expect_value(t,tls12_finished_verify(message[:n],master,hash,false),.Invalid_Length)}
+ for cut in 0..<16 {testing.expect_value(t,tls12_finished_verify(message[:cut],master,hash,false),.Invalid_Length)}
  unchanged:=message
  _,small:=tls12_finished_encode(message[:15],master,hash,true)
  testing.expect_value(t,small,.Destination_Undersized);testing.expect_value(t,message,unchanged)

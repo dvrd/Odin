@@ -110,8 +110,8 @@ tls12_record_open_retryable_and_truncation :: proc(t:^testing.T) {
  testing.expect(t,bytes.equal(body,source[:]))
  for cut in 0..<n {
   tls12_record_protection_init(&rx,[16]u8{},[4]u8{})
-  _,body,error:=tls12_record_open(&rx,output[:],wire[:cut])
-  testing.expect(t,error!=.None && len(body)==0 && !rx.initialized)
+  _,truncated_body,error:=tls12_record_open(&rx,output[:],wire[:cut])
+  testing.expect(t,error!=.None && len(truncated_body)==0 && !rx.initialized)
  }
 }
 

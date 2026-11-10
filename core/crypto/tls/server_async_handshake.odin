@@ -8,8 +8,8 @@ server_async_handshake_drive :: proc(s:^Server_Async_Conn) {
 	if s._tx.pending || s._tx_done {return}
 	for _ in 0..<32 {
 		if time.diff(time.now(),s._handshake_deadline)<=0 {server_async_fail(s,{kind=.Timeout},{kind=.Handshake});return}
-		event,e:=server_handshake_peek(&s._engine)
-		if e!=.None {server_async_fail(s,{kind=.Protocol_Failed},{kind=.Handshake,engine=e});return}
+		event,event_error:=server_handshake_peek(&s._engine)
+		if event_error!=.None {server_async_fail(s,{kind=.Protocol_Failed},{kind=.Handshake,engine=event_error});return}
 		switch event.kind {
 		case .Fatal: server_async_fail(s,{kind=.Protocol_Failed},{kind=.Handshake,engine=event.error});return
 		case .Peer_Parameters:

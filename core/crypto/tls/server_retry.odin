@@ -1,5 +1,7 @@
 package tls
 
+import "core:mem"
+
 import "core:crypto"
 
 // Reuses application-secret storage before any flight/credentials exist. The
@@ -41,7 +43,7 @@ server_retry_begin :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 	hello_put_u16(wire[:], &at, 43); hello_put_u16(wire[:], &at, 2); hello_put_u16(wire[:], &at, 0x0304)
 	hello_put_u16(wire[:], &at, 51); hello_put_u16(wire[:], &at, 2); hello_put_u16(wire[:], &at, u16(owner._selection.group))
 	wire[0] = 2; server_flight_put24(wire[1:4], at-4)
-	return server_flight_bytes(owner, transmute([]u8)wire[:at], true)
+	return server_flight_bytes(owner, mem.slice_ptr(cast(^u8)(cast(rawptr)&wire),at), true)
 }
 
 @(private)

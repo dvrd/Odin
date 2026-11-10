@@ -45,8 +45,8 @@ tls12_record_seal :: proc(
 	content_type: TLS_Content_Type,
 	body: []u8,
 ) -> (written: int, error: Record_Protection_Error) {
-	if error := tls12_protection_validate(state); error != .None {return 0, error}
-	if error := tls12_content_validate(content_type, len(body)); error != .None {return 0, error}
+	if validation_error := tls12_protection_validate(state); validation_error != .None {return 0, validation_error}
+	if validation_error := tls12_content_validate(content_type, len(body)); validation_error != .None {return 0, validation_error}
 	wire_size := RECORD_HEADER_SIZE + TLS12_GCM_OVERHEAD + len(body)
 	if len(dst) < wire_size {return 0, .Destination_Undersized}
 	if bytes.alias(dst[:wire_size], body) {return 0, .Overlapping_Buffers}
@@ -72,7 +72,7 @@ tls12_record_open :: proc(
 	dst: []u8,
 	wire: []u8,
 ) -> (content_type: TLS_Content_Type, body: []u8, error: Record_Protection_Error) {
-	if error := tls12_protection_validate(state); error != .None {return {}, nil, error}
+	if validation_error := tls12_protection_validate(state); validation_error != .None {return {}, nil, validation_error}
 	if len(wire) < RECORD_HEADER_SIZE {return {}, nil, tls12_protection_fail(state, .Header_Incomplete)}
 	if wire[1] != 3 || wire[2] != 3 {return {}, nil, tls12_protection_fail(state, .Invalid_Legacy_Version)}
 	content_type = TLS_Content_Type(wire[0])
@@ -81,8 +81,8 @@ tls12_record_open :: proc(
 	if len(wire) != RECORD_HEADER_SIZE + cipher_size {return {}, nil, tls12_protection_fail(state, .Record_Length_Mismatch)}
 	if cipher_size < TLS12_GCM_OVERHEAD {return {}, nil, tls12_protection_fail(state, .Ciphertext_Too_Short)}
 	plain_size := cipher_size - TLS12_GCM_OVERHEAD
-	if error := tls12_content_validate(content_type, plain_size); error != .None {
-		return {}, nil, tls12_protection_fail(state, error)
+	if validation_error := tls12_content_validate(content_type, plain_size); validation_error != .None {
+		return {}, nil, tls12_protection_fail(state, validation_error)
 	}
 	if len(dst) < plain_size {return {}, nil, .Destination_Undersized}
 	if bytes.alias(dst[:plain_size], wire) {return {}, nil, .Overlapping_Buffers}

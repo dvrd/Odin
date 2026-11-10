@@ -1,6 +1,5 @@
 package tls
 
-import "core:crypto"
 import "core:crypto/rsa"
 import "core:crypto/x25519"
 import "core:crypto/x509"
