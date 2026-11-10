@@ -101,6 +101,9 @@ _dial_tcp_from_endpoint :: proc(endpoint: Endpoint, options := DEFAULT_TCP_OPTIO
 	if posix.connect(posix.FD(skt), (^posix.sockaddr)(&sockaddr), posix.socklen_t(sockaddr.ss_len)) != .OK {
 		err = _dial_error()
 		close(skt)
+	} else {
+		// Not vital to succeed; error ignored.
+		_ = set_option(skt, .TCP_Nodelay, options.no_delay)
 	}
 
 	return
@@ -178,6 +181,8 @@ _accept_tcp :: proc(sock: TCP_Socket, options := DEFAULT_TCP_OPTIONS) -> (client
 	}
 
 	client = TCP_Socket(client_sock)
+	// Not vital to succeed; error ignored.
+	_ = set_option(client, .TCP_Nodelay, options.no_delay)
 	source = _sockaddr_to_endpoint(&addr)
 	return
 }
