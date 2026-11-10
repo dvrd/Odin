@@ -1,0 +1,66 @@
+{
+  "generator": "Independent Python bitwriter; RFC1951 canonical fixed codes and explicit dynamic headers",
+  "zlib_version": "1.2.12",
+  "files": {
+    "raw-invalid-stored-complement.deflate": {
+      "bytes": 6,
+      "sha256": "73df4fc06137d4cddb29170c636176370d8f3a1a614c0a1f83d9cdb0f7e3212b",
+      "python_zlib_rejection": "Error -3 while decompressing data: invalid stored block lengths"
+    },
+    "raw-invalid-literal-286.deflate": {
+      "bytes": 3,
+      "sha256": "7d17e229a0a10ef12c915ded63e0c00a921f9284d408541c573fdd23ae5515d3",
+      "python_zlib_rejection": "Error -3 while decompressing data: invalid literal/length code"
+    },
+    "raw-invalid-literal-287.deflate": {
+      "bytes": 3,
+      "sha256": "fa0f10efdf3f648e0a0482b4bca71b6cd323a567b4322c1d55c2e859710aae92",
+      "python_zlib_rejection": "Error -3 while decompressing data: invalid literal/length code"
+    },
+    "raw-invalid-distance-before-history.deflate": {
+      "bytes": 3,
+      "sha256": "37bda89258654d0301b7d9481f2f349dc2f3167da81738339d9bcc53a580cdc3",
+      "python_zlib_rejection": "Error -3 while decompressing data: invalid distance too far back"
+    },
+    "raw-invalid-distance-30.deflate": {
+      "bytes": 4,
+      "sha256": "9ea06ac50eeb9f6de4cc28c6990dcc3297bf8a1f9dbecd5e8c0ab0a4abc0442e",
+      "python_zlib_rejection": "Error -3 while decompressing data: invalid distance code"
+    },
+    "raw-invalid-distance-31.deflate": {
+      "bytes": 4,
+      "sha256": "a9a813a07d708ed12c9c51a9d9257f36ee090a1ec7452a566892dd70e6b9fda2",
+      "python_zlib_rejection": "Error -3 while decompressing data: invalid distance code"
+    },
+    "raw-invalid-empty-code-tree.deflate": {
+      "bytes": 4,
+      "sha256": "2594b6a92ebfb1c3312deb7d01c015fb95e9fbe9bd7bc6b527af07813ec7b910",
+      "python_zlib_rejection": "Error -5 while decompressing data: incomplete or truncated stream"
+    },
+    "raw-invalid-oversubscribed-code-tree.deflate": {
+      "bytes": 4,
+      "sha256": "82e080608aee60be595ab33228f9068c2febc2f4e9b8dfdc4148fc2b3c1225aa",
+      "python_zlib_rejection": "Error -3 while decompressing data: invalid code lengths set"
+    },
+    "raw-invalid-incomplete-code-tree.deflate": {
+      "bytes": 4,
+      "sha256": "0895aa11a8f59f757f586afd78781b2e3979ac1b0565c184b03b22d371dfd80c",
+      "python_zlib_rejection": "Error -3 while decompressing data: invalid code lengths set"
+    },
+    "raw-invalid-repeat-16-first.deflate": {
+      "bytes": 4,
+      "sha256": "903098ed7d9cac5a2a0b1de46064b2a4c7e6b919e5a9454ffb1feccfa6c3a50e",
+      "python_zlib_rejection": "Error -3 while decompressing data: invalid bit length repeat"
+    },
+    "raw-invalid-repeat-overflow.deflate": {
+      "bytes": 6,
+      "sha256": "75105e4aa35948311643b830cc622079d33f24bb0a3184c6726a81287fa92435",
+      "python_zlib_rejection": "Error -3 while decompressing data: invalid bit length repeat"
+    },
+    "raw-invalid-missing-end-code.deflate": {
+      "bytes": 42,
+      "sha256": "0807b5a02d9c530891b865e14b94b46945148a285abbde34f9dac961acf8ef3f",
+      "python_zlib_rejection": "Error -3 while decompressing data: invalid code -- missing end-of-block"
+    }
+  }
+}
