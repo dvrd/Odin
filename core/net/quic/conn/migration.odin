@@ -11,7 +11,8 @@ CID_SLOTS :: 4
 PATH_SLOTS :: 4
 CID_CONTROL_SLOTS :: 16
 CID_Entry :: struct {
-	used, pending, in_flight, has_token: bool,
+	used, pending, in_flight, has_token, sent_once, bound: bool,
+ destination:net.Endpoint,
 	sequence, pn:                        u64,
 	id:                                  [CID_CAP]u8,
 	n:                                   int,
@@ -33,9 +34,11 @@ Path :: struct {
 	response_pending:                             bool,
 	response:                                     [8]u8,
 	latest_nonprobing:                            u64,
+ has_peer_id,owns_peer_id:bool,peer_sequence:u64,
 }
 Migration :: struct {
-	enabled, peer_disables:             bool,
+	enabled, peer_disables,peer_blocked,peer_override: bool,
+ retired_peer:Retired_Peer_Ids,declined_preferred:Declined_Preferred_Id,
  reset_secrets:^quic.Reset_Secrets,
 	paths:                              [PATH_SLOTS]Path,
 	active, receiving, output:          int,
@@ -74,10 +77,12 @@ migration_enable :: proc(
 	m.peer_limit = min(peer_cid_limit, u64(CID_SLOTS)); m.local_next = 1
 	m.local[0] = CID_Entry {
 		used = true,
+        sent_once = true,
 		n    = c.local_cid_len,
 		id   = c.local_cid,
 	}; m.peer[0] = CID_Entry {
 		used = true,
+        bound = true,destination=peer,
 		n    = c.peer_cid_len,
 		id   = c.peer_cid,
 	}
@@ -92,6 +97,7 @@ migration_enable :: proc(
   m.local[0].reset_lease=lease;m.local[0].token=lease.token;m.local[0].has_token=true
  }
 	m.paths[0] = Path {
+        has_peer_id=true,
 		used      = true,
 		validated = true,
 		endpoint  = peer,
@@ -156,10 +162,10 @@ replenish_ids :: proc(c: ^Connection) -> Error {
 			sequence  = m.local_next,
 			n         = c.local_cid_len,
 			has_token = true,
-		}; m.local_next += 1
+		}
 		if m.reset_secrets!=nil {
    lease,e:=quic.reset_cid_issue(m.reset_secrets,entry.id[:entry.n],reset_now());if e!=.None {entry={};return .Capacity};entry.reset_lease=lease;entry.token=lease.token
-  }else{crypto.rand_bytes(entry.id[:entry.n]);crypto.rand_bytes(entry.token[:])};count+=1
+  }else{crypto.rand_bytes(entry.id[:entry.n]);crypto.rand_bytes(entry.token[:])};m.local_next+=1;count+=1
 	}
 	return .None
 }
@@ -187,38 +193,21 @@ select_peer_id :: proc(c: ^Connection, sequence: u64) -> bool {
 	for &entry in c.migration.peer {
 		if entry.used && entry.sequence == sequence {
 			c.peer_cid = entry.id; c.peer_cid_len = entry.n; c.model.peer_cid = entry.id
-			c.model.peer_cid_len = entry.n; c.migration.peer_sequence = sequence; return true
+			c.model.peer_cid_len = entry.n; c.migration.peer_sequence = sequence;c.migration.peer_blocked=false; return true
 		}
 	}
 	return false
 }
 
 // Rotate the destination CID without losing packet number or retained streams.
-rotate_peer_id :: proc(c: ^Connection) -> Error {
-	if e := usable(c); e != .None {
-		return e
-	}; m := &c.migration
-	if !m.enabled {
-		return .Invalid
-	}
-	for &entry in m.peer {
-		if entry.used && entry.sequence != m.peer_sequence {
-			old := m.peer_sequence
-			if e := queue_retirement(c, old); e != .None {
-				return e
-			}
-			if !select_peer_id(c, entry.sequence) {
-				return .Invalid
-			}
-			for &prior in m.peer {
-				if prior.used && prior.sequence == old {
-					prior = {}; break
-				}
-			}
-			return .None
-		}
-	}
-	return .Not_Ready
+rotate_peer_id :: proc(c:^Connection)->Error {
+ if e:=usable(c);e!=.None {return e};m:=&c.migration;if !m.enabled {return .Invalid}
+ index:=unused_peer_id(c);if index<0 {return .Not_Ready}
+ old:=m.peer_sequence;sequence:=m.peer[index].sequence
+ if e:=retire_peer_id(c,old);e!=.None {return e}
+ bind_peer_id(c,index,m.paths[m.active].endpoint);if !select_peer_id(c,sequence) {return .Invalid}
+ path:=&m.paths[m.active];path.has_peer_id=true;path.peer_sequence=sequence
+ return .None
 }
 
 @(private)
@@ -230,6 +219,8 @@ apply_ids :: proc(c: ^Connection, p: Parsed, destination_id: []u8) -> Error {
  if p.new_id_n>0&&c.peer_cid_len==0||p.retire_id_n>0&&c.local_cid_len==0 {return .Protocol}
 	for i in 0 ..< p.new_id_n {
 		f := p.new_ids[i]
+        declined:=&m.declined_preferred
+        if f.sequence==1&&declined.used&&(string(f.id)!=string(declined.id[:declined.n])||!bytes.equal(f.token[:],declined.token[:])) {return .Protocol}
 		if f.retire_prior_to > f.sequence {
 			return .Protocol
 		}
@@ -252,15 +243,15 @@ apply_ids :: proc(c: ^Connection, p: Parsed, destination_id: []u8) -> Error {
 				return .Protocol
 			}
 		}
-		m.peer_prior = max(m.peer_prior, f.retire_prior_to)
+		m.peer_prior = max(m.peer_prior, f.retire_prior_to);retired_peer_advance(&m.retired_peer,m.peer_prior)
 		for &entry in m.peer {
 			if entry.used && entry.sequence < m.peer_prior {
 				if e := queue_retirement(c, entry.sequence); e != .None {
 					return e
-				}; entry = {}
+                };withdraw_peer_binding(c,entry.sequence);entry = {}
 			}
 		}
-		if f.sequence < m.peer_prior {
+		if f.sequence < m.peer_prior||peer_was_retired(c,f.sequence) {
 			if e := queue_retirement(c, f.sequence); e != .None {
 				return e
 			}; continue
@@ -282,20 +273,8 @@ apply_ids :: proc(c: ^Connection, p: Parsed, destination_id: []u8) -> Error {
 				has_token = true,
 			}; copy(entry.id[:], f.id)
 		}
-		have_current := false
-		for &entry in m.peer {
-			if entry.used && entry.sequence == m.peer_sequence {
-				have_current = true
-			}
-		}
-		if !have_current {
-			for &entry in m.peer {
-				if entry.used {
-					_ = select_peer_id(c, entry.sequence); break
-				}
-			}
-		}
 	}
+ ensure_current_peer_id(c)
 	for i in 0 ..< p.retire_id_n {
 		seq := p.retire_ids[i]
 		if seq >= m.local_next {
@@ -303,6 +282,7 @@ apply_ids :: proc(c: ^Connection, p: Parsed, destination_id: []u8) -> Error {
 		}
 		for &entry in m.local {
 			if entry.used && entry.sequence == seq {
+                if !entry.sent_once {return .Protocol}
 				if cid_equal(entry.id[:entry.n], destination_id) {
 					return .Protocol
 				}
@@ -376,7 +356,7 @@ migration_control :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, b
 			0,
 		)
 		if e == .None && n > 0 {
-			entry.in_flight = true; entry.pn = pn
+			entry.in_flight = true; entry.pn = pn; entry.sent_once=true
 		}; return n, e, true
 	}
 	for &entry in c.migration.retire {
@@ -422,7 +402,7 @@ candidate_slot :: proc(c: ^Connection) -> int {
 	}
 	oldest := -1
 	for path, i in m.paths {
-		if i == m.active || !path.validated || path.challenge_pending || path.response_pending {
+		if i == m.active || !path.validated || path.challenge_pending || path.response_pending || path.owns_peer_id {
 			continue
 		}
 		if oldest < 0 || path.latest_nonprobing < m.paths[oldest].latest_nonprobing {
@@ -464,6 +444,7 @@ migrate :: proc(c: ^Connection, now: i64, peer: net.Endpoint) -> Error {
 	if e := usable(c); e != .None {
 		return e
 	}; m := &c.migration
+ if c.role==.Client&&!c.seen_done {return .Not_Ready}
 	if !m.enabled || m.peer_disables || now < 0 || peer.address == nil {
 		return .Invalid
 	}
@@ -474,6 +455,12 @@ migrate :: proc(c: ^Connection, now: i64, peer: net.Endpoint) -> Error {
 	if index < 0 {
 		return .Capacity
 	}
+ fresh_id:=unused_peer_id(c);if fresh_id<0 {return .Not_Ready}
+ if index!=m.active {prior:=m.paths[index];if prior.owns_peer_id&&prior.has_peer_id {if e:=retire_peer_id(c,prior.peer_sequence);e!=.None {return e}}}
+ sequence:=m.peer[fresh_id].sequence
+ if index==m.active {if e:=retire_peer_id(c,m.peer_sequence);e!=.None {return e}}
+ bind_peer_id(c,fresh_id,peer)
+ if index==m.active {if !select_peer_id(c,sequence) {return .Invalid}}
 	path := &m.paths[index]
 	// A local socket rebind can retain the remote endpoint. Validation still runs
 	// on that socket, while the peer sees a new source and validates its new path.
@@ -483,6 +470,7 @@ migrate :: proc(c: ^Connection, now: i64, peer: net.Endpoint) -> Error {
 			endpoint = peer,
 		}
 	}
+ path.has_peer_id=true;path.owns_peer_id=true;path.peer_sequence=sequence
 	crypto.rand_bytes(path.challenge[:]); path.challenge_pending = true; path.challenge_at = now
 	path.attempts = 0; path.expires_at = now + max(i64(1000), c.model.smoothed_rtt * 9)
 	path.activate = true
@@ -546,17 +534,19 @@ migration_receive :: proc(
 		if !f.response {
 			path.response_pending = true; path.response = f.token; continue
 		}
-		if path.challenge_pending &&
-		   crypto.compare_constant_time(f.token[:], path.challenge[:]) == 1 {
-			path.validated = true; path.challenge_pending = false
-			if path.small_challenge {
-				crypto.rand_bytes(path.challenge[:]); path.challenge_pending = true
-				path.challenge_at = now; path.attempts = 0; path.small_challenge = false
-				path.expires_at = now + max(i64(1000), c.model.smoothed_rtt * 9)
-			} else if path.activate {
-				promote_path(c, index, now)
-			}
-		}
+		// RFC9000 8.2.3: the response may arrive on any path. Only the
+        // origin of an actually sent, unexpired challenge gains validation.
+        for &origin, origin_index in m.paths {
+         if !origin.used||!origin.challenge_pending||origin.attempts==0||origin.expires_at>0&&now>=origin.expires_at {continue}
+         if crypto.compare_constant_time(f.token[:],origin.challenge[:])!=1 {continue}
+         origin.validated=true;origin.challenge_pending=false
+         if origin.small_challenge {
+          crypto.rand_bytes(origin.challenge[:]);origin.challenge_pending=true
+          origin.challenge_at=now;origin.attempts=0;origin.small_challenge=false
+          origin.expires_at=now+max(i64(1000),c.model.smoothed_rtt*9)
+         } else if origin.activate {promote_path(c,origin_index,now)}
+         break
+        }
 	}
 	return .None
 }
@@ -567,6 +557,7 @@ promote_path :: proc(c: ^Connection, index: int, now: i64) {
 	if index == m.active {
 		return
 	}
+ old_sequence:=m.peer_sequence
 	old := m.paths[m.active].endpoint; next := m.paths[index].endpoint
 	m.paths[m.active].received = c.model.path_received; m.paths[m.active].sent = c.model.path_sent
 	m.active = index; c.model.path = u32(index + 1); c.model.address_validated = true
@@ -582,8 +573,13 @@ promote_path :: proc(c: ^Connection, index: int, now: i64) {
 		harness.migrate_path(&c.model, now)
 	}
 	ecn.reset_path(&c.ecn.sender); c.ecn.started = now
-	// Rotation prevents linking subsequent packets through the old peer CID.
-	_ = rotate_peer_id(c)
+ // Local initiation reserved an unused CID before its first probe. Preserve
+ // that origin's CID when a cross-path response confirms it. Peer rebinding
+ // may keep the current CID (RFC9000 9.5); rotate when fresh credit exists.
+ path:=&m.paths[index]
+ if path.owns_peer_id&&path.has_peer_id {
+  if select_peer_id(c,path.peer_sequence)&&old_sequence!=path.peer_sequence {_=retire_peer_id(c,old_sequence)}
+ } else {_=rotate_peer_id(c)}
 }
 
 pump_to :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, net.Endpoint, Error) {
@@ -605,11 +601,13 @@ pump_to :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, net.Endpoint, Erro
 		   path.challenge_pending &&
 		   path.expires_at > 0 &&
 		   now >= path.expires_at {
+            if path.owns_peer_id&&path.has_peer_id&&path.peer_sequence!=m.peer_sequence {if e:=retire_peer_id(c,path.peer_sequence);e!=.None {return 0,path.endpoint,e}}
 			path = {}; continue
 		}
 		response := path.response_pending
 		challenge := path.challenge_pending && now >= path.challenge_at
 		if challenge && path.attempts >= 3 {
+            if i!=m.active&&path.owns_peer_id&&path.has_peer_id&&path.peer_sequence!=m.peer_sequence {if e:=retire_peer_id(c,path.peer_sequence);e!=.None {return 0,path.endpoint,e}}
 			path.challenge_pending = false
 			if i != m.active {
 				path = {}
@@ -626,6 +624,14 @@ pump_to :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, net.Endpoint, Erro
 				continue
 			}
 		}
+        peer_index:=-1
+        if path.owns_peer_id {
+         if path.has_peer_id {peer_index=peer_id_index(c,path.peer_sequence)}
+         if peer_index<0 {peer_index=unused_peer_id(c);if peer_index<0 {return 0,path.endpoint,.Not_Ready};bind_peer_id(c,peer_index,path.endpoint);path.has_peer_id=true;path.peer_sequence=m.peer[peer_index].sequence}
+        }
+        saved_override:=m.peer_override;if peer_index>=0 {m.peer_override=true}
+        saved_cid:=c.peer_cid;saved_n:=c.peer_cid_len;saved_model_cid:=c.model.peer_cid;saved_model_n:=c.model.peer_cid_len
+        if peer_index>=0 {entry:=m.peer[peer_index];c.peer_cid=entry.id;c.peer_cid_len=entry.n;c.model.peer_cid=entry.id;c.model.peer_cid_len=entry.n}
 		old_path := c.model.path; old_validated := c.model.address_validated
 		old_recv := c.model.path_received; old_sent := c.model.path_sent
 		old_flight := c.model.bytes_in_flight
@@ -654,6 +660,8 @@ pump_to :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, net.Endpoint, Erro
 			frame[:9],
 			0,
 		)
+        m.peer_override=saved_override
+        c.peer_cid=saved_cid;c.peer_cid_len=saved_n;c.model.peer_cid=saved_model_cid;c.model.peer_cid_len=saved_model_n
 		c.max_datagram = size; c.full_size = full; path.sent = c.model.path_sent
 		c.model.path = old_path; c.model.address_validated = old_validated
 		c.model.path_received = old_recv; c.model.path_sent = old_sent

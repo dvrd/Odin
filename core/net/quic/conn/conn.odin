@@ -1608,6 +1608,7 @@ seal_and_emit :: proc(
 	Error,
 ) {
  if early(c){return early_seal_and_emit(c,now,dst,req,content)}
+ if req.space==.Application&&c.migration.enabled&&c.migration.peer_blocked&&!c.migration.peer_override {return 0,.Not_Ready}
 	if c.model.spaces[int(req.space)].discarded {
 		return 0, .Discarded
 	}

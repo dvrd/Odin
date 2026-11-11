@@ -45,6 +45,44 @@ cid_retirement_rejects_unissued_and_packet_destination :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, count, 4)
 }
+
+@(test)
+cid_retirement_rejects_allocated_but_never_sent_sequence :: proc(t:^testing.T) {
+ c:Connection;cid_fixture(&c)
+ p:=Parsed{retire_id_n=1};p.retire_ids[0]=1
+ testing.expect(t,c.migration.local[1].used&&!c.migration.local[1].sent_once)
+ testing.expect_value(t,apply_ids(&c,p,c.local_cid[:8]),.Protocol)
+ testing.expect(t,c.migration.local[1].used)
+}
+
+@(test)
+preferred_address_decline_retires_without_selection_and_remembers_duplicates :: proc(t:^testing.T) {
+ c:Connection;cid_fixture(&c);before:=c.peer_cid
+ id:=[8]u8{9,9,9,9,9,9,9,9};token:=[16]u8{0=19}
+ testing.expect_value(t,decline_preferred_address(&c,id[:],token[:]),.None)
+ testing.expect_value(t,c.peer_cid,before);testing.expect_value(t,c.migration.peer_sequence,u64(0))
+ testing.expect(t,c.migration.declined_preferred.used&&peer_was_retired(&c,1));testing.expect_value(t,peer_id_index(&c,1),-1)
+ for &retired in c.migration.retire {if retired.used&&retired.sequence==1 {retired.in_flight=true;retired.pn=5}}
+ ack:=Parsed{ack=true,ack_n=1};ack.ack_ranges[0]={5,5};migration_ack(&c,ack)
+ p:=Parsed{new_id_n=1};p.new_ids[0]={sequence=1,id=id[:],token=token}
+ testing.expect_value(t,apply_ids(&c,p,c.local_cid[:8]),.None);testing.expect_value(t,peer_id_index(&c,1),-1)
+ queued:=false;for retired in c.migration.retire {if retired.used&&retired.sequence==1 {queued=true}};testing.expect(t,queued)
+ p.new_ids[0].token[0]~=1;testing.expect_value(t,apply_ids(&c,p,c.local_cid[:8]),.Protocol)
+ testing.expect_value(t,c.peer_cid,before)
+ testing.expect_value(t,decline_preferred_address(&c,id[:],token[:]),.None)
+ id[0]~=1;testing.expect_value(t,decline_preferred_address(&c,id[:],token[:]),.Protocol)
+}
+
+@(test)
+retired_peer_history_merges_holes_and_never_forgets_a_retired_id :: proc(t:^testing.T) {
+ r:Retired_Peer_Ids
+ for value in ([]u64{2,4,1,0}) {testing.expect_value(t,retired_peer_record(&r,value),.None)}
+ testing.expect_value(t,r.base,u64(3));testing.expect_value(t,r.n,1);testing.expect_value(t,r.values[0],u64(4))
+ testing.expect_value(t,retired_peer_record(&r,3),.None);testing.expect_value(t,r.base,u64(5));testing.expect_value(t,r.n,0)
+ for i in 0..<CID_CONTROL_SLOTS {testing.expect_value(t,retired_peer_record(&r,u64(100+i*2)),.None)}
+ before:=r;testing.expect_value(t,retired_peer_record(&r,1000),.Capacity);testing.expect_value(t,r,before)
+ retired_peer_advance(&r,1000);testing.expect_value(t,r.base,u64(1000));testing.expect_value(t,r.n,0)
+}
 @(test)
 cid_limit_and_stale_new_ids_are_bounded :: proc(t: ^testing.T) {
 	c: Connection; cid_fixture(&c)
@@ -79,30 +117,28 @@ cid_limit_and_stale_new_ids_are_bounded :: proc(t: ^testing.T) {
 	testing.expect_value(t, c.migration.peer_sequence, 4)
 }
 @(test)
-path_challenge_response_requires_same_path_and_exact_nonce :: proc(t: ^testing.T) {
-	c: Connection; cid_fixture(&c)
-	m := &c.migration
-	m.paths[1] = Path {
-		used = true,
-		endpoint = {net.IP4_Loopback, 2345},
-		activate = true,
-		challenge_pending = true,
-		challenge = {0 = 4, 1 = 5},
-	}
-	p := Parsed {
-		path_n = 1,
-	}; p.paths[0] = Path_Frame {
-		response = true,
-		token = {0 = 4, 1 = 5},
-	}
-	testing.expect_value(t, migration_receive(&c, 10, 1, .One_RTT, 1, p, c.local_cid[:8]), .None)
-	testing.expect_value(t, m.active, 0)
-	p.paths[0].token[1] = 6
-	testing.expect_value(t, migration_receive(&c, 10, 2, .One_RTT, 2, p, c.local_cid[:8]), .None)
-	testing.expect_value(t, m.active, 0)
-	p.paths[0].token[1] = 5
-	testing.expect_value(t, migration_receive(&c, 10, 2, .One_RTT, 3, p, c.local_cid[:8]), .None)
-	testing.expect_value(t, m.active, 1)
+path_response_validates_sent_challenge_origin_on_any_arrival_path :: proc(t:^testing.T) {
+ c:Connection;cid_fixture(&c);m:=&c.migration
+ m.paths[1]={used=true,endpoint={net.IP4_Loopback,2345},activate=true,challenge_pending=true,challenge={0=4,1=5},attempts=1,expires_at=100}
+ m.paths[2]={used=true,endpoint={net.IP4_Loopback,3456},challenge_pending=true,challenge={0=6},expires_at=100}
+ m.paths[3]={used=true,endpoint={net.IP4_Loopback,4567},activate=true,challenge_pending=true,challenge={0=7},attempts=1,expires_at=5}
+ p:=Parsed{path_n=1};p.paths[0]={response=true,token={0=4,1=6}}
+ testing.expect_value(t,migration_receive(&c,10,3,.One_RTT,1,p,c.local_cid[:8]),.None)
+ testing.expect_value(t,m.active,0);testing.expect(t,!m.paths[1].validated&&!m.paths[2].validated)
+ p.paths[0].token={0=6};_=migration_receive(&c,10,3,.One_RTT,2,p,c.local_cid[:8]);testing.expect(t,!m.paths[2].validated)
+ p.paths[0].token={0=7};_=migration_receive(&c,10,3,.One_RTT,3,p,c.local_cid[:8]);testing.expect(t,!m.paths[3].validated)
+ p.paths[0].token={0=4,1=5}
+ testing.expect_value(t,migration_receive(&c,10,3,.One_RTT,4,p,c.local_cid[:8]),.None)
+ testing.expect_value(t,m.active,1);testing.expect(t,m.paths[1].validated&&!m.paths[1].challenge_pending)
+ testing.expect(t,!m.paths[2].validated);testing.expect_value(t,m.paths[1].endpoint.port,2345)
+ // A replay of the consumed token cannot validate its new arrival path.
+ _=migration_receive(&c,11,3,.One_RTT,5,p,c.local_cid[:8]);testing.expect(t,!m.paths[2].validated)
+ // A small initial probe validates only its origin address; a fresh expanded
+ // challenge is still necessary before promotion/MTU admission.
+ m.paths[3].expires_at=100;m.paths[3].small_challenge=true;p.paths[0].token={0=7}
+ _=migration_receive(&c,12,3,.One_RTT,6,p,c.local_cid[:8])
+ testing.expect(t,m.paths[3].validated&&m.paths[3].challenge_pending&&!m.paths[3].small_challenge)
+ testing.expect_value(t,m.paths[3].attempts,0);testing.expect_value(t,m.active,1)
 }
 @(test)
 path_frames_parse_all_nonces_and_reject_invalid_ids :: proc(t: ^testing.T) {

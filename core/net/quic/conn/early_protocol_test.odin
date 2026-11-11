@@ -19,8 +19,9 @@ early_protocol_fixture :: proc()->^Connection {
 }
 
 @(private)
-early_protocol_packet :: proc(c:^Connection,dst,plain:[]u8,pn:u64,reserved:bool=false,bad_tag:bool=false)->int {
- hn,_,he:=quic.long_header_encode_v1(dst,{kind=.Zero_RTT,destination_id=c.local_cid[:c.local_cid_len],source_id=c.peer_cid[:c.peer_cid_len],packet_number=u32(pn),packet_number_length=4,ciphertext_length=u64(len(plain)+16),length_width=2});assert(he==.None)
+early_protocol_packet :: proc(c:^Connection,dst,plain:[]u8,pn:u64,reserved:bool=false,bad_tag:bool=false,destination:[]u8=nil)->int {
+ target:=destination;if target==nil {target=c.local_cid[:c.local_cid_len]}
+ hn,_,he:=quic.long_header_encode_v1(dst,{kind=.Zero_RTT,destination_id=target,source_id=c.peer_cid[:c.peer_cid_len],packet_number=u32(pn),packet_number_length=4,ciphertext_length=u64(len(plain)+16),length_width=2});assert(he==.None)
  if reserved {dst[0]|=4}
  keys:=&c.hs.zero_rtt_read;nonce,ne:=quic.packet_nonce(keys,pn);assert(ne==.None)
  ctx:aes.Context_GCM;aes.init_gcm(&ctx,keys.key[:16]);defer aes.reset_gcm(&ctx)
@@ -55,9 +56,10 @@ early_padding_is_nonempty_and_not_ack_eliciting :: proc(t:^testing.T) {
 @(test)
 early_owned_cid_retirement_and_challenge_defer_until_confirmation :: proc(t:^testing.T) {
  c:=early_protocol_fixture();defer {destroy(c);free(c)}
- // NEW_CONNECTION_ID sequence1, RETIRE_CONNECTION_ID sequence1, challenge.
- frames:=[?]u8{0x18,1,0,8,9,9,9,9,9,9,9,9,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,0x19,1,0x1a,21,22,23,24,25,26,27,28}
- peer:=net.Endpoint{net.IP4_Loopback,4000};packet:[MAX_DATAGRAM]u8;n:=early_protocol_packet(c,packet[:],frames[:],0)
+ // NEW_CONNECTION_ID sequence1, RETIRE_CONNECTION_ID initial sequence0, challenge.
+ frames:=[?]u8{0x18,1,0,8,9,9,9,9,9,9,9,9,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,0x19,0,0x1a,21,22,23,24,25,26,27,28}
+ original:=[8]u8{9,9,9,9,9,9,9,9};copy(c.early_state.original[:],original[:]);c.early_state.original_n=8
+ peer:=net.Endpoint{net.IP4_Loopback,4000};packet:[MAX_DATAGRAM]u8;n:=early_protocol_packet(c,packet[:],frames[:],0,false,false,original[:])
  testing.expect_value(t,ingest_early_ecn(c,1,peer,packet[:n],.Not_ECT,false),.None)
  testing.expect_value(t,c.early_state.control_n,3);testing.expect(t,!c.migration.enabled)
  second:=[?]u8{0x1a,31,32,33,34,35,36,37,38};n=early_protocol_packet(c,packet[:],second[:],1)
@@ -72,7 +74,7 @@ early_owned_cid_retirement_and_challenge_defer_until_confirmation :: proc(t:^tes
  testing.expect_value(t,c.early_state.control_n,1)
  found:=false;retired:=true
  for entry in c.migration.peer {if entry.used&&entry.sequence==1 {found=true;testing.expect_value(t,entry.n,8);testing.expect_value(t,entry.id[0],u8(9));testing.expect_value(t,entry.token[15],u8(16))}}
- for entry in c.migration.local {if entry.used&&entry.sequence==1 {retired=false}}
+ for entry in c.migration.local {if entry.used&&entry.sequence==0 {retired=false}}
  testing.expect(t,found&&retired)
  path:=c.migration.paths[0];testing.expect(t,path.response_pending&&path.validated&&path.endpoint==peer)
  testing.expect_value(t,path.response,[8]u8{21,22,23,24,25,26,27,28});testing.expect_value(t,c.migration.active,0)
@@ -185,6 +187,8 @@ zero_cid_manager_supports_normal_application_and_nonzero_cid_retirement :: proc(
    testing.expect_value(t,ingest_from(c,3,{net.IP4_Loopback,5000},packet[:n]),.Discarded)
    testing.expect_value(t,c.migration.active,0)
   } else {
+   // The peer can retire an ID only after an actual NEW_CONNECTION_ID emit.
+   for _ in 0..<3 {sent,se,ready:=migration_control(c,2,packet[:]);assert(se==.None&&ready&&sent>0)}
    n:=early_protocol_application_packet(c,packet[:],[]u8{0x19,1},pn)
    testing.expect_value(t,ingest_from(c,3,peer,packet[:n]),.None);pn+=1
    found:=false;for entry in c.migration.local {if entry.used&&entry.sequence==1 {found=true}}
