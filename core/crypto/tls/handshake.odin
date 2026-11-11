@@ -250,6 +250,12 @@ handshake_server_flight_verify :: proc(conn: ^Conn, flight: []u8) -> ([32]u8, Ha
 	if extension_error.kind != .None {return {},handshake_fail(conn,extension_error)}
 
 	transcript_update(&transcript, encrypted_extensions)
+	if at < len(flight) && flight[at] == u8(Handshake_Type.Certificate_Request) {
+		request,e := handshake_next_message(flight,&at,.Certificate_Request)
+		if e.kind != .None {return {},handshake_fail(conn,e)}
+		if e = client_auth_request_decode(conn,request);e.kind != .None {return {},handshake_fail(conn,e)}
+		transcript_update(&transcript,request)
+	}
 	// Abbreviate only when the PSK is still bound to this hostname and the peer
 	// omitted certificates. A certificate still takes the existing checks.
 	// Finished-only is not accepted for a full handshake.
@@ -401,16 +407,21 @@ handshake_client_finished_encode :: proc(
 }
 
 handshake_client_finished_send :: proc(conn: ^Conn, transcript_hash: ^[32]u8) -> Handshake_Error {
-	wire: [5 + 36 + 1 + 16]u8
-	written, err := handshake_client_finished_encode(conn, transcript_hash, wire[:])
-	if err.kind != .None do return err
-
-	_, send_err := transport.write_all(conn.transport, wire[:written])
-	if send_err.kind != .None {
-		return handshake_fail(conn, {kind = .Finished_Write_Failed, transport = send_err})
-	}
-
-	return {}
+ if e := client_auth_prepare(conn,transcript_hash,context.allocator);e.kind != .None {return handshake_fail(conn,e)}
+ wire: [RECORD_HEADER_SIZE + MAX_CIPHERTEXT_SIZE]u8
+ for conn.client_auth_offset < len(conn.client_auth_flight) {
+  at := conn.client_auth_offset
+  end := min(len(conn.client_auth_flight),at+MAX_PLAINTEXT_SIZE)
+  n,e := record_seal(&conn.handshake_send,wire[:],.Handshake,conn.client_auth_flight[at:end])
+  if e != .None {return handshake_fail(conn,{kind=.Finished_Write_Failed,protection=e})}
+  if _,e := transport.write_all(conn.transport,wire[:n]);e.kind != .None {return handshake_fail(conn,{kind=.Finished_Write_Failed,transport=e})}
+  conn.client_auth_offset=end
+ }
+ written,err := handshake_client_finished_encode(conn,transcript_hash,wire[:])
+ if err.kind != .None {return err}
+ _,send_err:=transport.write_all(conn.transport,wire[:written])
+ if send_err.kind != .None {return handshake_fail(conn,{kind=.Finished_Write_Failed,transport=send_err})}
+ return {}
 }
 
 handshake_application_activate :: proc(
@@ -463,7 +474,7 @@ handshake_next_message :: proc(
 	}
 
 	kind := flight[at^]
-	if kind == cast(u8)Handshake_Type.Certificate_Request {
+	if kind == cast(u8)Handshake_Type.Certificate_Request && expected != .Certificate_Request {
 		return nil, {kind = .Client_Authentication_Unsupported, message_type = kind}
 	}
 
@@ -1038,6 +1049,7 @@ client_handshake_keys_init :: proc(conn: ^Conn) -> Handshake_Keys_Error {
 }
 
 handshake_keys_clear :: proc(conn: ^Conn) {
+ client_auth_clear(conn)
 	crypto.zero_explicit(&conn.x25519_private_key, size_of(conn.x25519_private_key))
 	crypto.zero_explicit(&conn.shared_secret, size_of(conn.shared_secret))
 	crypto.zero_explicit(&conn.handshake_secrets, size_of(conn.handshake_secrets))
@@ -1575,25 +1587,26 @@ async_handshake_drive :: proc(conn: ^Async_Conn) {
 		return
 	}
 	if p.phase == .Server_Finished_Received {
-		if conn.finishing do return
-		hash, err := handshake_server_flight_verify(p, conn.flight[:conn.flight_used])
-		if err.kind != .None {
-			async_handshake_fail(conn, err)
-			return
-		}
-		conn.secrets = application_secrets_derive(p.handshake_secrets.handshake_secret, hash)
-		size, finish_err := handshake_client_finished_encode(p, &hash, conn.tx_wire[:])
-		if finish_err.kind != .None {
-			async_handshake_fail(conn, finish_err)
-			return
-		}
-		crypto.zero_explicit(raw_data(conn.flight), len(conn.flight))
-		delete(conn.flight, conn.allocator)
-		conn.flight = nil
-		conn.finishing = true
-		async_send_start(conn, .Finished, size, conn.handshake_deadline)
-		return
-	}
+  if !conn.finishing {
+   hash,err:=handshake_server_flight_verify(p,conn.flight[:conn.flight_used])
+   if err.kind != .None {async_handshake_fail(conn,err);return}
+   conn.secrets=application_secrets_derive(p.handshake_secrets.handshake_secret,hash)
+   if e:=client_auth_prepare(p,&hash,conn.allocator);e.kind != .None {async_handshake_fail(conn,e);return}
+   crypto.zero_explicit(raw_data(conn.flight),len(conn.flight));delete(conn.flight,conn.allocator);conn.flight=nil
+   conn.finishing=true
+  }
+  if p.client_auth_offset < len(p.client_auth_flight) {
+   at:=p.client_auth_offset;end:=min(len(p.client_auth_flight),at+MAX_PLAINTEXT_SIZE)
+   n,e:=record_seal(&p.handshake_send,conn.tx_wire[:],.Handshake,p.client_auth_flight[at:end])
+   if e != .None {async_handshake_fail(conn,{kind=.Finished_Write_Failed,protection=e});return}
+   p.client_auth_offset=end;async_send_start(conn,.Client_Auth,n,conn.handshake_deadline);return
+  }
+  hash:=transcript_snapshot(&p.server_finished_transcript)
+  size,e:=handshake_client_finished_encode(p,&hash,conn.tx_wire[:])
+  if e.kind != .None {async_handshake_fail(conn,e);return}
+  async_send_start(conn,.Finished,size,conn.handshake_deadline)
+  return
+ }
 	if p.phase != .Awaiting_Server_Hello && p.phase != .Handshake_Keys_Ready {
 		async_handshake_fail(conn, {kind = .Invalid_State}); return
 	}

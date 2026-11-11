@@ -1,0 +1,54 @@
+package store
+
+import "core:testing"
+
+@(test)
+retained_lease_preserves_exact_generation_after_rotation :: proc(t:^testing.T) {
+ owner:=make_store({max_generations=2,max_leases=3});defer destroy(&owner)
+ credential:=make_credential();assert(replace(owner,&credential).kind==.None)
+ original,e:=acquire(owner);assert(e.kind==.None)
+ generation,ge:=lease_generation(owner,original);assert(ge.kind==.None)
+ clone,ce:=retain(owner,original);assert(ce.kind==.None)
+ testing.expect(t,clone!=original)
+ credential=make_credential();assert(replace(owner,&credential).kind==.None)
+ current,_:=stats(owner)
+ testing.expect(t,current.current_generation!=generation)
+ retired_clone,re:=retain(owner,original);assert(re.kind==.None)
+ retired_generation,rge:=lease_generation(owner,retired_clone)
+ testing.expect(t,rge.kind==.None && retired_generation==generation)
+ actual,ae:=lease_generation(owner,clone)
+ testing.expect(t,ae.kind==.None && actual==generation)
+ assert(release(owner,&original).kind==.None)
+ actual,ae=lease_generation(owner,clone)
+ testing.expect(t,ae.kind==.None && actual==generation)
+ latest,le:=acquire(owner);assert(le.kind==.None)
+ latest_generation,lge:=lease_generation(owner,latest)
+ testing.expect(t,lge.kind==.None && latest_generation==current.current_generation)
+ assert(release(owner,&clone).kind==.None)
+ assert(release(owner,&retired_clone).kind==.None)
+ assert(release(owner,&latest).kind==.None)
+ final,_:=stats(owner)
+ testing.expect_value(t,final.active_leases,0)
+ testing.expect_value(t,final.retired_generations,0)
+}
+
+@(test)
+lease_retain_rejects_capacity_stale_foreign_and_closed_without_consuming_source :: proc(t:^testing.T) {
+ owner:=make_store({max_leases=1});defer destroy(&owner)
+ other:=make_store();defer destroy(&other)
+ credential:=make_credential();assert(replace(owner,&credential).kind==.None)
+ original,e:=acquire(owner);assert(e.kind==.None)
+ _,capacity:=retain(owner,original)
+ testing.expect_value(t,capacity.kind,Error_Kind.Capacity)
+ _,foreign_error:=lease_generation(other,original)
+ testing.expect_value(t,foreign_error.kind,Error_Kind.Invalid_Lease)
+ testing.expect_value(t,close(owner).kind,Error_Kind.None)
+ _,closed:=retain(owner,original)
+ testing.expect_value(t,closed.kind,Error_Kind.Closed)
+ _,valid:=lease_generation(owner,original)
+ testing.expect_value(t,valid.kind,Error_Kind.None)
+ stale:=original
+ testing.expect_value(t,release(owner,&original).kind,Error_Kind.None)
+ _,invalid:=lease_generation(owner,stale)
+ testing.expect_value(t,invalid.kind,Error_Kind.Invalid_Lease)
+}

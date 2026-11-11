@@ -47,3 +47,8 @@ nonzero retirement is unsupported. PATH_CHALLENGE is answered on the existing
 path; this does not enable migration. Advisory BLOCKED frames are accepted.
 Independent wire interoperability belongs to the real TLS driver's loopback and
 external-peer tests, not the deterministic Material fixture pair.
+
+`now` and timer deadlines use elapsed milliseconds with the default RFC9002
+constants. Drivers must not pass nanoseconds to that millisecond model. A
+protected HANDSHAKE_DONE retires retained client authentication CRYPTO, releases
+its owned backing and drops Handshake keys before further application output.

@@ -4,6 +4,8 @@ import "core:crypto"
 import "core:crypto/sha2"
 import "core:crypto/x509"
 import "core:time"
+import "core:mem"
+import credential_store "credentials/store"
 
 // QUIC packet protection consumes TLS traffic secrets. It is not a TLS record
 // and it does not change the TCP handshake. 0-RTT is not a level here.
@@ -497,4 +499,68 @@ quic_split_messages :: proc(src: []u8, dst: [][]u8) -> bool {
 		at += n
 	}
 	return at == len(src)
+}
+
+// Authenticates the complete QUIC server flight, including an optional initial
+// CertificateRequest. Returns an allocator-owned client Certificate/Verify/
+// Finished flight. Application keys still derive at server Finished; client
+// Finished authenticates the additional client-authentication messages. No TLS
+// records are produced. The caller must retain/retransmit every returned byte
+// before declaring Finished sent, then erase/free it after handshake retirement.
+quic_application_secrets_mutual :: proc(
+ handshake_secret:[32]u8,client_hello,server_hello,handshake_messages:[]u8,
+ server_name:string,roots:[]^x509.Certificate,now:time.Time,
+ local_parameters,peer_parameters:[]u8,identity:^credential_store.Store,
+ allocator:mem.Allocator,identity_lease:^credential_store.Lease=nil,
+)->(keys:Quic_Application_Keys,client_flight:[]u8,err:Quic_Secret_Error) {
+ secret:=handshake_secret;defer crypto.zero_explicit(&secret,size_of(secret))
+ if crypto.is_zero_constant_time(secret[:])==1 {return {},nil,{kind=.Derivation_Failed}}
+ if len(local_parameters)>SERVER_QUIC_PARAMETERS_CAP||len(peer_parameters)>SERVER_QUIC_PARAMETERS_CAP {return {},nil,{kind=.Parameters_Oversized}}
+ if e:=quic_client_hello_policy(client_hello,local_parameters);e.kind!=.None {return {},nil,e}
+ messages:[5][]u8;count,at:=0,0
+ for at<len(handshake_messages) {
+  if count==len(messages)||len(handshake_messages)-at<4 {return {},nil,{kind=.Malformed}}
+  n:=4+handshake_body_size(handshake_messages[at:]);if n>len(handshake_messages)-at {return {},nil,{kind=.Malformed}}
+  messages[count]=handshake_messages[at:at+n];count+=1;at+=n
+ }
+ if count<4||messages[0][0]!=8 {return {},nil,{kind=.Malformed}}
+ if e:=quic_encrypted_extensions_policy(messages[0],peer_parameters);e.kind!=.None {return {},nil,e}
+ transcript:Handshake_Transcript;transcript_init(&transcript);defer crypto.zero_explicit(&transcript,size_of(transcript))
+ transcript_update(&transcript,client_hello);transcript_update(&transcript,server_hello);transcript_update(&transcript,messages[0])
+ requested:=count==5;cert_at:=1
+ schemes:[32]u16;scheme_count:=0
+ if requested {
+  request:=messages[1]
+  parsed,e:=client_certificate_request_schemes(request);if e.kind!=.None {return {},nil,{kind=.Malformed}}
+  schemes=parsed.schemes;scheme_count=parsed.count;transcript_update(&transcript,request);cert_at=2
+ }
+ if messages[cert_at][0]!=11||messages[cert_at+1][0]!=15||messages[cert_at+2][0]!=20 {return {},nil,{kind=.Unsupported}}
+ previous:=context.allocator;context.allocator=allocator;defer context.allocator=previous
+ certs,ae:=server_certificates_parse(messages[cert_at]);defer server_certificates_destroy(&certs)
+ if ae.kind!=.None {return {},nil,{kind=.Authentication_Failed,authentication=ae}}
+ if ae=verify_server_certificates(&certs,server_name,roots,now);ae.kind!=.None {return {},nil,{kind=.Authentication_Failed,authentication=ae}}
+ transcript_update(&transcript,messages[cert_at])
+ if ae=verify_server_certificate_signature(&certs,messages[cert_at+1],transcript_snapshot(&transcript));ae.kind!=.None {return {},nil,{kind=.Authentication_Failed,authentication=ae}}
+ transcript_update(&transcript,messages[cert_at+1])
+ server_traffic:=quic_server_traffic(secret,client_hello,server_hello);defer crypto.zero_explicit(&server_traffic,size_of(server_traffic))
+ if e:=finished_verify(messages[cert_at+2],server_traffic,transcript_snapshot(&transcript));e!=.None {return {},nil,{kind=.Finished_Failed,finished=e}}
+ transcript_update(&transcript,messages[cert_at+2])
+ application:=application_secrets_derive(secret,transcript_snapshot(&transcript));defer crypto.zero_explicit(&application,size_of(application))
+ local:Quic_Application_Keys;defer quic_application_keys_clear(&local)
+ client,ce:=quic_packet_keys_derive(application.client_traffic_secret,.Application);defer quic_direction_keys_clear(&client);if ce.kind!=.None {return {},nil,ce}
+ server,se:=quic_packet_keys_derive(application.server_traffic_secret,.Application);defer quic_direction_keys_clear(&server);if se.kind!=.None {return {},nil,se}
+ local={client=client,server=server}
+ auth:[]u8
+ if requested {
+  wire,e:=client_authentication_flight(identity,schemes[:scheme_count],&transcript,allocator,identity_lease)
+  if e.kind!=.None {return {},nil,{kind=.Authentication_Failed,authentication=e.authentication}}
+  auth=wire
+ }
+ defer if raw_data(auth)!=nil {crypto.zero_explicit(raw_data(auth),len(auth));delete(auth,allocator)}
+ flight,e:=make([]u8,len(auth)+FINISHED_MESSAGE_SIZE,allocator);if e!=nil {return {},nil,{kind=.Derivation_Failed}}
+ copy(flight,auth)
+ client_traffic:=quic_client_traffic(secret,client_hello,server_hello);defer crypto.zero_explicit(&client_traffic,size_of(client_traffic))
+ n,fe:=finished_encode(flight[len(auth):],client_traffic,transcript_snapshot(&transcript))
+ if fe!=.None||n!=FINISHED_MESSAGE_SIZE {crypto.zero_explicit(raw_data(flight),len(flight));delete(flight,allocator);return {},nil,{kind=.Finished_Failed,finished=fe}}
+ return local,flight,{}
 }

@@ -3,6 +3,7 @@ package tls
 import "core:crypto"
 import "core:crypto/sha2"
 import "core:crypto/x509"
+import credential_store "credentials/store"
 import "core:mem"
 import trans "core:net"
 import "core:net"
@@ -35,6 +36,10 @@ Config :: struct {
 	// procedure must accept only replay-safe methods. It is borrowed for the
 	// handshake and must not apply application effects itself.
 	early_data: ^Early_Data_Policy,
+	// Optional immutable identity store, borrowed through handshake completion.
+	client_credentials: ^credential_store.Store,
+	// Optional generation pinned by an origin pool, borrowed through handshake.
+	client_credential_lease: ^credential_store.Lease,
 }
 
 Client_Error :: enum {
@@ -48,6 +53,7 @@ Client_Error :: enum {
 	Invalid_Trust_Root,
 	Invalid_Timeout,
 	Invalid_ALPN,
+	Invalid_Client_Credentials,
 }
 
 Conn_Phase :: enum {
@@ -121,9 +127,20 @@ Conn :: struct {
 	have_resumption_master:       bool,
 	server_finished_transcript:   sha2.Context_256,
 	have_server_finished_transcript: bool,
+	client_auth_requested: bool,
+	client_auth_used: bool,
+	client_auth_schemes: [32]u16,
+	client_auth_scheme_count: int,
+	client_auth_flight: []u8,
+	client_auth_offset: int,
+	client_auth_allocator: mem.Allocator,
 }
 
 config_validate :: proc(config: Config) -> Client_Error {
+ if config.client_credential_lease!=nil {
+  if config.client_credentials==nil {return .Invalid_Client_Credentials}
+  if _,e:=credential_store.lease_generation(config.client_credentials,config.client_credential_lease^);e.kind!=.None {return .Invalid_Client_Credentials}
+ }
 	if config.handshake_timeout < 0 {
 		return .Invalid_Timeout
 	}
@@ -306,6 +323,7 @@ Connection_State :: struct {
 	// Borrows fixed Conn storage until failure/close; empty before authentication
 	// and when the server omits ALPN. Does not borrow the server flight.
 	negotiated_protocol: string,
+	peer_identity: Peer_Identity,
 }
 
 connection_state :: proc(conn: ^Conn) -> Connection_State {
@@ -443,6 +461,7 @@ Async_Send_Kind :: enum {
 	Hello,
 	Retry,
 	Finished,
+	Client_Auth,
 	Data,
 	Key_Update,
 	Notify,

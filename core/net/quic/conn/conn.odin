@@ -740,12 +740,13 @@ pump :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 		return send_crypto(c, now, dst, .Handshake, c.material.server_flight, &c.flight_off)
 	}
 	if c.role == .Client && c.authed && c.fin_off < c.hs.client_finished_len {
+		flight,e:=quic.handshake_client_finished(&c.hs);if e!=.None {return 0,.Handshake}
 		return send_crypto(
 			c,
 			now,
 			dst,
 			.Handshake,
-			c.hs.client_finished[:c.hs.client_finished_len],
+			flight,
 			&c.fin_off,
 		)
 	}
@@ -1224,9 +1225,9 @@ apply_parsed :: proc(c: ^Connection, level: quic.Encryption_Level, parsed: Parse
 		} else {
 			if !send_direction(c, credit.id) {
 				c.reason = "MAX_STREAM_DATA direction new"; return .Protocol
-			}; b, e := take_buf(c, credit.id, true); if e != .None {
+			}; new_buf, e := take_buf(c, credit.id, true); if e != .None {
 				return e
-			}; b.send_limit = credit.value
+			}; new_buf.send_limit = credit.value
 		}
 	}
 	if parsed.max_streams_bidi {
@@ -1271,7 +1272,12 @@ apply_parsed :: proc(c: ^Connection, level: quic.Encryption_Level, parsed: Parse
 		if c.role != .Client {
 			c.reason = "HANDSHAKE_DONE direction"; return .Protocol
 		}
+		// The peer has authenticated the entire client flight. Stop pending
+		// CRYPTO replay before discarding its packet space, otherwise a large
+		// flight repeatedly returns Discarded and starves application output.
+		c.fin_off = c.hs.client_finished_len
 		_ = harness.discard_space(&c.model, .Handshake)
+		_ = quic.handshake_discard_handshake_keys(&c.hs)
 		c.seen_done = true
 	}
 	if parsed.close {
@@ -1683,6 +1689,7 @@ seal_and_emit :: proc(
 	n, err := harness.emit(&c.model, now, discard[:], sent)
 	if err != .None {
 		c.reason = "harness emit"
+		#partial switch err {case .Congestion_Limited:c.reason="harness congestion";case .Datagram_Too_Small:c.reason="harness datagram size";case .Invalid_Input:c.reason="harness invalid input";case .Protocol:c.reason="harness protocol"}
 		return 0, map_harness(err)
 	}
 	if n != total {

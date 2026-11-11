@@ -48,6 +48,7 @@ server_async_handshake_drive :: proc(s:^Server_Async_Conn) {
 			p,e:=server_handshake_parameters(&s._engine)
 			if e!=.None || !p.authenticated {server_async_fail(s,{kind=.Protocol_Failed},{kind=.Handshake,engine=.Invalid_State});return}
 			s._alpn_size=copy(s._alpn[:],p.alpn)
+			s._peer_identity=server_handshake_peer_identity(&s._engine)
 			if server_handshake_accept(&s._engine,event.id)!=.None {server_async_fail(s,{kind=.Protocol_Failed},{kind=.Handshake,engine=.Invalid_Event});return}
 			keys:=server_async_keys(s)
 			server_async_install(s,.Read,keys.application_read)

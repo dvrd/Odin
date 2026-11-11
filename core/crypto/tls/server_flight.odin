@@ -16,6 +16,7 @@ Server_Flight_Stage :: enum {
 	Handshake_Write,
 	Handshake_Read,
 	Extensions,
+	Certificate_Request,
 	Certificate_Header,
 	Certificate_Entry,
 	Certificate_DER,
@@ -203,8 +204,13 @@ server_flight_next :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 		f.stage = .Extensions
 		return server_flight_secret(owner, f.handshake.client_traffic_secret[:], .Read)
 	case .Extensions:
-		f.stage = .Certificate_Header
+		f.stage = .Certificate_Request
 		return server_parameters_extensions(owner)
+	case .Certificate_Request:
+		f.stage = .Certificate_Header
+		if owner._config.client_auth == nil || owner._config.client_auth.mode == .Disabled {return server_flight_next(owner)}
+		wire := [?]u8{13,0,0,15,0,0,12,0,13,0,8,0,6,8,4,4,3,8,7}
+		return server_flight_bytes(owner,mem.slice_ptr(cast(^u8)(cast(rawptr)&wire),len(wire)))
 	case .Certificate_Header:
 		header: [8]u8; header[0] = 11
 		server_flight_put24(header[1:4], 4 + f.certificate_bytes)

@@ -9,14 +9,15 @@ Server_Handshake_Direction :: enum {Read, Write} // Relative to the local server
 Server_Handshake_Event_Kind :: enum {None, Handshake_Bytes, Traffic_Secret, Peer_Parameters, Complete, Fatal}
 Server_Handshake_Error :: enum {
 	None, Invalid_Config, Invalid_Owner, Invalid_State, Invalid_Event,
-	Wrong_Level, Malformed, Unsupported, Limit, Allocation_Failed, Cancelled, Identity_Exhausted, Credential_Failed, Signing_Failed, Entropy_Unavailable, Finished_Failed, No_Application_Protocol,
+	Wrong_Level, Malformed, Unsupported, Limit, Allocation_Failed, Cancelled, Identity_Exhausted, Credential_Failed, Signing_Failed, Entropy_Unavailable, Client_Authentication_Failed, Finished_Failed, No_Application_Protocol,
 }
 Server_Handshake_Status :: enum {Need_Input, Need_Event_Drain, Await_Flight, Await_Client_Finished, Terminal, Invalid_Owner}
 Server_Handshake_Config :: struct {
 	max_client_hello_bytes: int,
 	max_extensions: int,
+	client_auth: ^Client_Auth_Config,
 }
-SERVER_HANDSHAKE_DEFAULT_CONFIG :: Server_Handshake_Config{SERVER_CLIENT_HELLO_MAX_WIRE, SERVER_CLIENT_HELLO_MAX_ENTRIES}
+SERVER_HANDSHAKE_DEFAULT_CONFIG :: Server_Handshake_Config{SERVER_CLIENT_HELLO_MAX_WIRE, SERVER_CLIENT_HELLO_MAX_ENTRIES, nil}
 
 // All fields are tentative offers, never authenticated negotiated parameters.
 Server_Handshake_Peer_Parameters :: struct {
@@ -63,12 +64,14 @@ Server_Handshake :: struct {
 	_error: Server_Handshake_Error,
 	_flight: Server_Flight,
 	_parameters: Server_Parameters,
+	_client_auth: ^Server_Client_Auth,
+	_peer_identity: Peer_Identity,
 }
 
 server_handshake_init :: proc(owner: ^Server_Handshake, config: Server_Handshake_Config, allocator: mem.Allocator) -> Server_Handshake_Error {
 	if owner == nil {return .Invalid_Owner}
 	if owner._self != nil || owner._phase != .Uninitialized {return .Invalid_State}
-	if allocator.procedure == nil || config.max_client_hello_bytes < 45 ||
+	if !client_auth_config_valid(config.client_auth) || allocator.procedure == nil || config.max_client_hello_bytes < 45 ||
 	   config.max_client_hello_bytes > SERVER_CLIENT_HELLO_MAX_WIRE || config.max_extensions < 1 ||
 	   config.max_extensions > SERVER_CLIENT_HELLO_MAX_ENTRIES {return .Invalid_Config}
 	owner._self = owner
@@ -81,20 +84,20 @@ server_handshake_valid :: proc(owner: ^Server_Handshake) -> bool {
 	return owner != nil && owner._self == owner
 }
 @(private)
-server_handshake_wipe_free :: proc(owner: ^Server_Handshake, grant: []u8) {
+server_handshake_wipe_free :: proc(owner: ^Server_Handshake, grant: []u8, alignment:int=1) {
 	if raw_data(grant) == nil {return}
 	crypto.zero_explicit(raw_data(grant), len(grant))
-	_, _ = owner._allocator.procedure(owner._allocator.data, .Free, 0, 1, raw_data(grant), len(grant))
+	_, _ = owner._allocator.procedure(owner._allocator.data, .Free, 0, alignment, raw_data(grant), len(grant))
 }
 @(private)
-server_handshake_allocate :: proc(owner: ^Server_Handshake, size: int) -> ([]u8, bool) {
+server_handshake_allocate :: proc(owner: ^Server_Handshake, size: int, alignment:int=1) -> ([]u8, bool) {
 	owner._stats.allocation_attempts += 1
 	owner._stats.requested_bytes += size
-	grant, error := owner._allocator.procedure(owner._allocator.data, .Alloc, size, 1, nil, 0)
+	grant, error := owner._allocator.procedure(owner._allocator.data, .Alloc, size, alignment, nil, 0)
 	// Reject unusual grants, but erase/free their full reported extent, even
 	// when the allocator returns storage together with an error.
 	if error != nil || len(grant) != size || raw_data(grant) == nil {
-		server_handshake_wipe_free(owner, grant)
+		server_handshake_wipe_free(owner, grant,alignment)
 		return nil, false
 	}
 	for &b in grant {b = 0}
@@ -119,8 +122,9 @@ server_handshake_clear_event :: proc(owner: ^Server_Handshake) {
 }
 @(private)
 server_handshake_cleanup :: proc(owner: ^Server_Handshake, keep_parameters := false) {
-	if !keep_parameters {server_parameters_clear(owner)}
+	if !keep_parameters {server_parameters_clear(owner);owner._peer_identity={}}
 	server_handshake_clear_event(owner)
+	server_client_auth_clear(owner)
 	server_flight_cleanup(owner)
 	server_handshake_release_input(owner)
 	owner._stats.live_bytes -= len(owner._output)
@@ -154,7 +158,10 @@ server_handshake_feed :: proc(owner: ^Server_Handshake, level: Server_Handshake_
 		return 0, .Terminal, .Invalid_State if len(input) > 0 else .None
 	}
 	if owner._event.kind != .None {return 0, .Need_Event_Drain, .None}
-	if owner._phase == .Await_Client_Finished {return server_handshake_finished_feed(owner, level, input)}
+	if owner._phase == .Await_Client_Finished {
+		if owner._config.client_auth != nil && owner._config.client_auth.mode != .Disabled {return server_client_auth_feed(owner, level, input)}
+		return server_handshake_finished_feed(owner, level, input)
+	}
 	if owner._phase == .Await_Flight {return 0, .Await_Flight, .None}
 	if level != .Initial {
 		server_handshake_fail(owner, .Wrong_Level)

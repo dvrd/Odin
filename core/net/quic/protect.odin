@@ -316,9 +316,9 @@ payload_aead :: proc(
 		if bytes.alias_inexactly(out[:plain_len], text) || bytes.alias(out[plain_len:], text) {
 			return 0, .Overlapping_Buffers
 		}
-		if e := aead_seal(keys, out[:plain_len], out[plain_len:], nonce[:], header, text, implementation);
-		   e != .None {
-			return 0, e
+		if seal_error := aead_seal(keys, out[:plain_len], out[plain_len:], nonce[:], header, text, implementation);
+		   seal_error != .None {
+			return 0, seal_error
 		}
 		return need, .None
 	}
@@ -340,8 +340,8 @@ payload_aead :: proc(
 			return payload_open_next(out, header, ciphertext, tag, keys, full_packet_number, implementation)
 		}
 	}
-	if e := aead_open(keys.aead, keys.key[:int(keys.key_len)], out, nonce[:], header, ciphertext, tag, implementation); e != .None {
-		return 0, e
+	if open_error := aead_open(keys.aead, keys.key[:int(keys.key_len)], out, nonce[:], header, ciphertext, tag, implementation); open_error != .None {
+		return 0, open_error
 	}
 	if reserved_rejected(header, kind) {
 		crypto.zero_explicit(raw_data(out), len(out))

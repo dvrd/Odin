@@ -526,6 +526,9 @@ resumption_binder_key :: proc(psk: [32]u8) -> (key: [32]u8) {
 
 @(private)
 resumption_capture :: proc(conn: ^Conn, master: [32]u8) {
+ // Existing tickets are hostname-bound, not client-identity-bound. Never
+ // publish a mutually authenticated session into that anonymous cache.
+ if conn!=nil && (conn.config.client_credentials!=nil || conn.client_auth_used) {return}
 	if conn == nil || !conn.config.remember_tickets || !conn.have_server_finished_transcript {
 		return
 	}
@@ -631,6 +634,8 @@ resumption_strip_extension :: proc(dst, src: []u8, kind: u16) -> (int, bool) {
 
 @(private)
 session_resume_candidate :: proc(conn: ^Conn, now: time.Time) -> ^Session {
+ // Full handshake until session metadata can bind the client's exact identity.
+ if conn!=nil && conn.config.client_credentials!=nil {return nil}
 	if conn == nil {
 		return nil
 	}

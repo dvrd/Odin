@@ -80,7 +80,8 @@ asynchronous handshakes. Read authenticated selection through `connection_state`
 or `async_connection_state`. Surf's TCP binding allows a missing offer or the
 tokens `http/1.1` and `h2`; `h3` is rejected before TCP I/O. That is not HTTP/2
 or HTTP/3.
-Client certificates are not implemented. TLS 1.3 resumption is
+Initial TLS1.3 client certificates and mutual authentication are described in
+[CLIENT_AUTH.md](CLIENT_AUTH.md). TLS 1.3 resumption is
 `psk_dhe_ke` through `Config.session` or `Config.session_cache`. Early data stays
 refused (`Early_Data_Disabled`) unless `Config.early_data` is set to a replay-safe
 method policy. Resumption does not install 0-RTT keys on the default path. Rejected
@@ -121,7 +122,8 @@ admits a pinned RSA/P-256 credential, emits the server flight and traffic secret
 and authenticates client Finished before publishing Complete. It supports the
 restricted TLS1.3/X25519-or-P256/AES128GCM/RSA-PSS-or-ECDSA profile with explicit ALPN/
 opaque QUIC parameter handoff and one key-share retry (SERVER_RETRY.md); no
-resumption, client certificates or QUIC binding is provided.
+resumption or automatic QUIC binding is provided. Initial client authentication
+is opt-in through the shared policy in [CLIENT_AUTH.md](CLIENT_AUTH.md).
 The [lean async TCP server](SERVER_ASYNC.md) binds these events to the existing
 `net.Async_Connection`/caller executor without a second I/O owner.
 Existing client APIs and behavior are unchanged. See the contract for explicit

@@ -278,6 +278,13 @@ storage_usage :: proc(credential: ^Credential) -> Storage_Usage {
 }
 // Explicit leaf policy only; no chain verification or trust establishment.
 check_server_leaf :: proc(credential: ^Credential, now: time.Time) -> Error {
+ return check_leaf_usage(credential,now,.Server_Auth)
+}
+check_client_leaf :: proc(credential: ^Credential, now: time.Time) -> Error {
+ return check_leaf_usage(credential,now,.Client_Auth)
+}
+@(private)
+check_leaf_usage :: proc(credential: ^Credential, now: time.Time, usage:x509.EKU_Bit) -> Error {
 	if credential == nil {
 		return .Invalid_Handle
 	}
@@ -295,7 +302,7 @@ check_server_leaf :: proc(credential: ^Credential, now: time.Time) -> Error {
 		return .Key_Usage
 	}
 	if leaf.has_ext_key_usage &&
-	   .Server_Auth not_in leaf.ext_key_usage &&
+	   usage not_in leaf.ext_key_usage &&
 	   .Any not_in leaf.ext_key_usage {
 		return .Extended_Key_Usage
 	}

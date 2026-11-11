@@ -95,6 +95,7 @@ Server_Async_Conn :: struct {
 	_alpn: [255]u8,
 	_name: [253]u8,
 	_alpn_size, _name_size: int,
+	_peer_identity: Peer_Identity,
 }
 
 @(private)
@@ -109,7 +110,7 @@ server_async_server :: proc(s:^Server_Async_Conn, transport:net.Async_Connection
 	if config.close_timeout==0 {config.close_timeout=time.Second}
 	if config.max_owned_bytes==0 {config.max_owned_bytes=SERVER_ASYNC_MAX_OWNED_BYTES}
 	if config.max_handshake_records==0 {config.max_handshake_records=4096}
-	if config.handshake==(Server_Handshake_Config{}) {config.handshake=SERVER_HANDSHAKE_DEFAULT_CONFIG}
+	if config.handshake.max_client_hello_bytes==0 && config.handshake.max_extensions==0 {config.handshake.max_client_hello_bytes=SERVER_CLIENT_HELLO_MAX_WIRE;config.handshake.max_extensions=SERVER_CLIENT_HELLO_MAX_ENTRIES}
 	_,valid:=alpn_protocols_size(config.parameters.alpn_protocols)
 	if allocator.procedure==nil || config.store==nil || !valid || config.parameters.mode!=.TCP ||
 	   len(config.parameters.quic_transport_parameters)!=0 || config.handshake_timeout<0 || config.close_timeout<0 ||
@@ -156,7 +157,7 @@ server_async_connection :: proc(s:^Server_Async_Conn) -> net.Async_Connection {
 server_async_connection_state :: proc(s:^Server_Async_Conn) -> Connection_State {
 	if !server_async_valid(s) || s._phase!=.Established || s._failure.kind!=.None || s._closing {return {}}
 	return {handshake_complete=true,version=VERSION_TLS_1_3,cipher_suite=.AES_128_GCM_SHA256,
-		server_name=string(s._name[:s._name_size]),negotiated_protocol=string(s._alpn[:s._alpn_size])}
+		server_name=string(s._name[:s._name_size]),negotiated_protocol=string(s._alpn[:s._alpn_size]),peer_identity=s._peer_identity}
 }
 server_async_failure :: proc(s:^Server_Async_Conn) -> Server_Async_Failure {
 	if !server_async_valid(s) {return {kind=.Invalid_State}}
@@ -339,6 +340,7 @@ server_async_alert :: proc(detail:Server_Async_Failure) -> u8 {
 	if detail.kind==.Handshake {
 		#partial switch detail.engine {
 		case .No_Application_Protocol:return 120
+		case .Client_Authentication_Failed:return 42
 		case .Finished_Failed:return 51
 		case .Malformed:return 50
 		case .Wrong_Level:return 10

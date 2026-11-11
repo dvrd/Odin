@@ -618,6 +618,8 @@ async_send_process :: proc(conn: ^Async_Conn) {
 		return
 	}
 	switch kind {
+	case .Client_Auth:
+		// The next handshake drive emits the remaining auth records or Finished.
 	case .Hello, .Retry:
 		conn.protocol.phase = .Awaiting_Server_Hello
 	case .Finished:

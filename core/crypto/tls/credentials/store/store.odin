@@ -497,6 +497,11 @@ check_server_leaf :: proc(store: ^Store, lease: Lease, now: time.Time) -> Error 
 	cause := credentials.check_server_leaf(credential, now)
 	return {} if cause == .None else Error{kind = .Credential_Failed, credential = cause}
 }
+check_client_leaf :: proc(store: ^Store, lease: Lease, now: time.Time) -> Error {
+ credential,error:=borrow(store,lease);if error.kind!=.None {return error}
+ cause:=credentials.check_client_leaf(credential,now)
+ return {} if cause==.None else Error{kind=.Credential_Failed,credential=cause}
+}
 sign_digest_pss_sha256 :: proc(
 	store: ^Store,
 	lease: Lease,

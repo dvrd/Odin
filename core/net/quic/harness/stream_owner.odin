@@ -217,8 +217,8 @@ stream_receive_release :: proc(m: ^Model, id: u64, n: int) -> Error {
 		return e
 	}
 	m.recv_max_data += u64(n)
-	if slot := find_stream(m, id); slot >= 0 {
-		m.streams[slot].recv_max = stream_limit
+	if resumed_slot := find_stream(m, id); resumed_slot >= 0 {
+		m.streams[resumed_slot].recv_max = stream_limit
 	}
 	return .None
 }

@@ -133,8 +133,8 @@ initial_payload_seal :: proc(
 		return 0, .Invalid_Length
 	}
 	need := len(plaintext) + 16
-	if e := initial_header_check(header, u64(need), full_packet_number, true); e != .None {
-		return 0, e
+	if header_error := initial_header_check(header, u64(need), full_packet_number, true); header_error != .None {
+		return 0, header_error
 	}
 	if len(dst) < need {
 		return 0, .Destination_Undersized
@@ -179,9 +179,9 @@ initial_payload_open :: proc(
 		return 0, .Invalid_Length
 	}
 	need := len(ciphertext_and_tag) - 16
-	if e := initial_header_check(header, u64(len(ciphertext_and_tag)), full_packet_number, false);
-	   e != .None {
-		return 0, e
+	if header_error := initial_header_check(header, u64(len(ciphertext_and_tag)), full_packet_number, false);
+	   header_error != .None {
+		return 0, header_error
 	}
 	if len(dst) < need {
 		return 0, .Destination_Undersized

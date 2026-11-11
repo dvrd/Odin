@@ -136,3 +136,16 @@ odin test core/crypto/tls/credentials/store -sanitize:thread -define:ODIN_TEST_F
 under a live lease, including a retired generation after replacement or store
 close. It introduces no DER reparse or lasting borrow. Stale/released leases and
 wrong certificate index/type retain typed forwarding errors.
+
+`lease_generation(store, lease)` reads the exact validated pinned generation,
+including a retired one. A `stats.current_generation` sample taken before
+`acquire` is not an atomic identity selection. Origin pools should acquire (or
+retain) the identity first and then read its generation.
+
+`retain(store, lease)` creates another independent owner of that same generation,
+not the current replacement. It consumes a bounded lease slot, rejects closed,
+foreign, stale or exhausted stores without consuming the source, and must be
+released exactly once. The source value itself remains a borrowed alias during
+the retain call. Credential-store metadata and key lifetime remain pinned until
+all owners release, including old HTTP2/WebSocket sessions after identity
+rotation.
