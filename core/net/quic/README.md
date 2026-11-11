@@ -133,24 +133,23 @@ Definitions and vectors: [RFC 9001 sections 5.2–5.4 and Appendix A](https://ww
 
 ## Connection
 
-`core:net/quic/conn` seals real QUIC frames with the handshake owner and asks
-the harness to account for the same UDP length. The harness datagram is never
-sent. One `send_udp` success is not a peer acknowledgment. A pending send
-retries the same datagram. A truncated datagram is not decoded. Caller-owned
-buffers are borrowed only for the call.
+`core:net/quic/conn` owns bounded reliable application streams. Authenticated
+wire TLS drivers transfer keys, packet numbers, CIDs and directional flow limits
+through `adopt_established`; the legacy Material initializer is a precomputed
+handshake fixture. Lost STREAM/FIN/RESET and receive-credit frames are retained
+and replayed. Receive reassembly tolerates bounded gaps and identical overlaps.
+ACKed send bytes and consumed receive bytes release their sliding storage;
+256 bytes is a window, not a stream lifetime limit. Peer bidi streams permit
+responses, and uni direction is enforced. Multiple STREAM/credit frames and
+all parsed ACK ranges are processed. See [connection ownership and bounds](conn/README.md).
 
-Anti-amplification stays on until a Handshake packet is accepted. A new peer
-endpoint restarts that limit. That restart is not migration.
-
-Not implemented: connection migration, `PATH_CHALLENGE`, preferred address,
-version negotiation (unknown versions and Version Negotiation packets are
-discarded), Retry, 0-RTT and resumption, `NEW_CONNECTION_ID` and retirement,
-ECN, coalesced packets, multipath, stateless reset, address-validation tokens,
-and retransmission of a lost stream range. Loss sends a PTO probe. CRYPTO is
-resent from offset zero because identical overlap is idempotent. The ACK frame
-carries only the first contiguous range. Drain is three times the current PTO
-base, not a full idle timeout. A loopback of two connections, or of the
-harness, is not an independent peer. Linux is not run here.
+The connection still excludes migration/CID rotation and retirement, version
+negotiation, Retry, 0-RTT, stateless reset, ECN and coalesced datagrams. Offered
+NEW_CONNECTION_ID is accepted only with zero retirement. PATH_CHALLENGE is
+answered on the existing path. ACK emission carries the highest contiguous
+range; subsequent ACKs can retire earlier gaps. Drain is three times the current
+PTO base, not a full idle timeout. A fixture pair or harness loopback is not an
+independent peer; real TLS-driver and external-peer evidence is separate.
 
 ```sh
 ./odin test core/net/quic/sim/tests -warnings-as-errors \

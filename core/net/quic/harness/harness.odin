@@ -72,147 +72,151 @@ Recv_State :: enum u8 {
 }
 
 Packet :: struct {
-	active:         bool,
-	number:         u64,
-	sent_at:        i64,
-	sent_bytes:     int,
-	ack_eliciting:  bool,
-	in_flight:      bool,
-	zero_rtt:       bool,
-	stream_slot:    int,
-	stream_bytes:   int,
-	retires_reset:  bool,
+	active:        bool,
+	number:        u64,
+	sent_at:       i64,
+	sent_bytes:    int,
+	ack_eliciting: bool,
+	in_flight:     bool,
+	zero_rtt:      bool,
+	stream_slot:   int,
+	stream_bytes:  int,
+	retires_reset: bool,
 }
 Stream :: struct {
-	active:      bool,
-	id:          u64,
-	send:        Send_State,
-	recv:        Recv_State,
-	max_send:    u64,
-	next_offset: u64,
-	acked:       u64,
-	fin_sent:    bool,
-	recv_max:    u64,
-	recv_got:    u64,
-	recv_final:  u64,
-	recv_fin:    bool,
-	retained:    int,
-	// Bytes the local application has not yet released. Recv and send share
-	// this counter; they are not live at the same time in one direction's test.
-	consumed:    u64,
+	active:                       bool,
+	id:                           u64,
+	send:                         Send_State,
+	recv:                         Recv_State,
+	max_send:                     u64,
+	next_offset:                  u64,
+	acked:                        u64,
+	fin_sent:                     bool,
+	recv_max:                     u64,
+	recv_got:                     u64,
+	recv_final:                   u64,
+	recv_fin:                     bool,
+	retained:                     int,
+	send_retained, recv_retained: int,
+	recv_highest:                 u64,
+	fin_acked:                    bool,
+	externally_owned:             bool,
+	// Absolute receive bytes released by the local application. Directional
+	// retention stays separate when both halves of a bidi stream are live.
+	consumed:                     u64,
 }
 Space_State :: struct {
-	discarded:              bool,
-	next_send:              u64,
-	largest_acked:          u64,
-	has_largest_acked:      bool,
-	largest_recv:           u64,
-	has_largest_recv:       bool,
-	last_ack_eliciting_at:  i64,
-	ack_eliciting_flight:   int,
-	loss_at:                i64,
-	has_loss_at:            bool,
-	recv_base:              u64,
-	recv_bits:              u64,
-	has_recv:               bool,
+	discarded:             bool,
+	next_send:             u64,
+	largest_acked:         u64,
+	has_largest_acked:     bool,
+	largest_recv:          u64,
+	has_largest_recv:      bool,
+	last_ack_eliciting_at: i64,
+	ack_eliciting_flight:  int,
+	loss_at:               i64,
+	has_loss_at:           bool,
+	recv_base:             u64,
+	recv_bits:             u64,
+	has_recv:              bool,
 }
 
 // Noncopyable after init: packet and stream slices borrow caller storage.
 Model :: struct {
-	initialized:             bool,
-	role:                    Role,
-	local_cid, peer_cid:     [20]u8,
-	local_cid_len:           int,
-	peer_cid_len:            int,
-	max_datagram_size:       int,
-	granularity:             i64,
-	max_ack_delay:           i64,
-	packets:                 [3][]Packet,
-	streams:                 []Stream,
-	spaces:                  [3]Space_State,
-	latest_rtt:              i64,
-	smoothed_rtt:            i64,
-	rttvar:                  i64,
-	min_rtt:                 i64,
-	first_rtt_sample:        i64,
-	has_first_rtt:           bool,
-	handshake_confirmed:     bool,
-	handshake_armed:         bool,
-	peer_validated_us:       bool,
-	pto_count:               int,
-	congestion_window:       int,
-	bytes_in_flight:         int,
-	ssthresh:                i64,
-	in_recovery:             bool,
-	recovery_start:          i64,
-	app_limited:             bool,
-	flow_limited:            bool,
-	max_data:                u64,
-	data_sent:               u64,
-	recv_max_data:           u64,
-	recv_data:               u64,
-	max_streams_send:        u64,
-	max_streams_recv:        u64,
-	max_stream_data_send:    u64,
-	max_stream_data_recv:    u64,
-	next_send_stream:        u64,
-	next_recv_stream:        u64,
-	path:                    u32,
-	has_path:                bool,
-	address_validated:       bool,
+	initialized:              bool,
+	role:                     Role,
+	local_cid, peer_cid:      [20]u8,
+	local_cid_len:            int,
+	peer_cid_len:             int,
+	max_datagram_size:        int,
+	granularity:              i64,
+	max_ack_delay:            i64,
+	packets:                  [3][]Packet,
+	streams:                  []Stream,
+	spaces:                   [3]Space_State,
+	latest_rtt:               i64,
+	smoothed_rtt:             i64,
+	rttvar:                   i64,
+	min_rtt:                  i64,
+	first_rtt_sample:         i64,
+	has_first_rtt:            bool,
+	handshake_confirmed:      bool,
+	handshake_armed:          bool,
+	peer_validated_us:        bool,
+	pto_count:                int,
+	congestion_window:        int,
+	bytes_in_flight:          int,
+	ssthresh:                 i64,
+	in_recovery:              bool,
+	recovery_start:           i64,
+	app_limited:              bool,
+	flow_limited:             bool,
+	max_data:                 u64,
+	data_sent:                u64,
+	recv_max_data:            u64,
+	recv_data:                u64,
+	max_streams_send:         u64,
+	max_streams_recv:         u64,
+	max_stream_data_send:     u64,
+	max_stream_data_recv:     u64,
+	next_send_stream:         u64,
+	next_recv_stream:         u64,
+	path:                     u32,
+	has_path:                 bool,
+	address_validated:        bool,
 	path_received, path_sent: int,
-	closed:                  bool,
-	retained:                int,
-	live_packets:            int,
-	live_streams:            int,
-	peak_packets:            int,
-	peak_streams:            int,
-	peak_retained:           int,
-	allocation_failures:     int,
-	ecn_ce:                  [3]u64,
-	has_ecn:                 [3]bool,
-	ack_pending:             [3]bool,
+	closed:                   bool,
+	retained:                 int,
+	live_packets:             int,
+	live_streams:             int,
+	peak_packets:             int,
+	peak_streams:             int,
+	peak_retained:            int,
+	allocation_failures:      int,
+	ecn_ce:                   [3]u64,
+	has_ecn:                  [3]bool,
+	ack_pending:              [3]bool,
 }
 
 Limits :: struct {
-	max_data, max_stream_data, max_streams:           u64,
+	max_data, max_stream_data, max_streams:                u64,
 	recv_max_data, recv_max_stream_data, recv_max_streams: u64,
 }
 Stats :: struct {
-	live_packets, live_streams, retained:                int,
-	peak_packets, peak_streams, peak_retained:           int,
-	bytes_in_flight, congestion_window:                  int,
-	path_received, path_sent:                            int,
-	address_validated, closed:                           bool,
-	pto_count:                                           int,
-	app_limited, in_recovery, handshake_confirmed:       bool,
-	smoothed_rtt, rttvar, latest_rtt:                    i64,
+	live_packets, live_streams, retained:          int,
+	peak_packets, peak_streams, peak_retained:     int,
+	bytes_in_flight, congestion_window:            int,
+	path_received, path_sent:                      int,
+	address_validated, closed:                     bool,
+	pto_count:                                     int,
+	app_limited, in_recovery, handshake_confirmed: bool,
+	smoothed_rtt, rttvar, latest_rtt:              i64,
 }
 Emit :: struct {
-	space:                Space,
-	bytes:                int,
-	probe:                bool,
-	zero_rtt:             bool,
-	more_data:            bool,
-	ping:                 bool,
-	padding:              bool,
-	attach_ack:           bool,
-	ack_largest:          u64,
-	ack_smallest:         u64,
-	ack_delay:            i64,
-	ack_ecn:              bool,
-	ack_ecn_ce:           u64,
-	stream:               bool,
-	stream_id:            u64,
-	stream_len:           int,
-	fin:                  bool,
-	reset:                bool,
-	reset_final:          u64,
-	stop_sending:         bool,
-	max_data:             bool,
-	max_data_value:       u64,
-	connection_close:     bool,
-	handshake_confirmed:  bool,
+	space:               Space,
+	bytes:               int,
+	probe:               bool,
+	zero_rtt:            bool,
+	more_data:           bool,
+	ping:                bool,
+	padding:             bool,
+	attach_ack:          bool,
+	ack_largest:         u64,
+	ack_smallest:        u64,
+	ack_delay:           i64,
+	ack_ecn:             bool,
+	ack_ecn_ce:          u64,
+	stream:              bool,
+	stream_id:           u64,
+	stream_len:          int,
+	fin:                 bool,
+	reset:               bool,
+	reset_final:         u64,
+	stop_sending:        bool,
+	max_data:            bool,
+	max_data_value:      u64,
+	connection_close:    bool,
+	handshake_confirmed: bool,
 }
 Timer_Kind :: enum u8 {
 	None,
@@ -239,12 +243,18 @@ init :: proc(
 	if m == nil || m.initialized {
 		return .Invalid_State
 	}
-	if len(local_cid) > 20 || len(peer_cid) > 20 || max_datagram_size < K_MIN_INITIAL_DATAGRAM || max_datagram_size > K_MAX_DATAGRAM {
+	if len(local_cid) > 20 ||
+	   len(peer_cid) > 20 ||
+	   max_datagram_size < K_MIN_INITIAL_DATAGRAM ||
+	   max_datagram_size > K_MAX_DATAGRAM {
 		return .Invalid_Input
 	}
-	if len(initial_packets) == 0 || len(initial_packets) > K_MAX_PACKETS_PER_SPACE ||
-	   len(handshake_packets) == 0 || len(handshake_packets) > K_MAX_PACKETS_PER_SPACE ||
-	   len(application_packets) == 0 || len(application_packets) > K_MAX_PACKETS_PER_SPACE ||
+	if len(initial_packets) == 0 ||
+	   len(initial_packets) > K_MAX_PACKETS_PER_SPACE ||
+	   len(handshake_packets) == 0 ||
+	   len(handshake_packets) > K_MAX_PACKETS_PER_SPACE ||
+	   len(application_packets) == 0 ||
+	   len(application_packets) > K_MAX_PACKETS_PER_SPACE ||
 	   len(streams) > K_MAX_STREAMS {
 		return .Capacity
 	}
@@ -349,7 +359,9 @@ audit :: proc(m: ^Model) -> bool {
 	if m.retained < 0 || m.live_packets < 0 || m.live_streams < 0 || m.bytes_in_flight < 0 {
 		return false
 	}
-	if m.peak_packets < m.live_packets || m.peak_streams < m.live_streams || m.peak_retained < m.retained {
+	if m.peak_packets < m.live_packets ||
+	   m.peak_streams < m.live_streams ||
+	   m.peak_retained < m.retained {
 		return false
 	}
 	if m.live_packets > K_MAX_PACKETS_PER_SPACE * 3 || m.live_streams > len(m.streams) {
@@ -438,14 +450,21 @@ self_check :: proc() -> bool {
 	if !ok || full != 0xa82f9b32 {
 		return false
 	}
-	if initial_window(1200) != 12000 || minimum_window(1200) != 2400 || initial_window(2000) != 14720 {
+	if initial_window(1200) != 12000 ||
+	   minimum_window(1200) != 2400 ||
+	   initial_window(2000) != 14720 {
 		return false
 	}
 	period, duration, persistent := persistent_congestion_example()
 	if period != 7 || duration != 6 || !persistent || initial_handshake_pto() != 997 {
 		return false
 	}
-	return K_PACKET_THRESHOLD == 3 && K_MAX_ACK_DELAY_MS == 25 && K_ANTI_AMPLIFICATION == 3 && LINUX_PEER_UNSUPPORTED
+	return(
+		K_PACKET_THRESHOLD == 3 &&
+		K_MAX_ACK_DELAY_MS == 25 &&
+		K_ANTI_AMPLIFICATION == 3 &&
+		LINUX_PEER_UNSUPPORTED \
+	)
 }
 
 // peer_compared is always false: Linux is unsupported and this process is not a peer.

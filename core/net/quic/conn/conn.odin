@@ -6,10 +6,12 @@
 // Not implemented: migration and path validation, version negotiation (unknown
 // versions and Version Negotiation packets are discarded), Retry, connection-ID
 // retirement, preferred address, ECN, coalesced packets, multipath, and
-// retransmission of a lost stream offset. The harness has no stream-offset
-// replay; loss sends a PTO probe. CRYPTO is resent from offset zero because
-// identical overlap is idempotent. Anti-amplification stays on until a
-// Handshake packet is accepted. A UDP send is not a peer acknowledgment.
+// migration of retained stream IDs beyond the bounded stream table. STREAM
+// bytes and FIN/RESET are retained until acknowledged and retransmitted on loss.
+// Receive fragments are buffered inside a sliding window; consumed bytes return
+// MAX_DATA/MAX_STREAM_DATA credit. CRYPTO retries remain handshake-driver owned.
+// Anti-amplification stays on until a Handshake packet is accepted. A UDP send
+// is not a peer acknowledgment.
 // Two connections on the sim are not an independent peer. Linux is not run
 // from this tree.
 //
@@ -61,22 +63,22 @@ Phase :: enum {
 }
 
 Material :: struct {
-	shared:                                          [32]u8,
+	shared:                                            [32]u8,
 	client_hello, server_hello, server_flight, params: []u8,
-	server_name:                                     string,
-	roots:                                           []^x509.Certificate,
-	now:                                             time.Time,
+	server_name:                                       string,
+	roots:                                             []^x509.Certificate,
+	now:                                               time.Time,
 }
 
 Config :: struct {
-	role:                     quic.Role,
-	local_cid, peer_cid:      []u8,
-	material:                 Material,
-	limits:                   harness.Limits,
-	max_datagram:             int,
+	role:                quic.Role,
+	local_cid, peer_cid: []u8,
+	material:            Material,
+	limits:              harness.Limits,
+	max_datagram:        int,
 	// Pad 1-RTT packets to max_datagram. Handshake packets stay natural size,
 	// except Initial datagrams, which stay at the 1200-byte floor.
-	full_size:                bool,
+	full_size:           bool,
 }
 
 Timer :: struct {
@@ -87,68 +89,82 @@ Timer :: struct {
 }
 
 Buf :: struct {
-	used:        bool,
-	id:          u64,
-	n:           int,
+	used:                              bool,
+	id:                                u64,
+	n:                                 int,
 	// Bytes accepted by the harness. A freed stream reports offset 0; this does not.
-	sent:        int,
-	fin:         bool,
-	fin_sent:    bool,
-	reset:       bool,
-	reset_sent:  bool,
-	recv_n:      int,
-	read_n:      int,
-	recv_fin:    bool,
-	recv_reset:  bool,
-	reset_final: u64,
-	stop:        bool,
+	sent:                              int,
+	fin:                               bool,
+	fin_sent:                          bool,
+	reset:                             bool,
+	reset_sent:                        bool,
+	recv_n:                            int,
+	recv_fin:                          bool,
+	recv_reset:                        bool,
+	reset_final:                       u64,
+	stop:                              bool,
+	send_base:                         u64,
+	send_acked:                        [STREAM_BYTES]bool,
+	send_retry:                        [STREAM_BYTES]bool,
+	fin_acked, fin_retry, reset_retry: bool,
+	recv_base, recv_final:             u64,
+	recv_present:                      [STREAM_BYTES]bool,
+	send_limit:                        u64,
+	recv_credit:                       u64,
+	credit_dirty:                      bool,
 }
 
 Connection :: struct {
-	initialized:             bool,
-	role:                    quic.Role,
-	phase:                   Phase,
-	reason:                  string,
-	full_size:               bool,
-	max_datagram:            int,
-	material:                Material,
-	shared:                  [32]u8,
-	hs:                      quic.Handshake,
-	model:                   harness.Model,
-	initial_pkts:            [PACKETS]harness.Packet,
-	handshake_pkts:          [PACKETS]harness.Packet,
-	app_pkts:                [PACKETS]harness.Packet,
-	model_streams:           [STREAMS]harness.Stream,
-	crypto_mem:              [3][CRYPTO_BYTES]u8,
-	send_mem:                [STREAMS][STREAM_BYTES]u8,
-	recv_mem:                [STREAMS][STREAM_BYTES]u8,
-	bufs:                    [STREAMS]Buf,
-	local_cid, peer_cid:     [CID_CAP]u8,
-	local_cid_len:           int,
-	peer_cid_len:            int,
-	expected_finished:       [tls.FINISHED_MESSAGE_SIZE]u8,
-	ch_off, sh_off:          int,
-	flight_off, fin_off:     int,
-	server_keys:             bool,
-	accepted:                bool,
-	authed:                  bool,
-	finished_marked:         bool,
-	got_handshake:           bool,
-	got_finished:            bool,
-	seen_done:               bool,
-	done_sent:               bool,
-	noted_send:              bool,
-	noted_recv:              bool,
-	want_close:              bool,
-	close_sent:              bool,
-	cancelled:               bool,
-	force_probe:             bool,
-	draining_until:          i64,
-	pings:                   int,
-	update_from:             u64,
-	await_update:            bool,
-	udp_hold:                [MAX_DATAGRAM]u8,
-	udp_hold_len:            int,
+	initialized:                                 bool,
+	role:                                        quic.Role,
+	phase:                                       Phase,
+	reason:                                      string,
+	full_size:                                   bool,
+	max_datagram:                                int,
+	material:                                    Material,
+	shared:                                      [32]u8,
+	hs:                                          quic.Handshake,
+	model:                                       harness.Model,
+	initial_pkts:                                [PACKETS]harness.Packet,
+	handshake_pkts:                              [PACKETS]harness.Packet,
+	app_pkts:                                    [PACKETS]harness.Packet,
+	model_streams:                               [STREAMS]harness.Stream,
+	crypto_mem:                                  [3][CRYPTO_BYTES]u8,
+	send_mem:                                    [STREAMS][STREAM_BYTES]u8,
+	recv_mem:                                    [STREAMS][STREAM_BYTES]u8,
+	bufs:                                        [STREAMS]Buf,
+	local_cid, peer_cid:                         [CID_CAP]u8,
+	local_cid_len:                               int,
+	peer_cid_len:                                int,
+	expected_finished:                           [tls.FINISHED_MESSAGE_SIZE]u8,
+	ch_off, sh_off:                              int,
+	flight_off, fin_off:                         int,
+	server_keys:                                 bool,
+	accepted:                                    bool,
+	authed:                                      bool,
+	finished_marked:                             bool,
+	got_handshake:                               bool,
+	got_finished:                                bool,
+	seen_done:                                   bool,
+	done_sent:                                   bool,
+	noted_send:                                  bool,
+	noted_recv:                                  bool,
+	want_close:                                  bool,
+	close_sent:                                  bool,
+	cancelled:                                   bool,
+	force_probe:                                 bool,
+	draining_until:                              i64,
+	pings:                                       int,
+	update_from:                                 u64,
+	await_update:                                bool,
+	udp_hold:                                    [MAX_DATAGRAM]u8,
+	udp_hold_len:                                int,
+	tx:                                          [PACKETS]Tx_Packet,
+	path_response_pending:                       bool,
+	path_response_token:                         [8]u8,
+	directional_limits:                          bool,
+	peer_bidi_local, peer_bidi_remote, peer_uni: u64,
+	peer_bidi_streams, peer_uni_streams:         u64,
 }
 
 init :: proc(c: ^Connection, cfg: Config) -> Error {
@@ -169,10 +185,14 @@ init :: proc(c: ^Connection, cfg: Config) -> Error {
 	if max_datagram < harness.K_MIN_INITIAL_DATAGRAM || max_datagram > MAX_DATAGRAM {
 		return .Invalid
 	}
-	if len(cfg.material.client_hello) == 0 || len(cfg.material.server_hello) == 0 || len(cfg.material.server_flight) == 0 {
+	if len(cfg.material.client_hello) == 0 ||
+	   len(cfg.material.server_hello) == 0 ||
+	   len(cfg.material.server_flight) == 0 {
 		return .Invalid
 	}
-	if len(cfg.material.client_hello) > CRYPTO_BYTES || len(cfg.material.server_hello) > CRYPTO_BYTES || len(cfg.material.server_flight) > CRYPTO_BYTES {
+	if len(cfg.material.client_hello) > CRYPTO_BYTES ||
+	   len(cfg.material.server_hello) > CRYPTO_BYTES ||
+	   len(cfg.material.server_flight) > CRYPTO_BYTES {
 		return .Capacity
 	}
 	c.role = cfg.role
@@ -185,7 +205,15 @@ init :: proc(c: ^Connection, cfg: Config) -> Error {
 	c.peer_cid_len = len(cfg.peer_cid)
 	copy(c.local_cid[:], cfg.local_cid)
 	copy(c.peer_cid[:], cfg.peer_cid)
-	if quic.handshake_init(&c.hs, cfg.role, []string{"h3"}, c.crypto_mem[0][:], c.crypto_mem[1][:], c.crypto_mem[2][:]) != .None {
+	if quic.handshake_init(
+		   &c.hs,
+		   cfg.role,
+		   []string{"h3"},
+		   c.crypto_mem[0][:],
+		   c.crypto_mem[1][:],
+		   c.crypto_mem[2][:],
+	   ) !=
+	   .None {
 		c.reason = "handshake init"
 		return .Handshake
 	}
@@ -301,24 +329,33 @@ write :: proc(c: ^Connection, id: u64, data: []u8, fin: bool) -> (int, Error) {
 	if e := usable(c); e != .None {
 		return 0, e
 	}
-	if !our_stream(c, id) {
+	if !send_direction(c, id) {
 		return 0, .Protocol
 	}
-	buf, err := take_buf(c, id, true)
-	if err != .None {
-		return 0, err
+	fresh := find_buf(c, id) == nil
+	buf, e := take_buf(c, id, true); if e != .None {
+		return 0, e
 	}
 	if buf.reset || buf.fin || buf.stop {
 		return 0, .Protocol
 	}
+	compact_send(c, buf)
 	if len(data) > STREAM_BYTES - buf.n {
-		return 0, .Capacity
+		if fresh {
+			buf^ = {}
+		}; return 0, .Capacity
 	}
-	if !flow_fits(c, buf, len(data)) {
-		return 0, .Flow_Control
+	limit, count := send_limits(c, id)
+	if buf.send_limit > limit {
+		limit = buf.send_limit
 	}
-	copy(c.send_mem[buf_index(c, buf)][buf.n:], data)
-	buf.n += len(data)
+	if e := harness.stream_send_admit(&c.model, id, len(data), fin, limit, count); e != .None {
+		if fresh {
+			buf^ = {}
+		}; return 0, map_harness(e)
+	}
+	buf.send_limit = limit
+	copy(c.send_mem[buf_index(c, buf)][buf.n:], data); buf.n += len(data)
 	if fin {
 		buf.fin = true
 	}
@@ -335,29 +372,26 @@ read :: proc(c: ^Connection, id: u64, dst: []u8) -> (int, bool, Error) {
 	if c.phase == .Failed {
 		return 0, false, .Failed
 	}
-	buf := find_buf(c, id)
-	if buf == nil {
+	buf := find_buf(c, id); if buf == nil {
 		return 0, false, .None
 	}
 	if buf.recv_reset {
 		return 0, false, .Protocol
 	}
-	n := buf.recv_n - buf.read_n
-	if n > len(dst) {
-		n = len(dst)
-	}
-	if n < 0 {
-		return 0, false, .Protocol
-	}
-	idx := buf_index(c, buf)
-	copy(dst[:n], c.recv_mem[idx][buf.read_n:buf.read_n + n])
+	n := min(buf.recv_n, len(dst)); idx := buf_index(c, buf)
+	copy(dst[:n], c.recv_mem[idx][:n])
 	if n > 0 {
-		if harness.consume_recv(&c.model, id, n) != .None {
-			return 0, false, .Protocol
+		if e := harness.stream_receive_release(&c.model, id, n); e != .None {
+			return 0, false, map_harness(e)
 		}
-		buf.read_n += n
+		copy(c.recv_mem[idx][:], c.recv_mem[idx][n:])
+		for i in 0 ..< STREAM_BYTES - n {buf.recv_present[i] = buf.recv_present[i + n]}
+		for i in STREAM_BYTES - n ..< STREAM_BYTES {buf.recv_present[i] = false}
+		buf.recv_base += u64(n); buf.recv_n = 0
+		for buf.recv_n < STREAM_BYTES && buf.recv_present[buf.recv_n] {buf.recv_n += 1}
+		buf.recv_credit += u64(n); buf.credit_dirty = true
 	}
-	fin := buf.recv_fin && buf.read_n == buf.recv_n
+	fin := buf.recv_fin && buf.recv_base == buf.recv_final && buf.recv_n == 0
 	return n, fin, .None
 }
 
@@ -373,7 +407,8 @@ reset_stream :: proc(c: ^Connection, id: u64) -> Error {
 		return .Protocol
 	}
 	buf.reset = true
-	buf.reset_final = u64(buf.n)
+	buf.reset_final = buf.send_base + u64(buf.n)
+	_ = harness.stream_send_reset(&c.model, id, buf.reset_final)
 	return .None
 }
 
@@ -445,6 +480,12 @@ on_timeout :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 	if err != .None {
 		return 0, map_harness(err)
 	}
+	sync_tx(c)
+	if due.space == .Application {
+		retry_oldest(c); if c.role == .Client && !c.seen_done {
+			c.fin_off = 0
+		}
+	}
 	rewind(c, due.space)
 	c.force_probe = true
 	return pump(c, now, dst)
@@ -487,27 +528,47 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 		note_unparsed(c, path, len(datagram))
 		return .Discarded
 	}
-	if consumed != len(datagram) || view.kind == .Retry || view.kind == .Version_Negotiation || view.kind == .Zero_RTT {
+	if consumed != len(datagram) ||
+	   view.kind == .Retry ||
+	   view.kind == .Version_Negotiation ||
+	   view.kind == .Zero_RTT {
 		note_unparsed(c, path, len(datagram))
 		return .Discarded
 	}
 	level := level_of(view.kind)
+	if c.model.spaces[int(space_of(level))].discarded {
+		return .Discarded
+	}
 	packet: [MAX_DATAGRAM]u8
 	copy(packet[:], datagram)
-	if quic.handshake_header_protection_remove(&c.hs, packet[:consumed], level, c.local_cid_len) != .None {
+	if quic.handshake_header_protection_remove(&c.hs, packet[:consumed], level, c.local_cid_len) !=
+	   .None {
 		note_unparsed(c, path, len(datagram))
 		c.reason = "header protection"
 		return .None
 	}
-	fields, ferr := quic.unprotected_fields_decode(view_from(packet[:consumed], c.local_cid_len), packet[:consumed])
+	fields, ferr := quic.unprotected_fields_decode(
+		view_from(packet[:consumed], c.local_cid_len),
+		packet[:consumed],
+	)
 	if ferr != .None {
 		note_unparsed(c, path, len(datagram))
 		return .None
 	}
 	space := space_of(level)
 	sp := c.model.spaces[int(space)]
-	full, pok := harness.pn_decode(sp.has_largest_recv, sp.largest_recv, u64(fields.packet_number), fields.packet_number_length * 8)
-	hf, he := quic.handshake_reconstruct_pn(&c.hs, level, u64(fields.packet_number), fields.packet_number_length * 8)
+	full, pok := harness.pn_decode(
+		sp.has_largest_recv,
+		sp.largest_recv,
+		u64(fields.packet_number),
+		fields.packet_number_length * 8,
+	)
+	hf, he := quic.handshake_reconstruct_pn(
+		&c.hs,
+		level,
+		u64(fields.packet_number),
+		fields.packet_number_length * 8,
+	)
 	if !pok || he != .None || hf != full {
 		note_unparsed(c, path, len(datagram))
 		c.reason = "packet number"
@@ -518,7 +579,14 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 		return .Protocol
 	}
 	plain: [MAX_DATAGRAM]u8
-	pn, oerr := quic.handshake_payload_open(&c.hs, plain[:], packet[:header_end], packet[header_end:consumed], level, full)
+	pn, oerr := quic.handshake_payload_open(
+		&c.hs,
+		plain[:],
+		packet[:header_end],
+		packet[header_end:consumed],
+		level,
+		full,
+	)
 	if oerr != .None {
 		note_unparsed(c, path, len(datagram))
 		c.reason = "decrypt"
@@ -529,18 +597,60 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 		fail(c, "frame")
 		return .Protocol
 	}
-	if parsed.stream && !stream_fits_recv(c, parsed) {
-		fail(c, "stream buffer")
-		return .Capacity
+	if parsed.ack && parsed.ack_largest >= sp.next_send {
+		fail(c, "ACK of unsent packet"); return .Protocol
+	}
+	if level != .One_RTT &&
+	   (parsed.stream ||
+			   parsed.reset ||
+			   parsed.stop ||
+			   parsed.max_data ||
+			   parsed.max_stream_data ||
+			   parsed.max_streams_bidi ||
+			   parsed.max_streams_uni) {
+		fail(c, "application frame before 1-RTT"); return .Protocol
+	}
+	for si in 0 ..< parsed.stream_n {
+		f := parsed.streams[si]; p := Parsed {
+			stream_id   = f.id,
+			stream_off  = f.offset,
+			stream_data = f.data,
+		}; if !stream_fits_recv(c, p) {
+			return .Discarded
+		}
 	}
 	dup := already_received(sp, full)
 	req := shadow_from_parsed(parsed)
+	// Payload ownership is accounted once by the real stream owner, not by a
+	// shadow packet or every retransmission.
+	req.stream = false; req.reset = false; req.stop_sending = false; req.max_data = false
+	req.attach_ack = false
+	req.ping =
+		req.ping ||
+		parsed.control_eliciting ||
+		parsed.stream ||
+		parsed.reset ||
+		parsed.stop ||
+		parsed.max_data ||
+		parsed.max_stream_data ||
+		parsed.max_streams_bidi ||
+		parsed.max_streams_uni
 	shadow: [MAX_DATAGRAM]u8
-	if len(datagram) > len(shadow) || !shadow_packet(c, shadow[:len(datagram)], space, fields.packet_number_length, u64(fields.packet_number), req, parsed.stream_off) {
+	if len(datagram) > len(shadow) ||
+	   !shadow_packet(
+			   c,
+			   shadow[:len(datagram)],
+			   space,
+			   fields.packet_number_length,
+			   u64(fields.packet_number),
+			   req,
+			   parsed.stream_off,
+		   ) {
 		fail(c, "shadow")
 		return .Protocol
 	}
-	if err := harness.receive(&c.model, now, path, shadow[:len(datagram)]); err != .None && err != .Closed {
+	if err := harness.receive(&c.model, now, path, shadow[:len(datagram)]);
+	   err != .None && err != .Closed {
 		if err == .Discarded {
 			return .None
 		}
@@ -550,6 +660,18 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 		enter_drain(c, now)
 	}
 	if !dup {
+		acknowledge_tx(c, parsed)
+		// Retire lower acknowledged ranges before the largest ACK can detect
+		// loss in intervening packet numbers.
+		for ri := parsed.ack_n - 1; ri >= 0; ri -= 1 {
+			r := parsed.ack_ranges[ri]
+			_, ae := harness.acknowledge(&c.model, now, space, r[0], r[1], 0, false, 0, nil)
+			if ae != .None {
+				c.reason = "ACK range accounting"
+				return map_harness(ae)
+			}
+		}
+		sync_tx(c)
 		if e := apply_parsed(c, level, parsed); e != .None {
 			return e
 		}
@@ -611,11 +733,21 @@ pump :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 	if c.role == .Server && c.server_keys && c.sh_off < len(c.material.server_hello) {
 		return send_crypto(c, now, dst, .Initial, c.material.server_hello, &c.sh_off)
 	}
-	if c.role == .Server && c.server_keys && c.sh_off >= len(c.material.server_hello) && c.flight_off < len(c.material.server_flight) {
+	if c.role == .Server &&
+	   c.server_keys &&
+	   c.sh_off >= len(c.material.server_hello) &&
+	   c.flight_off < len(c.material.server_flight) {
 		return send_crypto(c, now, dst, .Handshake, c.material.server_flight, &c.flight_off)
 	}
 	if c.role == .Client && c.authed && c.fin_off < c.hs.client_finished_len {
-		return send_crypto(c, now, dst, .Handshake, c.hs.client_finished[:c.hs.client_finished_len], &c.fin_off)
+		return send_crypto(
+			c,
+			now,
+			dst,
+			.Handshake,
+			c.hs.client_finished[:c.hs.client_finished_len],
+			&c.fin_off,
+		)
 	}
 	// A PTO with nothing left to rewind still has to send an ack-eliciting probe.
 	// Before confirmation that probe is Initial (1200 bytes) or Handshake.
@@ -626,6 +758,9 @@ pump :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 		}
 	}
 	if c.phase == .Established || c.model.handshake_confirmed {
+		if c.path_response_pending {
+			return send_path_response(c, now, dst)
+		}
 		if c.role == .Server && !c.done_sent {
 			return send_done(c, now, dst)
 		}
@@ -695,7 +830,7 @@ take_buf :: proc(c: ^Connection, id: u64, create: bool) -> (^Buf, Error) {
 	if !create {
 		return nil, .Invalid
 	}
-	if id != c.model.next_send_stream && find_model_stream(c, id) < 0 {
+	if id >= u64(1) << 62 {
 		return nil, .Protocol
 	}
 	for &buf in c.bufs {
@@ -729,31 +864,6 @@ stream_next :: proc(c: ^Connection, id: u64) -> u64 {
 }
 
 @(private)
-flow_fits :: proc(c: ^Connection, buf: ^Buf, n: int) -> bool {
-	if n < 0 {
-		return false
-	}
-	end := u64(buf.n + n)
-	if end > c.model.max_stream_data_send {
-		return false
-	}
-	unsent := u64(0)
-	for other in c.bufs {
-		if !other.used || other.reset {
-			continue
-		}
-		off := u64(other.sent)
-		if u64(other.n) > off {
-			unsent += u64(other.n) - off
-		}
-	}
-	if buf.reset {
-		return true
-	}
-	return c.model.data_sent + unsent + u64(n) <= c.model.max_data
-}
-
-@(private)
 map_harness :: proc(err: harness.Error) -> Error {
 	switch err {
 	case .None:
@@ -772,7 +882,12 @@ map_harness :: proc(err: harness.Error) -> Error {
 		return .Allocation
 	case .Discarded:
 		return .Discarded
-	case .Invalid_State, .Invalid_Input, .Datagram_Too_Small, .Protocol, .Destination_Undersized, .Overlap:
+	case .Invalid_State,
+	     .Invalid_Input,
+	     .Datagram_Too_Small,
+	     .Protocol,
+	     .Destination_Undersized,
+	     .Overlap:
 		return .Protocol
 	}
 	return .Protocol
@@ -894,7 +1009,13 @@ advance_crypto :: proc(c: ^Connection) -> Error {
 	if c.role == .Client && !c.accepted {
 		got, err := quic.handshake_crypto_bytes(&c.hs, .Initial)
 		if err == .None && prefix_ok(got, c.material.server_hello) {
-			he := quic.handshake_accept_client_hello(&c.hs, c.shared, c.material.client_hello, c.material.server_hello, c.material.params)
+			he := quic.handshake_accept_client_hello(
+				&c.hs,
+				c.shared,
+				c.material.client_hello,
+				c.material.server_hello,
+				c.material.params,
+			)
 			if he.kind != .None {
 				fail(c, "client hello")
 				return .Handshake
@@ -947,14 +1068,35 @@ advance_crypto :: proc(c: ^Connection) -> Error {
 install_server_keys :: proc(c: ^Connection) -> Error {
 	shared := c.shared
 	defer crypto.zero_explicit(&shared, size_of(shared))
-	hs, he := tls.quic_handshake_secrets(shared, c.material.client_hello, c.material.server_hello, c.material.params)
+	hs, he := tls.quic_handshake_secrets(
+		shared,
+		c.material.client_hello,
+		c.material.server_hello,
+		c.material.params,
+	)
 	defer tls.quic_handshake_keys_clear(&hs)
 	if he.kind != .None {
 		fail(c, "server handshake secrets")
 		return .Handshake
 	}
-	if quic.packet_keys_set_aes(&c.hs.handshake_write, hs.server.key[:], hs.server.iv[:], hs.server.hp[:], hs.server.secret[:], false) != .None ||
-	   quic.packet_keys_set_aes(&c.hs.handshake_read, hs.client.key[:], hs.client.iv[:], hs.client.hp[:], hs.client.secret[:], false) != .None {
+	if quic.packet_keys_set_aes(
+		   &c.hs.handshake_write,
+		   hs.server.key[:],
+		   hs.server.iv[:],
+		   hs.server.hp[:],
+		   hs.server.secret[:],
+		   false,
+	   ) !=
+		   .None ||
+	   quic.packet_keys_set_aes(
+		   &c.hs.handshake_read,
+		   hs.client.key[:],
+		   hs.client.iv[:],
+		   hs.client.hp[:],
+		   hs.client.secret[:],
+		   false,
+	   ) !=
+		   .None {
 		fail(c, "server handshake keys")
 		return .Handshake
 	}
@@ -978,8 +1120,24 @@ install_server_keys :: proc(c: ^Connection) -> Error {
 		fail(c, "server application secrets")
 		return .Handshake
 	}
-	if quic.packet_keys_set_aes(&c.hs.one_rtt_write, app.server.key[:], app.server.iv[:], app.server.hp[:], app.server.secret[:], true) != .None ||
-	   quic.packet_keys_set_aes(&c.hs.one_rtt_read, app.client.key[:], app.client.iv[:], app.client.hp[:], app.client.secret[:], true) != .None {
+	if quic.packet_keys_set_aes(
+		   &c.hs.one_rtt_write,
+		   app.server.key[:],
+		   app.server.iv[:],
+		   app.server.hp[:],
+		   app.server.secret[:],
+		   true,
+	   ) !=
+		   .None ||
+	   quic.packet_keys_set_aes(
+		   &c.hs.one_rtt_read,
+		   app.client.key[:],
+		   app.client.iv[:],
+		   app.client.hp[:],
+		   app.client.secret[:],
+		   true,
+	   ) !=
+		   .None {
 		fail(c, "server application keys")
 		return .Handshake
 	}
@@ -1023,58 +1181,97 @@ shadow_from_parsed :: proc(parsed: Parsed) -> harness.Emit {
 }
 
 @(private)
-stream_fits_recv :: proc(c: ^Connection, parsed: Parsed) -> bool {
-	buf := find_buf(c, parsed.stream_id)
-	have := 0
+stream_fits_recv :: proc(c: ^Connection, p: Parsed) -> bool {
+	if u64(len(p.stream_data)) > max(u64) - p.stream_off {
+		return false
+	}
+	buf := find_buf(c, p.stream_id); base: u64
 	if buf != nil {
-		have = buf.recv_n
+		base = buf.recv_base
 	}
-	if u64(have) != parsed.stream_off {
-		return true
-	}
-	return len(parsed.stream_data) <= STREAM_BYTES - have
+	end := p.stream_off + u64(len(p.stream_data))
+	return end <= base || end - base <= STREAM_BYTES
 }
 
 @(private)
 apply_parsed :: proc(c: ^Connection, level: quic.Encryption_Level, parsed: Parsed) -> Error {
+	for si in 0 ..< parsed.stream_n {
+		f := parsed.streams[si]
+		p := Parsed {
+			stream_id   = f.id,
+			stream_off  = f.offset,
+			stream_data = f.data,
+			fin         = f.fin,
+		}
+		if e := receive_stream(c, p); e != .None {
+			if c.reason == "" {
+				c.reason = "receive stream"
+			}; return e
+		}
+	}
+	if parsed.path_challenge {
+		c.path_response_pending = true; c.path_response_token = parsed.path_token
+	}
+	if parsed.max_data {
+		c.model.max_data = max(c.model.max_data, parsed.max_data_v)
+	}
+	for ci in 0 ..< parsed.credit_n {
+		credit := parsed.credits[ci]
+		if b := find_buf(c, credit.id); b != nil {
+			if !send_direction(c, b.id) {
+				c.reason = "MAX_STREAM_DATA direction existing"; return .Protocol
+			}; b.send_limit = max(b.send_limit, credit.value)
+		} else {
+			if !send_direction(c, credit.id) {
+				c.reason = "MAX_STREAM_DATA direction new"; return .Protocol
+			}; b, e := take_buf(c, credit.id, true); if e != .None {
+				return e
+			}; b.send_limit = credit.value
+		}
+	}
+	if parsed.max_streams_bidi {
+		c.peer_bidi_streams = max(c.peer_bidi_streams, parsed.max_streams_bidi_value)
+	}
+	if parsed.max_streams_uni {
+		c.peer_uni_streams = max(c.peer_uni_streams, parsed.max_streams_uni_value)
+	}
 	if parsed.crypto {
-		if quic.handshake_ingest_crypto(&c.hs, level, parsed.crypto_off, parsed.crypto_data) != .None {
+		if quic.handshake_ingest_crypto(&c.hs, level, parsed.crypto_off, parsed.crypto_data) !=
+		   .None {
 			fail(c, "crypto")
 			return .Handshake
 		}
 	}
-	if parsed.stream {
-		buf, err := take_recv(c, parsed.stream_id)
-		if err != .None {
-			fail(c, "recv stream")
-			return err
-		}
-		if u64(buf.recv_n) == parsed.stream_off {
-			idx := buf_index(c, buf)
-			copy(c.recv_mem[idx][buf.recv_n:], parsed.stream_data)
-			buf.recv_n += len(parsed.stream_data)
-		}
-		if parsed.fin {
-			buf.recv_fin = true
-		}
-	}
+
 	if parsed.reset {
 		buf, err := take_recv(c, parsed.reset_id)
 		if err != .None {
 			fail(c, "reset stream")
 			return err
 		}
-		buf.recv_reset = true
-		buf.reset_final = parsed.reset_final
+		if e := harness.stream_receive_reset(&c.model, parsed.reset_id, parsed.reset_final);
+		   e != .None {
+			return map_harness(e)
+		}
+		buf.recv_reset = true; buf.recv_final = parsed.reset_final
+		buf.recv_n = 0; buf.recv_present = {}
 	}
 	if parsed.stop {
+		if !send_direction(c, parsed.stop_id) || find_buf(c, parsed.stop_id) == nil {
+			c.reason = "STOP_SENDING direction"; return .Protocol
+		}
 		if buf := find_buf(c, parsed.stop_id); buf != nil {
 			buf.stop = true
 			buf.reset = true
-			buf.reset_final = stream_next(c, parsed.stop_id)
+			buf.reset_final = buf.send_base + u64(buf.n)
+			_ = harness.stream_send_reset(&c.model, buf.id, buf.reset_final)
 		}
 	}
 	if parsed.handshake_done {
+		if c.role != .Client {
+			c.reason = "HANDSHAKE_DONE direction"; return .Protocol
+		}
+		_ = harness.discard_space(&c.model, .Handshake)
 		c.seen_done = true
 	}
 	if parsed.close {
@@ -1119,7 +1316,17 @@ fields_header_end :: proc(packet: []u8, dcid: int) -> int {
 }
 
 @(private)
-send_crypto :: proc(c: ^Connection, now: i64, dst: []u8, level: quic.Encryption_Level, data: []u8, off: ^int) -> (int, Error) {
+send_crypto :: proc(
+	c: ^Connection,
+	now: i64,
+	dst: []u8,
+	level: quic.Encryption_Level,
+	data: []u8,
+	off: ^int,
+) -> (
+	int,
+	Error,
+) {
 	if off^ > len(data) {
 		return 0, .Protocol
 	}
@@ -1132,10 +1339,10 @@ send_crypto :: proc(c: ^Connection, now: i64, dst: []u8, level: quic.Encryption_
 	}
 	space := space_of(level)
 	req := harness.Emit {
-		space = space,
-		ping = true,
+		space     = space,
+		ping      = true,
 		more_data = off^ + chunk < len(data),
-		probe = c.force_probe,
+		probe     = c.force_probe,
 	}
 	attach_ack(c, &req, space)
 	frame: [MAX_DATAGRAM]u8
@@ -1174,10 +1381,13 @@ send_crypto :: proc(c: ^Connection, now: i64, dst: []u8, level: quic.Encryption_
 
 @(private)
 send_done :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
+	if !journal_room(c) {
+		return 0, .Capacity
+	}
 	req := harness.Emit {
-		space = .Application,
+		space               = .Application,
 		handshake_confirmed = true,
-		probe = c.force_probe,
+		probe               = c.force_probe,
 	}
 	attach_ack(c, &req, .Application)
 	frame: [64]u8
@@ -1189,9 +1399,13 @@ send_done :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 	if !ok {
 		return 0, .Protocol
 	}
+	pn := c.model.spaces[2].next_send
 	n, err := seal_and_emit(c, now, dst, req, frame[:at], 0)
 	if err != .None {
 		return 0, err
+	}
+	if !record_tx(c, {pn = pn, done = true}) {
+		fail(c, "retention journal full"); return 0, .Failed
 	}
 	c.done_sent = true
 	c.force_probe = false
@@ -1218,10 +1432,10 @@ send_ping :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 @(private)
 send_ping_in :: proc(c: ^Connection, now: i64, dst: []u8, space: harness.Space) -> (int, Error) {
 	req := harness.Emit {
-		space = space,
-		ping = true,
+		space     = space,
+		ping      = true,
 		more_data = c.pings > 1,
-		probe = c.force_probe,
+		probe     = c.force_probe,
 	}
 	attach_ack(c, &req, space)
 	frame: [64]u8
@@ -1253,7 +1467,7 @@ send_close :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 		space = .Handshake
 	}
 	req := harness.Emit {
-		space = space,
+		space            = space,
 		connection_close = true,
 	}
 	frame: [32]u8
@@ -1285,9 +1499,9 @@ send_ack_only :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, bool)
 			continue
 		}
 		req := harness.Emit {
-			space = space,
-			attach_ack = true,
-			ack_largest = hi,
+			space        = space,
+			attach_ack   = true,
+			ack_largest  = hi,
 			ack_smallest = lo,
 		}
 		frame: [64]u8
@@ -1303,94 +1517,7 @@ send_ack_only :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, bool)
 
 @(private)
 send_stream_progress :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, bool) {
-	if !c.model.handshake_confirmed {
-		return 0, .None, false
-	}
-	for &buf in c.bufs {
-		if !buf.used {
-			continue
-		}
-		if buf.reset && !buf.reset_sent {
-			req := harness.Emit {
-				space = .Application,
-				reset = true,
-				stream_id = buf.id,
-				reset_final = buf.reset_final,
-				probe = c.force_probe,
-			}
-			if u64(buf.n) > buf.reset_final {
-				req.reset_final = u64(buf.n)
-			}
-			attach_ack(c, &req, .Application)
-			frame: [64]u8
-			at, ok := encode_ack_if(frame[:], 0, req)
-			if !ok {
-				return 0, .Protocol, true
-			}
-			at, ok = encode_reset(frame[:], at, buf.id, req.reset_final)
-			if !ok {
-				return 0, .Protocol, true
-			}
-			n, err := seal_and_emit(c, now, dst, req, frame[:at], 0)
-			if err != .None {
-				return 0, err, true
-			}
-			buf.reset_sent = true
-			c.force_probe = false
-			return n, .None, true
-		}
-		if buf.reset || buf.stop || buf.fin_sent {
-			continue
-		}
-		off := u64(buf.sent)
-		if u64(buf.n) < off {
-			return 0, .Protocol, true
-		}
-		left := buf.n - int(off)
-		want_fin := buf.fin && !buf.fin_sent
-		if left == 0 && !want_fin {
-			continue
-		}
-		chunk := left
-		if chunk > STREAM_BYTES {
-			chunk = STREAM_BYTES
-		}
-		if chunk > c.max_datagram / 2 {
-			chunk = c.max_datagram / 2
-		}
-		fin := want_fin && chunk == left
-		idx := buf_index(c, &buf)
-		req := harness.Emit {
-			space = .Application,
-			stream = true,
-			stream_id = buf.id,
-			stream_len = chunk,
-			fin = fin,
-			more_data = !fin && (left > chunk || c.pings > 0),
-			probe = c.force_probe,
-		}
-		attach_ack(c, &req, .Application)
-		frame: [MAX_DATAGRAM]u8
-		at, ok := encode_ack_if(frame[:], 0, req)
-		if !ok {
-			return 0, .Protocol, true
-		}
-		at, ok = encode_stream(frame[:], at, buf.id, off, c.send_mem[idx][int(off):int(off) + chunk], fin)
-		if !ok {
-			return 0, .Protocol, true
-		}
-		n, err := seal_and_emit(c, now, dst, req, frame[:at], off)
-		if err != .None {
-			return 0, err, true
-		}
-		buf.sent += chunk
-		if fin {
-			buf.fin_sent = true
-		}
-		c.force_probe = false
-		return n, .None, true
-	}
-	return 0, .None, false
+	return send_owned_stream(c, now, dst)
 }
 
 @(private)
@@ -1413,7 +1540,17 @@ encode_ack_if :: proc(dst: []u8, at: int, req: harness.Emit) -> (int, bool) {
 }
 
 @(private)
-seal_and_emit :: proc(c: ^Connection, now: i64, dst: []u8, req: harness.Emit, content: []u8, stream_off: u64) -> (int, Error) {
+seal_and_emit :: proc(
+	c: ^Connection,
+	now: i64,
+	dst: []u8,
+	req: harness.Emit,
+	content: []u8,
+	stream_off: u64,
+) -> (
+	int,
+	Error,
+) {
 	if c.model.spaces[int(req.space)].discarded {
 		return 0, .Discarded
 	}
@@ -1466,7 +1603,11 @@ seal_and_emit :: proc(c: ^Connection, now: i64, dst: []u8, req: harness.Emit, co
 		}
 		plain_len = next
 	}
-	if !fitted || total != goal || total > c.max_datagram || total > len(dst) || total > MAX_DATAGRAM {
+	if !fitted ||
+	   total != goal ||
+	   total > c.max_datagram ||
+	   total > len(dst) ||
+	   total > MAX_DATAGRAM {
 		if total > c.max_datagram || total > len(dst) || total > MAX_DATAGRAM {
 			return 0, .Capacity
 		}
@@ -1487,12 +1628,15 @@ seal_and_emit :: proc(c: ^Connection, now: i64, dst: []u8, req: harness.Emit, co
 		level = .One_RTT
 	}
 	if req.space == .Application {
-		hn, _, herr := quic.short_header_encode_v1(packet[:], {
-			destination_id = c.peer_cid[:c.peer_cid_len],
-			packet_number = u32(trunc),
-			packet_number_length = pn_len,
-			key_phase = c.hs.one_rtt_write.phase != 0,
-		})
+		hn, _, herr := quic.short_header_encode_v1(
+			packet[:],
+			{
+				destination_id = c.peer_cid[:c.peer_cid_len],
+				packet_number = u32(trunc),
+				packet_number_length = pn_len,
+				key_phase = c.hs.one_rtt_write.phase != 0,
+			},
+		)
 		if herr != .None || hn != header {
 			c.reason = "short header"
 			return 0, .Protocol
@@ -1502,24 +1646,35 @@ seal_and_emit :: proc(c: ^Connection, now: i64, dst: []u8, req: harness.Emit, co
 		if req.space == .Handshake {
 			kind = .Handshake
 		}
-		hn, _, herr := quic.long_header_encode_v1(packet[:], {
-			kind = kind,
-			destination_id = c.peer_cid[:c.peer_cid_len],
-			source_id = c.local_cid[:c.local_cid_len],
-			packet_number = u32(trunc),
-			packet_number_length = pn_len,
-			ciphertext_length = u64(plain_len + 16),
-		})
+		hn, _, herr := quic.long_header_encode_v1(
+			packet[:],
+			{
+				kind = kind,
+				destination_id = c.peer_cid[:c.peer_cid_len],
+				source_id = c.local_cid[:c.local_cid_len],
+				packet_number = u32(trunc),
+				packet_number_length = pn_len,
+				ciphertext_length = u64(plain_len + 16),
+			},
+		)
 		if herr != .None || hn != header {
 			c.reason = "long header"
 			return 0, .Protocol
 		}
 	}
-	sealed, serr := quic.handshake_payload_seal(&c.hs, packet[header:], packet[:header], plain[:plain_len], level, full)
+	sealed, serr := quic.handshake_payload_seal(
+		&c.hs,
+		packet[header:],
+		packet[:header],
+		plain[:plain_len],
+		level,
+		full,
+	)
 	if serr != .None || sealed != plain_len + 16 {
 		return 0, .Handshake
 	}
-	if quic.handshake_header_protection_apply(&c.hs, packet[:total], level, c.peer_cid_len) != .None {
+	if quic.handshake_header_protection_apply(&c.hs, packet[:total], level, c.peer_cid_len) !=
+	   .None {
 		return 0, .Handshake
 	}
 	sent := req

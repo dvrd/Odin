@@ -128,7 +128,12 @@ loss_detection_timer :: proc(m: ^Model, now: i64) -> Timer {
 			kind = .Anti_Deadlock_Handshake
 			sp = .Handshake
 		}
-		return {armed = true, at = saturating_add(now, pto_duration(m, sp)), space = sp, kind = kind}
+		return {
+			armed = true,
+			at = saturating_add(now, pto_duration(m, sp)),
+			space = sp,
+			kind = kind,
+		}
 	}
 	best: i64
 	best_space: Space
@@ -253,7 +258,9 @@ detect_lost :: proc(m: ^Model, now: i64, space: int, lost_out: []u64) -> (n: int
 		if !p.active || p.number > sp.largest_acked {
 			continue
 		}
-		by_pn := p.number <= max(u64) - u64(K_PACKET_THRESHOLD) && sp.largest_acked >= p.number + u64(K_PACKET_THRESHOLD)
+		by_pn :=
+			p.number <= max(u64) - u64(K_PACKET_THRESHOLD) &&
+			sp.largest_acked >= p.number + u64(K_PACKET_THRESHOLD)
 		by_time := p.sent_at <= lost_before
 		if by_pn || by_time {
 			lost[count] = i
@@ -286,7 +293,10 @@ acknowledge :: proc(
 	has_ecn: bool,
 	ecn_ce: u64,
 	lost_out: []u64,
-) -> (lost_n: int, err: Error) {
+) -> (
+	lost_n: int,
+	err: Error,
+) {
 	if m == nil || !m.initialized {
 		return 0, .Invalid_State
 	}
@@ -361,7 +371,15 @@ acknowledge :: proc(
 	return lost_n, .None
 }
 
-on_timeout :: proc(m: ^Model, now: i64, lost_out: []u64) -> (lost_n: int, kind: Timer_Kind, err: Error) {
+on_timeout :: proc(
+	m: ^Model,
+	now: i64,
+	lost_out: []u64,
+) -> (
+	lost_n: int,
+	kind: Timer_Kind,
+	err: Error,
+) {
 	timer := loss_detection_timer(m, now)
 	if !timer.armed {
 		return 0, .None, .Invalid_State
@@ -395,7 +413,7 @@ discard_space :: proc(m: ^Model, space: Space) -> Error {
 			if copy.stream_slot >= 0 {
 				// Key discard abandons this space's payload count.
 				if copy.stream_slot < len(m.streams) && m.streams[copy.stream_slot].active {
-					sub_retained(m, &m.streams[copy.stream_slot], copy.stream_bytes)
+					sub_send_retained(m, &m.streams[copy.stream_slot], copy.stream_bytes)
 				}
 			}
 		}

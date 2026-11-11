@@ -66,6 +66,23 @@ sub_retained :: proc(m: ^Model, s: ^Stream, n: int) {
 }
 
 @(private)
+add_send_retained :: proc(m: ^Model, s: ^Stream, n: int) {
+	s.send_retained += n; add_retained(m, s, n)
+}
+@(private)
+sub_send_retained :: proc(m: ^Model, s: ^Stream, n: int) {
+	drop := min(n, s.send_retained); s.send_retained -= drop; sub_retained(m, s, drop)
+}
+@(private)
+add_recv_retained :: proc(m: ^Model, s: ^Stream, n: int) {
+	s.recv_retained += n; add_retained(m, s, n)
+}
+@(private)
+sub_recv_retained :: proc(m: ^Model, s: ^Stream, n: int) {
+	drop := min(n, s.recv_retained); s.recv_retained -= drop; sub_retained(m, s, drop)
+}
+
+@(private)
 find_stream :: proc(m: ^Model, id: u64) -> int {
 	for s, i in m.streams {
 		if s.active && s.id == id {
@@ -115,7 +132,7 @@ stream_in_flight :: proc(m: ^Model, index: int) -> bool {
 @(private)
 maybe_free_stream :: proc(m: ^Model, index: int) {
 	s := &m.streams[index]
-	if !s.active || stream_in_flight(m, index) {
+	if !s.active || s.externally_owned || stream_in_flight(m, index) {
 		return
 	}
 	send_done := s.send == .Empty || s.send == .Data_Recvd || s.send == .Reset_Recvd
@@ -158,7 +175,17 @@ peer_bidi :: proc(role: Role, id: u64) -> bool {
 
 // Dry-run. Does not allocate. Gaps are rejected; lower ids are not implied open.
 @(private)
-plan_send_stream :: proc(m: ^Model, id: u64, n: int, fin, reset: bool, reset_final: u64) -> (slot: int, fresh: bool, err: Error) {
+plan_send_stream :: proc(
+	m: ^Model,
+	id: u64,
+	n: int,
+	fin, reset: bool,
+	reset_final: u64,
+) -> (
+	slot: int,
+	fresh: bool,
+	err: Error,
+) {
 	if reset && (n != 0 || fin) {
 		return -1, false, .Invalid_Input
 	}
@@ -178,7 +205,10 @@ plan_send_stream :: proc(m: ^Model, id: u64, n: int, fin, reset: bool, reset_fin
 	high := u64(0)
 	if slot >= 0 {
 		s := m.streams[slot]
-		if s.send == .Reset_Recvd || s.send == .Data_Recvd || (s.send == .Data_Sent && !reset) || (s.send == .Reset_Sent && !reset) {
+		if s.send == .Reset_Recvd ||
+		   s.send == .Data_Recvd ||
+		   (s.send == .Data_Sent && !reset) ||
+		   (s.send == .Reset_Sent && !reset) {
 			return -1, false, .Protocol
 		}
 		high = s.next_offset
@@ -228,13 +258,13 @@ commit_send_stream :: proc(m: ^Model, id: u64, n: int, fin, reset: bool, reset_f
 		extra := reset_final - s.next_offset
 		m.data_sent += extra
 		s.next_offset = reset_final
-		sub_retained(m, s, s.retained)
+		sub_send_retained(m, s, s.send_retained)
 		s.send = .Reset_Sent
 		s.fin_sent = false
 		return slot
 	}
 	if n > 0 {
-		add_retained(m, s, n)
+		add_send_retained(m, s, n)
 		m.data_sent += u64(n)
 		s.next_offset += u64(n)
 		if s.send == .Empty {
@@ -260,13 +290,13 @@ retire_stream_ack :: proc(m: ^Model, p: Packet) {
 	if p.retires_reset {
 		if s.send == .Reset_Sent {
 			s.send = .Reset_Recvd
-			sub_retained(m, s, s.retained)
+			sub_send_retained(m, s, s.send_retained)
 			maybe_free_stream(m, p.stream_slot)
 		}
 		return
 	}
 	if p.stream_bytes > 0 {
-		sub_retained(m, s, p.stream_bytes)
+		sub_send_retained(m, s, p.stream_bytes)
 		s.acked += u64(p.stream_bytes)
 		if s.acked > s.next_offset {
 			s.acked = s.next_offset
@@ -292,7 +322,7 @@ abandon_send :: proc(m: ^Model, id: u64) -> Error {
 	if s.send == .Reset_Sent || s.send == .Reset_Recvd || s.send == .Data_Recvd {
 		return .None
 	}
-	sub_retained(m, s, s.retained)
+	sub_send_retained(m, s, s.send_retained)
 	s.send = .Reset_Sent
 	return .None
 }
@@ -306,12 +336,12 @@ consume_recv :: proc(m: ^Model, id: u64, n: int) -> Error {
 		return .Invalid_Input
 	}
 	s := &m.streams[slot]
-	if n > s.retained {
+	if n > s.recv_retained {
 		return .Invalid_Input
 	}
-	sub_retained(m, s, n)
+	sub_recv_retained(m, s, n)
 	s.consumed += u64(n)
-	if s.recv_fin && s.retained == 0 && s.recv == .Size_Known {
+	if s.recv_fin && s.recv_got == s.recv_final && s.recv_retained == 0 && s.recv == .Size_Known {
 		s.recv = .Data_Recvd
 		maybe_free_stream(m, slot)
 	}
@@ -376,7 +406,9 @@ commit_recv_data :: proc(m: ^Model, id: u64, offset: u64, n: int, fin: bool) -> 
 		if offset != 0 {
 			return .Protocol
 		}
-		if u64(n) > m.max_stream_data_recv || m.recv_data > max(u64) - u64(n) || m.recv_data + u64(n) > m.recv_max_data {
+		if u64(n) > m.max_stream_data_recv ||
+		   m.recv_data > max(u64) - u64(n) ||
+		   m.recv_data + u64(n) > m.recv_max_data {
 			return .Flow_Control
 		}
 		if m.allocation_failures > 0 {
@@ -402,10 +434,12 @@ commit_recv_data :: proc(m: ^Model, id: u64, offset: u64, n: int, fin: bool) -> 
 		if offset != s.recv_got {
 			return .Protocol
 		}
-		if end > s.recv_max || m.recv_data > max(u64) - u64(n) || m.recv_data + u64(n) > m.recv_max_data {
+		if end > s.recv_max ||
+		   m.recv_data > max(u64) - u64(n) ||
+		   m.recv_data + u64(n) > m.recv_max_data {
 			return .Flow_Control
 		}
-		add_retained(m, s, n)
+		add_recv_retained(m, s, n)
 		s.recv_got = end
 		m.recv_data += u64(n)
 		if s.recv == .Empty {
@@ -462,7 +496,7 @@ commit_recv_reset :: proc(m: ^Model, id, final_size: u64) -> Error {
 	m.recv_data += extra
 	s.recv_final = final_size
 	s.recv_got = final_size
-	sub_retained(m, s, s.retained)
+	sub_recv_retained(m, s, s.recv_retained)
 	s.recv = .Reset_Recvd
 	maybe_free_stream(m, slot)
 	return .None

@@ -2,27 +2,48 @@ package conn
 
 import "core:net/quic"
 
-// Real QUIC v1 frames. The harness never sees these bytes. ACK handling keeps
-// only the first contiguous range; this stack does not emit gap ranges.
+// Real QUIC v1 frames. The harness never sees these bytes. All bounded ACK
+// ranges are parsed; ACK emission uses the highest contiguous received range.
+Stream_Frame :: struct {
+	id, offset: u64,
+	data:       []u8,
+	fin:        bool,
+}
+Credit_Frame :: struct {
+	id, value: u64,
+}
 Parsed :: struct {
-	ack:                         bool,
-	ack_largest, ack_smallest:   u64,
-	crypto:                      bool,
-	crypto_off:                 u64,
-	crypto_data:                []u8,
-	stream:                      bool,
-	stream_id, stream_off:       u64,
-	stream_data:                 []u8,
-	fin:                         bool,
-	reset:                       bool,
-	reset_id, reset_final:       u64,
-	stop:                        bool,
-	stop_id:                     u64,
-	max_data:                    bool,
-	max_data_v:                  u64,
-	close:                       bool,
-	handshake_done:              bool,
-	ping:                        bool,
+	streams:                                       [32]Stream_Frame,
+	stream_n:                                      int,
+	credits:                                       [32]Credit_Frame,
+	credit_n:                                      int,
+	control_eliciting:                             bool,
+	path_challenge:                                bool,
+	path_token:                                    [8]u8,
+	ack:                                           bool,
+	ack_largest, ack_smallest:                     u64,
+	ack_ranges:                                    [65][2]u64,
+	ack_n:                                         int,
+	max_stream_data:                               bool,
+	max_stream_id, max_stream_value:               u64,
+	max_streams_bidi, max_streams_uni:             bool,
+	max_streams_bidi_value, max_streams_uni_value: u64,
+	crypto:                                        bool,
+	crypto_off:                                    u64,
+	crypto_data:                                   []u8,
+	stream:                                        bool,
+	stream_id, stream_off:                         u64,
+	stream_data:                                   []u8,
+	fin:                                           bool,
+	reset:                                         bool,
+	reset_id, reset_final:                         u64,
+	stop:                                          bool,
+	stop_id:                                       u64,
+	max_data:                                      bool,
+	max_data_v:                                    u64,
+	close:                                         bool,
+	handshake_done:                                bool,
+	ping:                                          bool,
 }
 
 take_varint :: proc(src: []u8, at: int) -> (u64, int, bool) {
@@ -90,7 +111,16 @@ encode_crypto :: proc(dst: []u8, start: int, offset: u64, data: []u8) -> (int, b
 	return at + len(data), true
 }
 
-encode_stream :: proc(dst: []u8, start: int, id, offset: u64, data: []u8, fin: bool) -> (int, bool) {
+encode_stream :: proc(
+	dst: []u8,
+	start: int,
+	id, offset: u64,
+	data: []u8,
+	fin: bool,
+) -> (
+	int,
+	bool,
+) {
 	at := start
 	if at >= len(dst) {
 		return at, false
@@ -204,15 +234,18 @@ parse_frames :: proc(src: []u8) -> (parsed: Parsed, ok: bool) {
 			if !ok || first > largest {
 				return {}, false
 			}
+			parsed.ack_ranges[0] = {largest - first, largest}; parsed.ack_n = 1
+			low := largest - first
 			for _ in 0 ..< count {
-				_, at, ok = take_varint(src, at)
-				if !ok {
+				gap, span: u64
+				gap, at, ok = take_varint(src, at); if !ok || low < 2 || gap > low - 2 {
 					return {}, false
 				}
-				_, at, ok = take_varint(src, at)
-				if !ok {
+				hi := low - gap - 2
+				span, at, ok = take_varint(src, at); if !ok || span > hi {
 					return {}, false
 				}
+				low = hi - span; parsed.ack_ranges[parsed.ack_n] = {low, hi}; parsed.ack_n += 1
 			}
 			if kind == 0x03 {
 				for _ in 0 ..< 3 {
@@ -305,14 +338,15 @@ parse_frames :: proc(src: []u8) -> (parsed: Parsed, ok: bool) {
 				data = src[at:]
 				at = len(src)
 			}
-			if parsed.stream {
+			if parsed.stream_n == len(parsed.streams) {
 				return {}, false
 			}
+			parsed.streams[parsed.stream_n] = {id, off, data, fin}; parsed.stream_n += 1
+			if !parsed.stream {
+				parsed.stream_id = id; parsed.stream_off = off; parsed.stream_data = data
+				parsed.fin = fin
+			}
 			parsed.stream = true
-			parsed.stream_id = id
-			parsed.stream_off = off
-			parsed.stream_data = data
-			parsed.fin = fin
 		case 0x10:
 			at += 1
 			value: u64
@@ -322,6 +356,69 @@ parse_frames :: proc(src: []u8) -> (parsed: Parsed, ok: bool) {
 			}
 			parsed.max_data = true
 			parsed.max_data_v = value
+		case 0x07:
+			// NEW_TOKEN is opaque and optional for subsequent connections.
+			at += 1; n: u64; n, at, ok = take_varint(src, at); if !ok || n > u64(len(src) - at) {
+				return {}, false
+			}; at += int(n); parsed.control_eliciting = true
+		case 0x14, 0x16, 0x17, 0x19:
+			// advisory BLOCKED / retired locally issued CID
+			at += 1; _, at, ok = take_varint(src, at); if !ok {
+				return {}, false
+			}; parsed.control_eliciting = true
+		case 0x15:
+			at += 1; _, at, ok = take_varint(src, at); if !ok {
+				return {}, false
+			}; _, at, ok = take_varint(src, at); if !ok {
+				return {}, false
+			}; parsed.control_eliciting = true
+		case 0x18:
+			at += 1; seq, prior: u64
+			seq, at, ok = take_varint(src, at); if !ok {
+				return {}, false
+			}; prior, at, ok = take_varint(src, at)
+			if !ok || prior > seq || at >= len(src) {
+				return {}, false
+			}
+			n := int(src[at]); at += 1; if n == 0 || n > 20 || n + 16 > len(src) - at {
+				return {}, false
+			}
+			// Migration is disabled: keep using sequence zero. A peer may offer
+			// additional CIDs without obliging this endpoint to use them.
+			if prior != 0 {
+				return {}, false
+			}
+			at += n + 16; parsed.control_eliciting = true
+		case 0x1a, 0x1b:
+			at += 1; if len(src) - at < 8 {
+				return {}, false
+			}
+			if kind == 0x1a {
+				parsed.path_challenge = true; copy(parsed.path_token[:], src[at:at + 8])
+			}
+			at += 8; parsed.control_eliciting = true
+		case 0x11:
+			at += 1; id, value: u64
+			id, at, ok = take_varint(src, at); if !ok {
+				return {}, false
+			}
+			value, at, ok = take_varint(src, at)
+			if !ok || parsed.credit_n == len(parsed.credits) {
+				return {}, false
+			}
+			parsed.credits[parsed.credit_n] = {id, value}; parsed.credit_n += 1
+			parsed.max_stream_data = true; parsed.max_stream_id = id
+			parsed.max_stream_value = value
+		case 0x12, 0x13:
+			at += 1; value: u64; value, at, ok = take_varint(src, at)
+			if !ok || value > u64(1) << 60 {
+				return {}, false
+			}
+			if kind == 0x12 {
+				parsed.max_streams_bidi = true; parsed.max_streams_bidi_value = value
+			} else {
+				parsed.max_streams_uni = true; parsed.max_streams_uni_value = value
+			}
 		case 0x1c, 0x1d:
 			at += 1
 			_, at, ok = take_varint(src, at)
@@ -352,4 +449,17 @@ parse_frames :: proc(src: []u8) -> (parsed: Parsed, ok: bool) {
 		}
 	}
 	return parsed, true
+}
+
+encode_credit :: proc(dst: []u8, at: int, id, stream_limit, data_limit: u64) -> (int, bool) {
+	p := at; if p >= len(dst) {
+		return p, false
+	}; dst[p] = 0x10; p += 1
+	ok: bool; p, ok = put_varint(dst, p, data_limit); if !ok || p >= len(dst) {
+		return p, false
+	}
+	dst[p] = 0x11; p += 1; p, ok = put_varint(dst, p, id); if !ok {
+		return p, false
+	}
+	return put_varint(dst, p, stream_limit)
 }
