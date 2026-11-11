@@ -18,7 +18,16 @@ ecn_options :: proc(family:Address_Family)->(i32,i32,i32) {
 _udp_enable_ecn :: proc(socket:UDP_Socket,family:Address_Family)->bool {
  if family!=.IP4 && family!=.IP6 {return false}
  level,option,_:=ecn_options(family);value:i32=1
- when ODIN_OS==.Linux {return linux.setsockopt_base(linux.Fd(socket),int(level),int(option),&value)==.NONE}
+ when ODIN_OS==.Linux {
+  if linux.setsockopt_base(linux.Fd(socket),int(level),int(option),&value)!=.NONE {return false}
+  if family==.IP6 {
+   only:i32;length:u32=size_of(only)
+   if linux.syscall(linux.SYS_getsockopt,linux.Fd(socket),41,26,&only,&length)<0||length!=size_of(only) {return false}
+   // Linux reports mapped IPv4 traffic through IP_RECVTOS, not RECVTCLASS.
+   if only==0&&linux.setsockopt_base(linux.Fd(socket),0,13,&value)!=.NONE {return false}
+  }
+  return true
+ }
  else {return posix.setsockopt(posix.FD(socket),level,posix.Sock_Option(option),&value,size_of(value))==.OK}
 }
 @(private)
@@ -67,6 +76,12 @@ _recv_udp_metadata :: proc(socket:UDP_Socket,dst:[]u8)->(int,Endpoint,UDP_Metada
 _send_udp_ecn :: proc(socket:UDP_Socket,src:[]u8,to:Endpoint,ecn:ECN_Codepoint)->(int,UDP_Send_Error) {
  if u8(ecn)>3 || to.address==nil {return 0,.Invalid_Argument}
  family:=family_from_endpoint(to);level,_,kind:=ecn_options(family)
+ when ODIN_OS==.Linux {
+  if ip,ok:=to.address.(IP6_Address);ok&&ip[0]==0&&ip[1]==0&&ip[2]==0&&ip[3]==0&&ip[4]==0&&ip[5]==0xffff {
+   // Keep the AF_INET6 sockaddr, but use ancillary data for its IPv4 wire packet.
+   level=0;kind=1
+  }
+ }
  control:[4]u64;head:=ecn_align(size_of(ECN_Control));length:=head+size_of(i32)
  header:=cast(^ECN_Control)(&control);header.length=type_of(header.length)(length);header.level=level;header.kind=kind
  value:=cast(^i32)(uintptr(&control)+uintptr(head));value^=i32(ecn)
