@@ -16,6 +16,7 @@ CID_Entry :: struct {
 	id:                                  [CID_CAP]u8,
 	n:                                   int,
 	token:                               [16]u8,
+ reset_lease:quic.Reset_CID_Lease,
 }
 CID_Retirement :: struct {
 	used, in_flight: bool,
@@ -35,6 +36,7 @@ Path :: struct {
 }
 Migration :: struct {
 	enabled, peer_disables:             bool,
+ reset_secrets:^quic.Reset_Secrets,
 	paths:                              [PATH_SLOTS]Path,
 	active, receiving, output:          int,
 	local, peer:                        [CID_SLOTS]CID_Entry,
@@ -54,6 +56,7 @@ migration_enable :: proc(
 	peer_disables_migration: bool = false,
 	initial_reset_token: []u8 = nil,
 	peer_reset_token: []u8 = nil,
+ reset_secrets:^quic.Reset_Secrets=nil,
 ) -> Error {
 	if e := usable(c); e != .None {
 		return e
@@ -67,7 +70,7 @@ migration_enable :: proc(
 	   (len(peer_reset_token) != 0 && len(peer_reset_token) != 16) {
 		return .Invalid
 	}
-	m := &c.migration; m.enabled = true; m.peer_disables = peer_disables_migration
+	m := &c.migration; m.reset_secrets=reset_secrets; m.enabled = true; m.peer_disables = peer_disables_migration
 	m.peer_limit = min(peer_cid_limit, u64(CID_SLOTS)); m.local_next = 1
 	m.local[0] = CID_Entry {
 		used = true,
@@ -84,6 +87,10 @@ migration_enable :: proc(
 	if len(peer_reset_token) == 16 {
 		copy(m.peer[0].token[:], peer_reset_token); m.peer[0].has_token = true
 	}
+ if reset_secrets!=nil {
+  lease,e:=quic.reset_cid_acquire(reset_secrets,c.local_cid[:c.local_cid_len],reset_now());if e!=.None{return .Invalid}
+  m.local[0].reset_lease=lease;m.local[0].token=lease.token;m.local[0].has_token=true
+ }
 	m.paths[0] = Path {
 		used      = true,
 		validated = true,
@@ -147,7 +154,9 @@ replenish_ids :: proc(c: ^Connection) -> Error {
 			n         = c.local_cid_len,
 			has_token = true,
 		}; m.local_next += 1
-		crypto.rand_bytes(entry.id[:entry.n]); crypto.rand_bytes(entry.token[:]); count += 1
+		if m.reset_secrets!=nil {
+   lease,e:=quic.reset_cid_issue(m.reset_secrets,entry.id[:entry.n],reset_now());if e!=.None {entry={};return .Capacity};entry.reset_lease=lease;entry.token=lease.token
+  }else{crypto.rand_bytes(entry.id[:entry.n]);crypto.rand_bytes(entry.token[:])};count+=1
 	}
 	return .None
 }
@@ -293,7 +302,7 @@ apply_ids :: proc(c: ^Connection, p: Parsed, destination_id: []u8) -> Error {
 				if cid_equal(entry.id[:entry.n], destination_id) {
 					return .Protocol
 				}
-				entry = {}; break
+				migration_release_local(c,&entry);entry = {}; break
 			}
 		}
 	}

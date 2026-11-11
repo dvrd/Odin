@@ -54,6 +54,7 @@ Error :: enum {
 	Pending,
 	Partial,
 	Discarded,
+ Stateless_Reset,
 }
 
 Phase :: enum {
@@ -104,6 +105,8 @@ Buf :: struct {
 	recv_fin:                          bool,
 	recv_reset:                        bool,
 	reset_final:                       u64,
+ reset_error,recv_reset_error,received_stop_error,stop_error:u64,
+ want_stop,stop_sent,stop_retry,stop_acked:bool,
 	stop:                              bool,
 	send_base:                         u64,
 	send_acked:                        [STREAM_BYTES]bool,
@@ -119,6 +122,8 @@ Buf :: struct {
 Connection :: struct {
  migration: Migration,
  post_handshake:Post_Handshake_State,
+ stateless_reset:bool,
+ early_state:Early_State,
  ecn:ECN_Transport,
 	initialized:                                 bool,
 	role:                                        quic.Role,
@@ -260,6 +265,7 @@ destroy :: proc(c: ^Connection) {
 	if c == nil {
 		return
 	}
+ migration_release_secrets(c)
  post_handshake_clear(c)
 	if c.initialized {
 		harness.destroy(&c.model)
@@ -272,7 +278,7 @@ destroy :: proc(c: ^Connection) {
 }
 
 established :: proc(c: ^Connection) -> bool {
-	return c != nil && c.initialized && c.phase == .Established
+	return c != nil && c.initialized && c.phase == .Established&&!early(c)
 }
 
 stats :: proc(c: ^Connection) -> harness.Stats {
@@ -402,7 +408,9 @@ read :: proc(c: ^Connection, id: u64, dst: []u8) -> (int, bool, Error) {
 	return n, fin, .None
 }
 
-reset_stream :: proc(c: ^Connection, id: u64) -> Error {
+reset_stream :: proc(c:^Connection,id:u64)->Error {return reset_stream_with_error(c,id,0)}
+reset_stream_with_error :: proc(c: ^Connection, id,code: u64) -> Error {
+ if code>=u64(1)<<62{return .Invalid}
 	if e := usable(c); e != .None {
 		return e
 	}
@@ -414,6 +422,7 @@ reset_stream :: proc(c: ^Connection, id: u64) -> Error {
 		return .Protocol
 	}
 	buf.reset = true
+ buf.reset_error=code
 	buf.reset_final = buf.send_base + u64(buf.n)
 	_ = harness.stream_send_reset(&c.model, id, buf.reset_final)
 	return .None
@@ -437,6 +446,7 @@ cancel :: proc(c: ^Connection) {
 	if c == nil || !c.initialized {
 		return
 	}
+ migration_release_secrets(c)
  post_handshake_clear(c)
 	c.cancelled = true
 	c.phase = .Closed
@@ -521,31 +531,34 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 	}
 	inv, ierr := quic.invariant_decode(datagram, c.local_cid_len)
 	if ierr != .None {
-		return .Discarded
+		return discard_reset(c,datagram)
 	}
 	if !accepts_destination_id(c, inv.destination_id) {
-		return .Discarded
+        if inv.long_header&&inv.version==1&&(inv.first_byte>>4)&3==1&&c.hs.have_zero_rtt {return early_ingest(c,now,path,datagram)}
+		return discard_reset(c,datagram)
 	}
 	if inv.long_header && (inv.version == 0 || inv.version != 1) {
 		note_unparsed(c, path, len(datagram))
 		c.reason = "version negotiation not implemented" if inv.version == 0 else c.reason
-		return .Discarded
+		return discard_reset(c,datagram)
 	}
 	view, consumed, derr := quic.packet_decode_v1(datagram, c.local_cid_len)
 	if derr != .None {
 		note_unparsed(c, path, len(datagram))
-		return .Discarded
+		return discard_reset(c,datagram)
 	}
+    if view.kind==.Zero_RTT {return early_ingest(c,now,path,datagram)}
+    if early(c){return .Discarded}
 	if consumed != len(datagram) ||
 	   view.kind == .Retry ||
 	   view.kind == .Version_Negotiation ||
 	   view.kind == .Zero_RTT {
 		note_unparsed(c, path, len(datagram))
-		return .Discarded
+		return discard_reset(c,datagram)
 	}
 	level := level_of(view.kind)
 	if c.model.spaces[int(space_of(level))].discarded {
-		return .Discarded
+		return discard_reset(c,datagram)
 	}
 	packet: [MAX_DATAGRAM]u8
 	copy(packet[:], datagram)
@@ -553,7 +566,7 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 	   .None {
 		note_unparsed(c, path, len(datagram))
 		c.reason = "header protection"
-		return .None
+		return discard_reset(c,datagram)
 	}
 	fields, ferr := quic.unprotected_fields_decode(
 		view_from(packet[:consumed], c.local_cid_len),
@@ -561,7 +574,7 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 	)
 	if ferr != .None {
 		note_unparsed(c, path, len(datagram))
-		return .None
+		return discard_reset(c,datagram)
 	}
 	space := space_of(level)
 	sp := c.model.spaces[int(space)]
@@ -580,11 +593,11 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 	if !pok || he != .None || hf != full {
 		note_unparsed(c, path, len(datagram))
 		c.reason = "packet number"
-		return .None
+		return discard_reset(c,datagram)
 	}
 	header_end := fields_header_end(packet[:consumed], c.local_cid_len)
 	if header_end <= 0 || header_end >= consumed {
-		return .Discarded
+		return discard_reset(c,datagram)
 	}
 	plain: [MAX_DATAGRAM]u8
 	pn, oerr := quic.handshake_payload_open(
@@ -599,7 +612,7 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
         if oerr==.Invalid_Header&&fields.reserved_bits!=0 {fail(c,"authenticated reserved bits");return .Protocol}
 		note_unparsed(c, path, len(datagram))
 		c.reason = "decrypt"
-		return .None
+		return discard_reset(c,datagram)
 	}
     if fields.reserved_bits!=0 {fail(c,"authenticated reserved bits");return .Protocol}
 	parsed, ok := parse_frames(plain[:pn])
@@ -607,6 +620,7 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 		fail(c, "frame")
 		return .Protocol
 	}
+    if level==.One_RTT&&!early_ack_valid(c,parsed){fail(c,"ACK rejected 0RTT");return .Protocol}
 	if parsed.ack && parsed.ack_largest >= sp.next_send {
 		fail(c, "ACK of unsent packet"); return .Protocol
 	}
@@ -744,6 +758,8 @@ pump :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 		return 0, .None
 	}
  if c.ecn.sender.state==.Testing&&now-c.ecn.started>=9*max(c.model.smoothed_rtt,i64(333)) {ecn.timeout(&c.ecn.sender)}
+ early_tick(c,now)
+ if early(c){return early_pump(c,now,dst)}
 	if c.want_close && !c.close_sent {
 		return send_close(c, now, dst)
 	}
@@ -787,6 +803,7 @@ pump :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 			return send_done(c, now, dst)
 		}
         if n,e,sent:=post_handshake_pump(c,now,dst);sent{return n,e}
+        if n,e,sent:=send_stop_progress(c,now,dst);sent{return n,e}
 		if n, err, sent := send_stream_progress(c, now, dst); sent {
 			return n, err
 		}
@@ -819,6 +836,7 @@ usable :: proc(c: ^Connection) -> Error {
 
 @(private)
 fail :: proc(c: ^Connection, reason: string) {
+ migration_release_secrets(c)
  post_handshake_clear(c)
 	c.phase = .Failed
 	c.reason = reason
@@ -1281,7 +1299,7 @@ apply_parsed :: proc(c: ^Connection, level: quic.Encryption_Level, parsed: Parse
 		   e != .None {
 			return map_harness(e)
 		}
-		buf.recv_reset = true; buf.recv_final = parsed.reset_final
+		buf.recv_reset = true;buf.recv_reset_error=parsed.reset_error; buf.recv_final = parsed.reset_final
 		buf.recv_n = 0; buf.recv_present = {}
 	}
 	if parsed.stop {
@@ -1289,7 +1307,8 @@ apply_parsed :: proc(c: ^Connection, level: quic.Encryption_Level, parsed: Parse
 			c.reason = "STOP_SENDING direction"; return .Protocol
 		}
 		if buf := find_buf(c, parsed.stop_id); buf != nil {
-			buf.stop = true
+			buf.stop = true;buf.received_stop_error=parsed.stop_error
+            if !buf.reset {buf.reset_error=parsed.stop_error}
 			buf.reset = true
 			buf.reset_final = buf.send_base + u64(buf.n)
 			_ = harness.stream_send_reset(&c.model, buf.id, buf.reset_final)
@@ -1584,6 +1603,7 @@ seal_and_emit :: proc(
 	int,
 	Error,
 ) {
+ if early(c){return early_seal_and_emit(c,now,dst,req,content)}
 	if c.model.spaces[int(req.space)].discarded {
 		return 0, .Discarded
 	}

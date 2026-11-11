@@ -6,7 +6,7 @@ import "core:mem"
 SERVER_HANDSHAKE_OUTPUT_CAP :: 2048
 Server_Handshake_Level :: enum {Initial, Handshake, Application}
 Server_Handshake_Direction :: enum {Read, Write} // Relative to the local server.
-Server_Handshake_Event_Kind :: enum {None, Handshake_Bytes, Traffic_Secret, Peer_Parameters, Complete, Fatal}
+Server_Handshake_Event_Kind :: enum {None, Handshake_Bytes, Traffic_Secret, Peer_Parameters, Early_Traffic_Secret, Complete, Fatal}
 Server_Handshake_Error :: enum {
 	None, Invalid_Config, Invalid_Owner, Invalid_State, Invalid_Event,
 	Wrong_Level, Malformed, Unsupported, Limit, Allocation_Failed, Cancelled, Identity_Exhausted, Credential_Failed, Signing_Failed, Entropy_Unavailable, Client_Authentication_Failed, Binder_Failed, Finished_Failed, No_Application_Protocol,
@@ -70,6 +70,7 @@ Server_Handshake :: struct {
 	_peer_expires:i64,
 	_resumption:^Server_Resumption,
 	_resumed:bool,
+ _retried:bool,
 	_binder_transcript:Handshake_Transcript,
 }
 
@@ -219,6 +220,7 @@ server_handshake_feed :: proc(owner: ^Server_Handshake, level: Server_Handshake_
 	transcript_update(&owner._transcript, owner._input)
 	owner._phase = .Await_Flight
 	if decoded == .Retry_Required {
+ owner._retried=true;
 		e := server_retry_begin(owner)
 		if e != .None {server_handshake_fail(owner,e); return consumed,.Terminal,e}
 		return consumed,.Need_Event_Drain,.None
@@ -244,6 +246,7 @@ server_handshake_accept :: proc(owner: ^Server_Handshake, id: u64) -> Server_Han
 	if id == 0 || owner._event.kind == .None || id != owner._event.id {return .Invalid_Event}
 	if owner._event.kind == .Complete {server_resumption_clear(owner);server_parameters_clear(owner)}
 	ticket:=owner._event.kind==.Handshake_Bytes&&owner._event.level==.Application
+ if owner._event.kind==.Early_Traffic_Secret&&owner._resumption!=nil {crypto.zero_explicit(&owner._resumption.early_secret,size_of(owner._resumption.early_secret))}
 	retry := server_retry_active(owner) && owner._event.kind == .Handshake_Bytes
 	if owner._event.kind == .Handshake_Bytes && owner._event.level!=.Application {transcript_update(&owner._transcript, owner._event.bytes)}
 	server_handshake_clear_event(owner)

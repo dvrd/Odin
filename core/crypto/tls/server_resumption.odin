@@ -14,6 +14,8 @@ Server_Resumption :: struct {
  selected_index:u16,
  wire:[512]u8,
  wire_size:int,
+ early_accepted,early_event_sent:bool,
+ early_secret:[32]u8,
 }
 server_handshake_resumed :: proc(owner:^Server_Handshake)->bool {return server_handshake_valid(owner)&&owner._phase==.Complete&&owner._resumed}
 @(private)
@@ -64,6 +66,14 @@ server_resumption_prepare :: proc(owner:^Server_Handshake,now:time.Time)->Server
   if !valid {return .Binder_Failed}
   state.claims.psk=opened.psk;state.claims.authenticated=opened.authenticated;state.claims.peer=opened.peer;state.claims.peer_expires=opened.peer_expires
   state.selected=true;state.selected_index=u16(index-1);owner._resumed=true
+  early:=config.early_data
+  if owner._hello.early_data&&index==1&&early!=nil&&opened.early_capable&&owner._parameters.value.mode==.QUIC&&!owner._retried {
+   sec:=time.to_unix_seconds(now);actual_age:=(sec-opened.issued)*1000;reported_age:=i64(age-opened.age_add);max_age:=i64(early.max_age/time.Millisecond)
+   if actual_age>=0&&actual_age<=max_age&&abs(actual_age-reported_age)<=10000&&early.compatible(opened.early_context[:opened.early_context_len],early.profile)&&anti_replay_reserve(early.replay,ticket_hash(ticket),opened.issued+i64(early.max_age/time.Second)+11,sec)==.None {
+    state.early_accepted=true;early_psk:Session;early_psk.usable=true;early_psk.psk=opened.psk;secret,available:=session_early_secret(&early_psk);crypto.zero_explicit(&early_psk,size_of(early_psk))
+    if available {early_hash:=quic_hash(owner._hello.wire);finished_expand(secret[:],"c e traffic",early_hash[:],state.early_secret[:])};crypto.zero_explicit(&secret,size_of(secret))
+   }
+  }
   return .None
  }
  return .None
@@ -79,10 +89,22 @@ server_resumption_issue :: proc(owner:^Server_Handshake,finished:[]u8)->bool {
  state.claims.authenticated=owner._peer_identity.authenticated;state.claims.peer=owner._peer_identity.certificate_sha256;state.claims.peer_expires=owner._peer_expires
  // age_add is independent fresh entropy; it need not be recovered to reject0RTT.
  add:[4]u8;crypto.rand_bytes(add[:])
- wire:=state.wire[:];wire[0]=4;server_flight_put24(wire[1:4],4+4+1+len(nonce)+2+TICKET_WIRE_SIZE+2)
+ state.claims.age_add=u32(add[0])<<24|u32(add[1])<<16|u32(add[2])<<8|u32(add[3])
+ early:=owner._config.tickets.early_data
+ state.claims.early_capable=early!=nil&&owner._parameters.value.mode==.QUIC
+ if state.claims.early_capable {state.claims.early_context_len=copy(state.claims.early_context[:],early.profile)}
+ wire:=state.wire[:];wire[0]=4;extra:=8 if state.claims.early_capable else 0;server_flight_put24(wire[1:4],4+4+1+len(nonce)+2+TICKET_WIRE_SIZE+2+extra)
  at:=4;wire[at],wire[at+1],wire[at+2],wire[at+3]=u8(lifetime>>24),u8(lifetime>>16),u8(lifetime>>8),u8(lifetime);at+=4
  copy(wire[at:],add[:]);at+=4;wire[at]=u8(len(nonce));at+=1;copy(wire[at:],nonce[:]);at+=len(nonce)
  wire[at],wire[at+1]=u8(TICKET_WIRE_SIZE>>8),u8(TICKET_WIRE_SIZE&255);at+=2
- if !server_ticket_crypt(owner._config.tickets,&state.claims,wire[at:at+TICKET_WIRE_SIZE],true,now) {return false};at+=TICKET_WIRE_SIZE;wire[at],wire[at+1]=0,0;at+=2;state.wire_size=at
+ if !server_ticket_crypt(owner._config.tickets,&state.claims,wire[at:at+TICKET_WIRE_SIZE],true,now) {return false};at+=TICKET_WIRE_SIZE;wire[at],wire[at+1]=0,u8(extra);at+=2
+ if extra>0 {wire[at],wire[at+1],wire[at+2],wire[at+3]=0,42,0,4;at+=4;for i in 0..<4 {wire[at+i]=255};at+=4};state.wire_size=at
  crypto.zero_explicit(&state.master,size_of(state.master));crypto.zero_explicit(&state.claims.psk,size_of(state.claims.psk));return true
+}
+
+// Explicitly provisional: proof is the resumed ticket binder, not new Finished.
+server_handshake_early_accepted :: proc(owner:^Server_Handshake)->bool {return server_handshake_valid(owner)&&owner._resumption!=nil&&owner._resumption.early_accepted}
+server_handshake_early_identity :: proc(owner:^Server_Handshake)->Peer_Identity {
+ if !server_handshake_early_accepted(owner) {return {}}
+ return {authenticated=owner._resumption.claims.authenticated,certificate_sha256=owner._resumption.claims.peer}
 }

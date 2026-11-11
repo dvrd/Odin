@@ -109,7 +109,7 @@ server_parameters_clear :: proc(owner: ^Server_Handshake) {
 // Bounded by 6 + (4+2+1+255) + (4+1024) = 1296 bytes, below scratch.
 @(private)
 server_parameters_extensions :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
-	wire: [1296]u8
+	wire: [1300]u8
 	at := 6; p := &owner._parameters.value
 	if len(p.alpn) > 0 {
 		hello_put_u16(wire[:], &at, 16)
@@ -123,6 +123,7 @@ server_parameters_extensions :: proc(owner: ^Server_Handshake) -> Server_Handsha
 		hello_put_u16(wire[:], &at, u16(len(p.local_quic)))
 		copy(wire[at:], p.local_quic); at += len(p.local_quic)
 	}
+	if server_handshake_early_accepted(owner) {hello_put_u16(wire[:],&at,42);hello_put_u16(wire[:],&at,0)}
 	wire[0] = 8; server_flight_put24(wire[1:4], at-4)
 	wire[4], wire[5] = u8((at-6)>>8), u8(at-6)
 	return server_flight_bytes(owner, mem.slice_ptr(cast(^u8)(cast(rawptr)&wire),at))

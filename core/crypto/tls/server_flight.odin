@@ -186,7 +186,12 @@ server_flight_secret :: proc(
 @(private)
 server_flight_next :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 	f := &owner._flight
-	switch f.stage {
+ if owner._resumption!=nil&&owner._resumption.early_accepted&&!owner._resumption.early_event_sent {
+  state:=owner._resumption
+  if !server_handshake_id(owner) {return .Identity_Exhausted}
+  state.early_event_sent=true;owner._event={id=owner._next_id,kind=.Early_Traffic_Secret,level=.Application,direction=.Read,cipher=.AES_128_GCM_SHA256,secret=state.early_secret[:]};return .None
+ }
+ switch f.stage {
 	case .None, .Retry_Wait:
 		return .None
 	case .Hello:

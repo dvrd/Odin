@@ -246,3 +246,8 @@ retry_token_open :: proc(
 	copy(claims.retry_source_id[:], token[at:at + retry_n])
 	return claims, .None
 }
+
+retry_tokens_max_age :: proc(store:^Retry_Tokens)->i64 {
+ if store==nil{return 0};sync.mutex_lock(&store._mutex);defer sync.mutex_unlock(&store._mutex)
+ if !store._initialized{return 0};return store._max_age
+}

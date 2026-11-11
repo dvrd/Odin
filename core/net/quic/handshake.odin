@@ -46,6 +46,11 @@ Handshake :: struct {
 	one_rtt_read:         Packet_Keys,
 	one_rtt_write:        Packet_Keys,
 	zero_rtt_write:       Packet_Keys,
+ zero_rtt_read:Packet_Keys,
+ resumption_master:[32]u8,
+ have_resumption_master:bool,
+ early_accepted:bool,
+ resumed:bool,
 	have_zero_rtt:        bool,
 	handshake_secret:     [32]u8,
 	client_finished:      [tls.FINISHED_MESSAGE_SIZE]u8,
@@ -97,7 +102,9 @@ handshake_fail :: proc(h: ^Handshake) {
 	packet_keys_clear(&h.one_rtt_read)
 	packet_keys_clear(&h.one_rtt_write)
 	packet_keys_clear(&h.zero_rtt_write)
-	h.have_zero_rtt = false
+ packet_keys_clear(&h.zero_rtt_read)
+ crypto.zero_explicit(&h.resumption_master,size_of(h.resumption_master));h.have_resumption_master=false
+	h.have_zero_rtt = false;h.early_accepted=false;h.resumed=false
 	crypto.zero_explicit(&h.handshake_secret, size_of(h.handshake_secret))
 	handshake_release_client_flight(h)
 	crypto.zero_explicit(&h.client_finished, size_of(h.client_finished))
@@ -148,6 +155,7 @@ handshake_install_zero_rtt :: proc(
 		packet_keys_clear(&h.zero_rtt_write)
 		return .Invalid_State
 	}
+	h.zero_rtt_write.zero_rtt=true
 	h.have_zero_rtt = true
 	return .None
 }
@@ -174,13 +182,14 @@ handshake_accept_client_hello :: proc(
 	h: ^Handshake,
 	shared_secret: [32]u8,
 	client_hello, server_hello, local_parameters: []u8,
+ session:^tls.Session=nil,early_allowed:bool=false,
 ) -> tls.Quic_Secret_Error {
 	shared := shared_secret
 	defer crypto.zero_explicit(&shared, size_of(shared))
 	if h == nil || h.role != .Client || h.failed || h.have_handshake {
 		return {kind = .Invalid_Input}
 	}
-	keys, e := tls.quic_handshake_secrets(shared, client_hello, server_hello, local_parameters)
+	keys, e := tls.quic_handshake_secrets(shared, client_hello, server_hello, local_parameters,session,early_allowed)
 	defer tls.quic_handshake_keys_clear(&keys)
 	if e.kind != .None {
 		handshake_fail(h)
@@ -209,6 +218,7 @@ handshake_authenticate_server :: proc(
 	identity:^credential_store.Store=nil,
 	allocator:mem.Allocator=context.allocator,
 	identity_lease:^credential_store.Lease=nil,
+ session:^tls.Session=nil,early_allowed:bool=false,
 ) -> tls.Quic_Secret_Error {
 	if h == nil || h.role != .Client || h.failed || !h.have_handshake || h.peer_authenticated {
 		return {kind = .Invalid_Input}
@@ -222,10 +232,12 @@ handshake_authenticate_server :: proc(
 		roots,
 		now,
 		h.local_parameters,
-		peer_parameters,identity,allocator,identity_lease,
+		peer_parameters,identity,allocator,identity_lease,session,early_allowed,
 	)
 	defer tls.quic_application_keys_clear(&keys)
-	retained:=false
+	h.resumed=session!=nil&&len(handshake_messages)>=4&&quic_server_resumed(server_hello)
+ h.resumption_master=keys.resumption_master;h.have_resumption_master=e.kind==.None;h.early_accepted=keys.early_accepted
+ retained:=false
 	defer if !retained && raw_data(finished)!=nil {crypto.zero_explicit(raw_data(finished),len(finished));delete(finished,allocator)}
 	if e.kind != .None {
 		handshake_fail(h)
@@ -572,3 +584,6 @@ handshake_header_protection :: proc(
 	}
 	return header_protection_apply(packet, keys.packet, kind, destination_id_len, implementation)
 }
+
+@(private)
+quic_server_resumed :: proc(hello:[]u8)->bool {parameters,e:=tls.server_hello_decode(hello,true);return e==.None&&parameters.psk_selected}

@@ -47,7 +47,7 @@ pending retirements and four paths bound memory. New CIDs and retirements are
 retained/retried until packet acknowledgment; retired IDs stop routing. CID
 sequence conflicts, invalid retirement and peer limit overflow are errors.
 `peer_reset_tokens` copies the active peer tokens for stateless-reset detection;
-reset generation/detection is a separate layer.
+reset generation belongs to the borrowed Reset_Secrets owner.
 
 Use `accepts_destination_id` for listener routing, `ingest_from` for endpoint-aware
 input and `pump_to` for output. A candidate endpoint is admitted only after packet
@@ -71,7 +71,7 @@ include only authenticated nonduplicate packets. Sent marks are retained until
 ACK processing, and invalid/bleached feedback disables marking while streams
 remain usable. A migration restarts path validation of ECN capability.
 
-Version negotiation, Retry, 0-RTT, preferred address, stateless reset and coalesced
+Version negotiation, Retry, preferred address and coalesced
 datagrams remain outside this connection. Advisory BLOCKED frames are accepted.
 Independent wire interoperability belongs to the real TLS driver's loopback and
 external-peer tests, not the deterministic Material fixture pair.
@@ -80,3 +80,22 @@ external-peer tests, not the deterministic Material fixture pair.
 constants. Drivers must not pass nanoseconds to that millisecond model. A
 protected HANDSHAKE_DONE retires retained client authentication CRYPTO, releases
 its owned backing and drops Handshake keys before further application output.
+
+Stateless reset detection is protection-first and accepts random short-header CID
+prefixes; listener unknown-CID dispatch calls `observe_unrouted_reset`. Routed
+failures return `Stateless_Reset` after token verification. `was_stateless_reset`
+identifies terminal Core state until destroy. See ../RESET.md for key/CID ownership.
+
+`reset_stream_with_error` and `stop_sending_with_error` retain the application
+error code through ACK/loss/retransmission. A received STOP_SENDING produces a
+RESET_STREAM with its received code. `receive_reset_error` and `receive_stop_error`
+return the retained peer codes; legacy reset_stream keeps its code0 behavior.
+
+
+Explicit early transport uses `adopt_early` and `confirm_early`: bounded STREAM
+state stays provisional until authentication completes, and rejected client data
+replays at the same offsets with new Application packet numbers. TLS supplies
+distinct early keys and an explicit anti-replay/application policy. The HTTP3
+binding owns ticket profiles and actual request execution; early keys alone
+provide no permission to run application effects. Server early output waits for
+confirmation, and retained early read keys expire after a bounded3PTO window.

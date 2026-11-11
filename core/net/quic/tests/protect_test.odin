@@ -361,6 +361,7 @@ aes_handshake_and_one_rtt_from_tls_labels :: proc(t: ^testing.T) {
 		testing.expect_value(t, phase_err, .Key_Update_Disabled)
 		reserved := phase
 		rn, _, re := quic.short_header_encode_v1(reserved[:], {packet_number = 0, packet_number_length = 1})
+		testing.expect_value(t,re,.None)
 		reserved[0] |= 0x08
 		_, reserved_err := quic.payload_seal(reserved[rn:], reserved[:rn], plain[:], &keys, 0)
 		testing.expect_value(t, reserved_err, .Invalid_Header)

@@ -30,6 +30,7 @@ server_async_handshake_drive :: proc(s:^Server_Async_Conn) {
 			s._engine_event=event.id
 			_=server_async_send_record(s,.Handshake,event.bytes,.Handshake,s._handshake_deadline)
 			return
+		case .Early_Traffic_Secret: server_async_fail(s,{kind=.Protocol_Failed},{kind=.Handshake,engine=.Unsupported});return
 		case .Traffic_Secret:
 			if !server_async_grant(s,&s._key_grant,size_of(Server_Async_Keys),align_of(Server_Async_Keys)) {return}
 			secret:[32]u8;copy(secret[:],event.secret)

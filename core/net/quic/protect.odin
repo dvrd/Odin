@@ -28,6 +28,7 @@ Packet_Keys :: struct {
 	update_pending: bool,
 	has_secret:     bool,
 	one_rtt:        bool,
+ zero_rtt:bool,
 	initialized:    bool,
 }
 
@@ -289,9 +290,8 @@ payload_aead :: proc(
 	if header_error != .None {
 		return 0, header_error
 	}
-	if kind == .Zero_RTT {
-		return 0, .Zero_RTT_Disabled
-	}
+	if kind == .Zero_RTT && !keys.zero_rtt {return 0,.Zero_RTT_Disabled}
+ if keys.zero_rtt&&kind!=.Zero_RTT {return 0,.Invalid_Keys}
 	if seal && kind == .One_RTT {
 		header_phase: u8
 		if header[0] & 4 != 0 {
@@ -442,10 +442,7 @@ protected_header_kind :: proc(
 		return {}, .Invalid_Header
 	}
 	kind := Packet_Kind((inv.first_byte >> 4) & 3)
-	if kind == .Zero_RTT {
-		return .Zero_RTT, .None
-	}
-	if kind != .Handshake {
+	if kind != .Handshake && kind != .Zero_RTT {
 		return {}, .Invalid_Header
 	}
 	if sending && inv.first_byte & 0x0c != 0 {
@@ -541,10 +538,9 @@ header_protection :: proc(
 	if keys == nil || !keys.initialized {
 		return .Invalid_Keys
 	}
-	if kind == .Zero_RTT {
-		return .Zero_RTT_Disabled
-	}
-	if kind != .Handshake && kind != .One_RTT {
+	if kind == .Zero_RTT && !keys.zero_rtt {return .Zero_RTT_Disabled}
+ if keys.zero_rtt&&kind!=.Zero_RTT {return .Invalid_Keys}
+	if kind != .Handshake && kind != .One_RTT && kind != .Zero_RTT {
 		return .Invalid_Header
 	}
 	if keys.aead == .AES_128_GCM && implementation != .Portable && implementation != .Hardware {
@@ -560,7 +556,7 @@ header_protection :: proc(
 		mask_bits = 0x1f
 	} else {
 		view, consumed, e := packet_decode_v1(packet)
-		if e != .None || view.kind != .Handshake || consumed != len(packet) {
+		if e != .None || view.kind != kind || consumed != len(packet) {
 			return .Invalid_Header
 		}
 		pn_offset = view.packet_number_offset

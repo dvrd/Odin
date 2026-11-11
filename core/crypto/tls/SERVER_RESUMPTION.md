@@ -34,8 +34,8 @@ transcript state), emits selected_identity and an abbreviated encrypted flight,
 and authenticates client Finished. Unknown, expired, revoked or context-mismatched
 tickets fall back to the full certificate handshake. A recognized matching ticket
 with an invalid binder terminates the connection; it cannot silently downgrade.
-No early_data extension is issued or accepted here. QUIC0RTT is a separate policy
-and replay-control feature.
+QUIC early data is an explicit separate policy described in ZERO_RTT.md; nil
+policy preserves1RTT-only resumption. TCP early data remains disabled.
 
 After authenticated client Finished the recordless engine emits NewSessionTicket
 as `Handshake_Bytes` at Application level before `Complete`. Consumers must send

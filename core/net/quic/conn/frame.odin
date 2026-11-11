@@ -20,6 +20,7 @@ CID_Frame :: struct {
 }
 Path_Frame :: struct { response:bool, token:[8]u8 }
 Parsed :: struct {
+ new_token:bool,
  new_ids:[16]CID_Frame, new_id_n:int,
  retire_ids:[16]u64, retire_id_n:int,
  paths:[16]Path_Frame, path_n:int,
@@ -47,9 +48,9 @@ Parsed :: struct {
 	stream_data:                                   []u8,
 	fin:                                           bool,
 	reset:                                         bool,
-	reset_id, reset_final:                         u64,
+	reset_id, reset_final,reset_error:                         u64,
 	stop:                                          bool,
-	stop_id:                                       u64,
+	stop_id,stop_error:                                       u64,
 	max_data:                                      bool,
 	max_data_v:                                    u64,
 	close:                                         bool,
@@ -159,7 +160,7 @@ encode_stream :: proc(
 	return at + len(data), true
 }
 
-encode_reset :: proc(dst: []u8, start: int, id, final_size: u64) -> (int, bool) {
+encode_reset :: proc(dst: []u8, start: int, id, final_size: u64,code:u64=0) -> (int, bool) {
 	at := start
 	if at >= len(dst) {
 		return at, false
@@ -171,7 +172,7 @@ encode_reset :: proc(dst: []u8, start: int, id, final_size: u64) -> (int, bool) 
 	if !ok {
 		return at, false
 	}
-	at, ok = put_varint(dst, at, 0)
+	at, ok = put_varint(dst, at, code)
 	if !ok {
 		return at, false
 	}
@@ -288,7 +289,7 @@ parse_frames :: proc(src: []u8) -> (parsed: Parsed, ok: bool) {
 			}
 			_ = app
 			parsed.reset = true
-			parsed.reset_id = id
+			parsed.reset_id = id;parsed.reset_error=app
 			parsed.reset_final = final
 		case 0x05:
 			at += 1
@@ -303,7 +304,7 @@ parse_frames :: proc(src: []u8) -> (parsed: Parsed, ok: bool) {
 			}
 			_ = app
 			parsed.stop = true
-			parsed.stop_id = id
+			parsed.stop_id = id;parsed.stop_error=app
 		case 0x06:
 			at += 1
 			off, n: u64
@@ -366,6 +367,7 @@ parse_frames :: proc(src: []u8) -> (parsed: Parsed, ok: bool) {
 			parsed.max_data = true
 			parsed.max_data_v = value
 		case 0x07:
+            parsed.new_token=true
 			// NEW_TOKEN is opaque and optional for subsequent connections.
 			at += 1; n: u64; n, at, ok = take_varint(src, at); if !ok || n > u64(len(src) - at) {
 				return {}, false

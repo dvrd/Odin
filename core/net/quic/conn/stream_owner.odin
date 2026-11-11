@@ -113,7 +113,7 @@ Tx_Packet :: struct {
 	active:                   bool,
 	pn, id, offset:           u64,
 	n:                        int,
-	fin, reset, credit, done: bool,
+	fin, reset, credit, done,stop: bool,
 	credit_value:             u64,
 }
 
@@ -216,7 +216,8 @@ mark_retry :: proc(c: ^Connection, t: Tx_Packet) {
 		c.done_sent = false; return
 	}
 	if b := find_buf(c, t.id); b != nil {
-		if t.credit {
+		if t.stop {b.stop_retry=true;return}
+        if t.credit {
 			b.credit_dirty = true; return
 		}
 		for i in 0 ..< t.n {
@@ -270,7 +271,8 @@ acknowledge_tx :: proc(c: ^Connection, p: Parsed) {
 				acked = true; break
 			}
 		}; if acked {
-			if b := find_buf(c, t.id); b != nil && !t.credit {
+			if b:=find_buf(c,t.id);b!=nil&&t.stop {b.stop_acked=true;b.stop_retry=false}
+            if b := find_buf(c, t.id); b != nil && !t.credit && !t.stop {
 				n := 0; for i in 0 ..< t.n {
 					off := t.offset + u64(i)
 					if off >= b.send_base && off < b.send_base + u64(b.n) {
@@ -362,7 +364,7 @@ send_owned_stream :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, b
 			return 0, .Capacity, true
 		}
 		if reset {
-			at, ok = encode_reset(frame[:], at, b.id, b.reset_final)
+			at, ok = encode_reset(frame[:], at, b.id, b.reset_final,b.reset_error)
 		} else {
 			at, ok = encode_stream(
 				frame[:],

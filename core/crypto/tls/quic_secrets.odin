@@ -47,6 +47,8 @@ Quic_Handshake_Keys :: struct {
 }
 Quic_Application_Keys :: struct {
 	client, server: Quic_Direction_Keys,
+ resumption_master:[32]u8,
+ early_accepted:bool,
 }
 
 @(private)
@@ -133,6 +135,7 @@ quic_early_packet_keys :: proc(
 quic_handshake_secrets :: proc(
 	shared_secret: [32]u8,
 	client_hello, server_hello, local_parameters: []u8,
+ session:^Session=nil,early_allowed:bool=false,
 ) -> (
 	keys: Quic_Handshake_Keys,
 	err: Quic_Secret_Error,
@@ -144,11 +147,11 @@ quic_handshake_secrets :: proc(
 	if len(local_parameters) > SERVER_QUIC_PARAMETERS_CAP {
 		return {}, {kind = .Parameters_Oversized}
 	}
-	if e := quic_client_hello_policy(client_hello, local_parameters); e.kind != .None {
+	if e := quic_client_hello_policy(client_hello, local_parameters,early_allowed); e.kind != .None {
 		return {}, e
 	}
-	hello, hello_error := server_hello_decode(server_hello)
-	crypto.zero_explicit(&hello, size_of(hello))
+	hello, hello_error := server_hello_decode(server_hello,session!=nil)
+ defer crypto.zero_explicit(&hello,size_of(hello))
 	if hello_error != .None {
 		kind: Quic_Secret_Kind = .Malformed
 		if hello_error == .Hello_Retry_Unsupported || hello_error == .Unsupported_Extension {
@@ -156,7 +159,8 @@ quic_handshake_secrets :: proc(
 		}
 		return {}, {kind = kind, hello = hello_error}
 	}
-	secrets, schedule := handshake_secrets_derive(shared, client_hello, server_hello)
+	psk:[]u8;if hello.psk_selected {if session==nil||!session.usable {return {},{kind=.Invalid_Input}};psk=session.psk[:]}
+	secrets, schedule := handshake_secrets_derive(shared, client_hello, server_hello,nil,psk)
 	defer crypto.zero_explicit(&secrets, size_of(secrets))
 	if schedule != .None {
 		return {}, {kind = .Derivation_Failed, schedule = schedule}
@@ -320,16 +324,16 @@ quic_hash :: proc(parts: ..[]u8) -> [32]u8 {
 }
 
 @(private)
-quic_client_hello_policy :: proc(message, parameters: []u8) -> Quic_Secret_Error {
+quic_client_hello_policy :: proc(message, parameters: []u8,allow_early:bool=false) -> Quic_Secret_Error {
 	at, end, e := quic_client_hello_extensions(message)
 	if e.kind != .None {
 		return e
 	}
-	return quic_scan_extensions(message[at:end], parameters, true)
+	return quic_scan_extensions(message[at:end], parameters, true,allow_early)
 }
 
 @(private)
-quic_encrypted_extensions_policy :: proc(message, parameters: []u8) -> Quic_Secret_Error {
+quic_encrypted_extensions_policy :: proc(message, parameters: []u8,allow_early:bool=false) -> Quic_Secret_Error {
 	if len(message) < 6 || message[0] != u8(Handshake_Type.Encrypted_Extensions) {
 		return {kind = .Malformed}
 	}
@@ -340,7 +344,7 @@ quic_encrypted_extensions_policy :: proc(message, parameters: []u8) -> Quic_Secr
 	if ext_len != len(message) - 6 {
 		return {kind = .Malformed}
 	}
-	return quic_scan_extensions(message[6:], parameters, false)
+	return quic_scan_extensions(message[6:], parameters, false,allow_early)
 }
 
 @(private)
@@ -392,7 +396,7 @@ quic_client_hello_extensions :: proc(message: []u8) -> (at, end: int, err: Quic_
 }
 
 @(private)
-quic_scan_extensions :: proc(data, parameters: []u8, offer: bool) -> Quic_Secret_Error {
+quic_scan_extensions :: proc(data, parameters: []u8, offer: bool,allow_early:bool=false) -> Quic_Secret_Error {
 	seen: [32]u16
 	seen_n := 0
 	have_alpn, have_parameters := false, false
@@ -421,7 +425,7 @@ quic_scan_extensions :: proc(data, parameters: []u8, offer: bool) -> Quic_Secret
 		at += size
 		switch kind {
 		case QUIC_EXTENSION_EARLY_DATA:
-			return {kind = .Early_Data_Disabled}
+   if !allow_early||size!=0 {return {kind=.Early_Data_Disabled}}
 		case QUIC_EXTENSION_PARAMETERS:
 			if size > SERVER_QUIC_PARAMETERS_CAP {
 				return {kind = .Parameters_Oversized}
@@ -512,23 +516,28 @@ quic_application_secrets_mutual :: proc(
  server_name:string,roots:[]^x509.Certificate,now:time.Time,
  local_parameters,peer_parameters:[]u8,identity:^credential_store.Store,
  allocator:mem.Allocator,identity_lease:^credential_store.Lease=nil,
+ session:^Session=nil,early_allowed:bool=false,
 )->(keys:Quic_Application_Keys,client_flight:[]u8,err:Quic_Secret_Error) {
  secret:=handshake_secret;defer crypto.zero_explicit(&secret,size_of(secret))
  if crypto.is_zero_constant_time(secret[:])==1 {return {},nil,{kind=.Derivation_Failed}}
  if len(local_parameters)>SERVER_QUIC_PARAMETERS_CAP||len(peer_parameters)>SERVER_QUIC_PARAMETERS_CAP {return {},nil,{kind=.Parameters_Oversized}}
- if e:=quic_client_hello_policy(client_hello,local_parameters);e.kind!=.None {return {},nil,e}
+ if e:=quic_client_hello_policy(client_hello,local_parameters,early_allowed);e.kind!=.None {return {},nil,e}
  messages:[5][]u8;count,at:=0,0
  for at<len(handshake_messages) {
   if count==len(messages)||len(handshake_messages)-at<4 {return {},nil,{kind=.Malformed}}
   n:=4+handshake_body_size(handshake_messages[at:]);if n>len(handshake_messages)-at {return {},nil,{kind=.Malformed}}
   messages[count]=handshake_messages[at:at+n];count+=1;at+=n
  }
- if count<4||messages[0][0]!=8 {return {},nil,{kind=.Malformed}}
- if e:=quic_encrypted_extensions_policy(messages[0],peer_parameters);e.kind!=.None {return {},nil,e}
+ hello,hello_error:=server_hello_decode(server_hello,session!=nil);defer crypto.zero_explicit(&hello,size_of(hello))
+ if hello_error!=.None {return {},nil,{kind=.Malformed}}
+ resumed:=hello.psk_selected&&session!=nil&&session.usable
+ if count<2||messages[0][0]!=8||resumed&&count!=2||!resumed&&count<4 {return {},nil,{kind=.Malformed}}
+ if e:=quic_encrypted_extensions_policy(messages[0],peer_parameters,early_allowed);e.kind!=.None {return {},nil,e}
  transcript:Handshake_Transcript;transcript_init(&transcript);defer crypto.zero_explicit(&transcript,size_of(transcript))
  transcript_update(&transcript,client_hello);transcript_update(&transcript,server_hello);transcript_update(&transcript,messages[0])
  requested:=count==5;cert_at:=1
  schemes:[32]u16;scheme_count:=0
+ if !resumed {
  if requested {
   request:=messages[1]
   parsed,e:=client_certificate_request_schemes(request);if e.kind!=.None {return {},nil,{kind=.Malformed}}
@@ -542,9 +551,12 @@ quic_application_secrets_mutual :: proc(
  transcript_update(&transcript,messages[cert_at])
  if ae=verify_server_certificate_signature(&certs,messages[cert_at+1],transcript_snapshot(&transcript));ae.kind!=.None {return {},nil,{kind=.Authentication_Failed,authentication=ae}}
  transcript_update(&transcript,messages[cert_at+1])
+ }
+ finished_at:=cert_at+2;if resumed {finished_at=1}
+ if messages[finished_at][0]!=20 {return {},nil,{kind=.Malformed}}
  server_traffic:=quic_server_traffic(secret,client_hello,server_hello);defer crypto.zero_explicit(&server_traffic,size_of(server_traffic))
- if e:=finished_verify(messages[cert_at+2],server_traffic,transcript_snapshot(&transcript));e!=.None {return {},nil,{kind=.Finished_Failed,finished=e}}
- transcript_update(&transcript,messages[cert_at+2])
+ if e:=finished_verify(messages[finished_at],server_traffic,transcript_snapshot(&transcript));e!=.None {return {},nil,{kind=.Finished_Failed,finished=e}}
+ transcript_update(&transcript,messages[finished_at])
  application:=application_secrets_derive(secret,transcript_snapshot(&transcript));defer crypto.zero_explicit(&application,size_of(application))
  local:Quic_Application_Keys;defer quic_application_keys_clear(&local)
  client,ce:=quic_packet_keys_derive(application.client_traffic_secret,.Application);defer quic_direction_keys_clear(&client);if ce.kind!=.None {return {},nil,ce}
@@ -562,5 +574,15 @@ quic_application_secrets_mutual :: proc(
  client_traffic:=quic_client_traffic(secret,client_hello,server_hello);defer crypto.zero_explicit(&client_traffic,size_of(client_traffic))
  n,fe:=finished_encode(flight[len(auth):],client_traffic,transcript_snapshot(&transcript))
  if fe!=.None||n!=FINISHED_MESSAGE_SIZE {crypto.zero_explicit(raw_data(flight),len(flight));delete(flight,allocator);return {},nil,{kind=.Finished_Failed,finished=fe}}
+ transcript_update(&transcript,flight[len(auth):]);hash:=transcript_snapshot(&transcript)
+ finished_expand(application.master_secret[:],"res master",hash[:],local.resumption_master[:])
+ local.early_accepted=quic_ee_has_early(messages[0])
+ if local.early_accepted&&!resumed {crypto.zero_explicit(raw_data(flight),len(flight));delete(flight,allocator);return {},nil,{kind=.Malformed}}
  return local,flight,{}
+}
+
+@(private)
+quic_ee_has_early :: proc(message:[]u8)->bool {
+ if len(message)<6 {return false};at:=6
+ for at+4<=len(message) {kind:=hello_u16(message,at);n:=int(hello_u16(message,at+2));at+=4;if n>len(message)-at {return false};if kind==42 {return n==0};at+=n};return false
 }
