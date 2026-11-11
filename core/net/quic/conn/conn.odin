@@ -112,6 +112,7 @@ Buf :: struct {
 	send_acked:                        [STREAM_BYTES]bool,
 	send_retry:                        [STREAM_BYTES]bool,
 	fin_acked, fin_retry, reset_retry: bool,
+ reset_acked:bool,
 	recv_base, recv_final:             u64,
 	recv_present:                      [STREAM_BYTES]bool,
 	send_limit:                        u64,
@@ -160,6 +161,7 @@ Connection :: struct {
 	noted_send:                                  bool,
 	noted_recv:                                  bool,
 	want_close:                                  bool,
+ close_application:bool,close_error:u64,
 	close_sent:                                  bool,
 	cancelled:                                   bool,
 	force_probe:                                 bool,
@@ -759,6 +761,7 @@ pump :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 	}
  if c.ecn.sender.state==.Testing&&now-c.ecn.started>=9*max(c.model.smoothed_rtt,i64(333)) {ecn.timeout(&c.ecn.sender)}
  early_tick(c,now)
+ if c.phase==.Failed {return 0,.Protocol}
  if early(c){return early_pump(c,now,dst)}
 	if c.want_close && !c.close_sent {
 		return send_close(c, now, dst)
@@ -1513,7 +1516,7 @@ send_ping_in :: proc(c: ^Connection, now: i64, dst: []u8, space: harness.Space) 
 @(private)
 send_close :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 	space := harness.Space.Initial
-	if c.model.handshake_confirmed {
+	if c.close_application||c.model.handshake_confirmed {
 		space = .Application
 	} else if c.model.handshake_armed {
 		space = .Handshake
@@ -1524,6 +1527,7 @@ send_close :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 	}
 	frame: [32]u8
 	at, ok := encode_close(frame[:], 0)
+ if c.close_application {frame[0]=0x1d;at,ok=put_varint(frame[:],1,c.close_error);if ok {at,ok=put_varint(frame[:],at,0)}}
 	if !ok {
 		return 0, .Protocol
 	}
@@ -1753,7 +1757,7 @@ seal_and_emit :: proc(
 
 @(private)
 send_header_len :: proc(c: ^Connection, space: harness.Space, pn_len, plain_len: int) -> int {
-	if space == .Application && c.model.handshake_confirmed {
+	if space == .Application && c.hs.have_one_rtt {
 		return 1 + c.peer_cid_len + pn_len
 	}
 	n, ok := long_header_len(c, space, pn_len, plain_len + 16)

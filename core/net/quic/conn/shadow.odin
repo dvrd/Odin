@@ -51,7 +51,7 @@ harness_natural :: proc(c: ^Connection, req: harness.Emit) -> (int, int, u64, bo
 	if req.space == .Initial && (c.model.role == .Client || eliciting) {
 		min_size = harness.K_MIN_INITIAL_DATAGRAM
 	}
-	if req.space == .Application && c.model.handshake_confirmed {
+	if req.space == .Application && (c.model.handshake_confirmed||req.connection_close) {
 		header := 1 + c.model.peer_cid_len + pn_len
 		natural := header + structured
 		if natural < min_size {

@@ -139,7 +139,7 @@ emit :: proc(m: ^Model, now: i64, dst: []u8, req: Emit) -> (int, Error) {
 	if req.zero_rtt && (m.role != .Client || req.space != .Application || m.handshake_confirmed) {
 		return 0, .Invalid_Input
 	}
-	if req.space == .Application && !m.handshake_confirmed && !req.zero_rtt {
+	if req.space == .Application && !m.handshake_confirmed && !req.zero_rtt && !req.connection_close {
 		return 0, .Invalid_Input
 	}
 	eliciting := ack_eliciting_emit(req)
@@ -241,7 +241,7 @@ emit :: proc(m: ^Model, now: i64, dst: []u8, req: Emit) -> (int, Error) {
 	body_len := structured
 	header := 0
 	target := req.bytes
-	if req.space == .Application && m.handshake_confirmed {
+	if req.space == .Application && (m.handshake_confirmed||req.connection_close) {
 		header = 1 + m.peer_cid_len + pn_len
 		if header > max(int) - body_len {
 			return 0, .Invalid_Input
@@ -314,7 +314,7 @@ emit :: proc(m: ^Model, now: i64, dst: []u8, req: Emit) -> (int, Error) {
 	wire: [K_MAX_DATAGRAM]u8
 	dcid := m.peer_cid[:m.peer_cid_len]
 	scid := m.local_cid[:m.local_cid_len]
-	if req.space == .Application && m.handshake_confirmed {
+	if req.space == .Application && (m.handshake_confirmed||req.connection_close) {
 		n, _, err := quic.short_header_encode_v1(wire[:], {
 			destination_id = dcid,
 			packet_number = u32(trunc),

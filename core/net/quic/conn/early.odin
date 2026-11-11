@@ -4,7 +4,7 @@ import "core:net"
 import quic ".."
 import "../harness"
 
-Early_State :: struct {active,confirmed,accepted,pumping:bool,first_pn,rejected_end:u64,original:[CID_CAP]u8,original_n:int,retire_at:i64}
+Early_State :: struct {active,confirmed,accepted,pumping:bool,first_pn,rejected_end:u64,original:[CID_CAP]u8,original_n:int,retire_at:i64,incoming,endpoint:net.Endpoint,controls:[EARLY_CONTROL_CAP]Early_Control,control_n:int}
 early :: proc(c:^Connection)->bool {return c!=nil&&c.initialized&&c.early_state.active&&!c.early_state.confirmed}
 // Copies only early keys; the wire TLS driver continues to own its independent
 // handshake. Provisional transport bytes/stream state move nowhere on confirm.
@@ -22,7 +22,7 @@ early_update_peer_id :: proc(c:^Connection,id:[]u8)->Error {
 }
 // accepted=false preserves client bytes for normal 1RTT retransmission at
 // the same STREAM offsets. Packet numbers never reset, including after Retry.
-confirm_early :: proc(c:^Connection,owner:^quic.Handshake,cfg:Adopt_Config,accepted:bool,now:i64)->Error {
+confirm_early :: proc(c:^Connection,owner:^quic.Handshake,cfg:Adopt_Config,accepted:bool,now:i64,endpoint:net.Endpoint={})->Error {
  if !early(c)||owner==nil||owner.failed||!owner.have_one_rtt||!owner.handshake_complete||!owner.peer_authenticated||owner.role!=c.role||now<0 {return .Invalid}
  if len(cfg.local_cid)>CID_CAP||len(cfg.peer_cid)>CID_CAP||cfg.next_send_pn>=u64(1)<<62 {return .Invalid}
  if !accepted&&c.role==.Server {return .Invalid}
@@ -34,6 +34,7 @@ confirm_early :: proc(c:^Connection,owner:^quic.Handshake,cfg:Adopt_Config,accep
  early_read:=c.hs.zero_rtt_read
  quic.handshake_fail(&c.hs);c.hs=owner^;owner^={}
  if accepted&&c.role==.Server {c.hs.zero_rtt_read=early_read;c.hs.have_zero_rtt=true} else {crypto.zero_explicit(&early_read,size_of(early_read));quic.handshake_discard_zero_rtt(&c.hs)}
+ c.early_state.endpoint=endpoint;if endpoint.address==nil {c.early_state.endpoint=c.early_state.incoming}
  c.early_state.confirmed=true;c.early_state.accepted=accepted;c.early_state.retire_at=harness.early_key_discard_at(&c.model,now)
  c.authed=true;c.got_finished=true;c.finished_marked=true;c.server_keys=true;c.accepted=true;c.done_sent=c.role==.Client;c.seen_done=c.role==.Server||c.hs.handshake_discarded
  c.local_cid={};c.peer_cid={};copy(c.local_cid[:],cfg.local_cid);copy(c.peer_cid[:],cfg.peer_cid);c.local_cid_len=len(cfg.local_cid);c.peer_cid_len=len(cfg.peer_cid)
@@ -46,7 +47,10 @@ confirm_early :: proc(c:^Connection,owner:^quic.Handshake,cfg:Adopt_Config,accep
  return .None
 }
 @(private)
-early_tick :: proc(c:^Connection,now:i64) {if c.early_state.confirmed&&c.hs.have_zero_rtt&&now>=c.early_state.retire_at {quic.handshake_discard_zero_rtt(&c.hs)}}
+early_tick :: proc(c:^Connection,now:i64) {
+ if c.early_state.confirmed&&c.hs.have_zero_rtt&&now>=c.early_state.retire_at {quic.handshake_discard_zero_rtt(&c.hs)}
+ if e:=early_flush_control(c);e!=.None {fail(c,"early control")}
+}
 @(private)
 early_ack_valid :: proc(c:^Connection,p:Parsed)->bool {
  state:=c.early_state
@@ -79,7 +83,7 @@ early_seal_and_emit :: proc(c:^Connection,now:i64,dst:[]u8,request:harness.Emit,
 @(private)
 early_ingest :: proc(c:^Connection,now:i64,path:u32,datagram:[]u8)->Error {
  if c.role!=.Server||!c.hs.have_zero_rtt||c.early_state.confirmed&&!c.early_state.accepted {return .Discarded}
- early_tick(c,now);if !c.hs.have_zero_rtt {return .Discarded}
+ early_tick(c,now);if c.phase==.Failed {return .Protocol};if !c.hs.have_zero_rtt {return .Discarded}
  view,size,e:=quic.packet_decode_v1(datagram,c.local_cid_len);if e!=.None||view.kind!=.Zero_RTT||size!=len(datagram)||size>MAX_DATAGRAM {c.reason="early packet shape";return .Discarded}
  destination:=view.invariant.destination_id
  if !accepts_destination_id(c,destination)&&string(destination)!=string(c.early_state.original[:c.early_state.original_n]) {c.reason="early destination";return .Discarded}
@@ -89,16 +93,17 @@ early_ingest :: proc(c:^Connection,now:i64,path:u32,datagram:[]u8)->Error {
  fields,fe:=quic.unprotected_fields_decode(decoded,packet[:size]);if fe!=.None {return .Discarded}
  sp:=c.model.spaces[2];full,valid:=harness.pn_decode(sp.has_largest_recv,sp.largest_recv,u64(fields.packet_number),fields.packet_number_length*8);if !valid {return .Discarded}
  header:=fields_header_end(packet[:size],c.local_cid_len);if header<=0||header>=size {return .Discarded}
- plain:[MAX_DATAGRAM]u8;n,oe:=quic.handshake_zero_rtt_payload_open(&c.hs,plain[:],packet[:header],packet[header:size],full);if oe!=.None {c.reason="early decrypt";return .Discarded}
- parsed,ok:=parse_frames(plain[:n]);if !ok||parsed.new_token||parsed.ack||parsed.crypto||parsed.handshake_done||parsed.retire_id_n>0||parsed.path_n>0 {fail(c,"0RTT frame");return .Protocol}
+ plain:[MAX_DATAGRAM]u8;n,oe:=quic.handshake_zero_rtt_payload_open(&c.hs,plain[:],packet[:header],packet[header:size],full);if oe==.Invalid_Header {fail(c,"early reserved bits");return .Protocol};if oe!=.None {c.reason="early decrypt";return .Discarded}
+ parsed,ok:=parse_frames(plain[:n]);for i in 0..<parsed.path_n {if parsed.paths[i].response {ok=false}}
+ if n==0||!ok||parsed.new_token||parsed.ack||parsed.crypto||parsed.handshake_done {fail(c,"0RTT frame");return .Protocol}
  duplicate:=already_received(sp,full)
  for i in 0..<parsed.stream_n {stream:=parsed.streams[i];if !stream_fits_recv(c,{stream_id=stream.id,stream_off=stream.offset,stream_data=stream.data}) {return .Capacity}}
- req:=shadow_from_parsed(parsed);req.stream=false;req.reset=false;req.stop_sending=false;req.max_data=false;req.attach_ack=false;req.ping=true
+ req:=shadow_from_parsed(parsed);req.stream=false;req.reset=false;req.stop_sending=false;req.max_data=false;req.attach_ack=false;req.ping=parsed.ping||parsed.control_eliciting||parsed.stream||parsed.reset||parsed.stop||parsed.max_data||parsed.max_stream_data||parsed.max_streams_bidi||parsed.max_streams_uni
  shadow:[MAX_DATAGRAM]u8
  if !shadow_packet(c,shadow[:size],.Application,fields.packet_number_length,u64(fields.packet_number),req,0) {return .Protocol}
  model_path:=path;if c.migration.enabled {model_path=c.model.path}
  if re:=harness.receive(&c.model,now,model_path,shadow[:size]);re!=.None {return map_harness(re)}
- if !duplicate {ecn_received(c,2);if re:=apply_parsed(c,.One_RTT,parsed);re!=.None {return re};quic.handshake_note_authenticated_pn(&c.hs,.One_RTT,full)}
+ if !duplicate {if re:=early_defer_control(c,parsed,destination);re!=.None {fail(c,"early control capacity");return re};ecn_received(c,2);payload:=parsed;payload.path_challenge=false;if re:=apply_parsed(c,.One_RTT,payload);re!=.None {return re};quic.handshake_note_authenticated_pn(&c.hs,.One_RTT,full)}
  return .None
 }
 
@@ -106,6 +111,7 @@ early_ingest :: proc(c:^Connection,now:i64,path:u32,datagram:[]u8)->Error {
 // validates or switches a path; late packets use the already validated endpoint.
 ingest_early_ecn :: proc(c:^Connection,now:i64,from:net.Endpoint,datagram:[]u8,mark:net.ECN_Codepoint,valid:bool)->Error {
  if c==nil {return .Invalid}
+ c.early_state.incoming=from
  if c.migration.enabled {
   if from!=c.migration.paths[c.migration.active].endpoint {return .Discarded}
   return ingest_from_ecn(c,now,from,datagram,mark,valid)

@@ -48,7 +48,18 @@ Timer/congestion progress continues during the TLS handshake. Servers never emit
 0RTT ACKs. Reordered accepted packets remain readable for a bounded three-PTO
 key-retention interval; authenticated duplicates are not redelivered. Early
 packets cannot migrate/validate a path. Forbidden ACK/CRYPTO/HANDSHAKE_DONE/
-NEW_TOKEN/RETIRE_CONNECTION_ID/PATH_RESPONSE frames fail before application effects.
+NEW_TOKEN/PATH_RESPONSE frames fail before application effects. Nonempty padding
+is permitted without eliciting an ACK. Authenticated reserved-bit violations fail
+the connection; unauthenticated corrupt packets are discarded. NEW_CONNECTION_ID,
+RETIRE_CONNECTION_ID and PATH_CHALLENGE are held in64 owned records until
+Finished and authenticated transport-parameter admission. CID lifecycle checks
+then run against the actual issued IDs and containing packet destination. Path
+responses use only the admitted original endpoint; early frames never create or
+promote a path. Multiple challenges remain queued until prior responses drain. Zero-length peer
+CIDs still admit the nonzero local CID lifecycle and normal1RTT traffic; zero-length
+local CIDs never issue new IDs. That local zero-CID profile demultiplexes by the
+admitted endpoint tuple and does not learn a different endpoint. Path challenges
+still receive responses after confirmation, including when migration is unused.
 
 Owned finite limits remain explicit:192-byte authenticated profile,128-byte H3
 profile,4096-byte tickets/eight client cache slots, configured anti-replay slots,
@@ -60,11 +71,21 @@ Reproduction: tests/core/net/quic/zero_rtt.py builds a fresh paired native binar
 and runs published aioquic1.3.0 peers with trusted synthetic credentials. The
 matrix covers native HTTP3 and public Surf accepted/rejected/default behavior,
 normal Saba early policy/replayed ticket/deferred denial/nil default/mTLS identity,
-and Retry. Core packet tests additionally drop0RTT, force actual PTO, confirm or
+and Retry. Maximum4096-byte unknown opaque tickets exercise segmented Initial
+CRYPTO and full-handshake fallback, including Retry against both server bindings.
+One zero-CID peer case uses two explicit fixture settings for aioquic1.3.0:
+an independently selected eight-byte initial destination ID (its configuration
+otherwise also makes that ID empty), and suppression of additional zero-length
+CID issuance (forbidden by RFC9000). Its TLS, packet protection, parsing and
+streams remain the installed peer implementation; this is fixture-configured
+zero-CID evidence rather than an unmodified aioquic zero-CID claim. Core tests
+independently cover encrypted zero-CID CID retirement, forbidden issuance and
+normal1RTT traffic. Core packet tests additionally drop0RTT, force actual PTO, confirm or
 reject and verify duplicate suppression. This is distinct from independent wire
 proof. See SERVER_RESUMPTION.md for ticket ownership/rotation and CLIENT_AUTH.md
 for initial certificate authentication.
 
-Protocol references: [QUIC remembered parameters](https://www.rfc-editor.org/rfc/rfc9000.html#section-7.4.1),
+Protocol references: [QUIC CID issuance and zero-CID rules](https://www.rfc-editor.org/rfc/rfc9000.html#section-5.1.1),
+[QUIC remembered parameters](https://www.rfc-editor.org/rfc/rfc9000.html#section-7.4.1),
 [QUIC0RTT TLS rules](https://www.rfc-editor.org/rfc/rfc9001.html#section-4.6), and
 [HTTP3 remembered SETTINGS](https://www.rfc-editor.org/rfc/rfc9114.html#section-7.2.4.2).

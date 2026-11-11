@@ -229,7 +229,7 @@ mark_retry :: proc(c: ^Connection, t: Tx_Packet) {
 		}
 		if t.fin && !b.fin_acked {
 			b.fin_retry = true
-		}; if t.reset {
+		}; if t.reset && !b.reset_acked {
 			b.reset_retry = true
 		}
 	}
@@ -284,7 +284,9 @@ acknowledge_tx :: proc(c: ^Connection, p: Parsed) {
 				if t.fin {
 					b.fin_acked = true; b.fin_retry = false
 				}; if t.reset {
-					b.reset_retry = false
+					b.reset_retry = false;b.reset_acked=true;b.fin_acked=true;b.fin_retry=false
+                    idx:=int((uintptr(b)-uintptr(&c.bufs[0]))/size_of(Buf));for &value in c.send_mem[idx] {value=0}
+                    b.send_base=b.reset_final;b.n=0;b.sent=0;b.send_acked={};b.send_retry={}
 				}
 				_ = harness.stream_send_ack(&c.model, b.id, n, t.fin, t.reset); compact_send(c, b)
 			}
@@ -333,7 +335,7 @@ send_owned_stream :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, b
 		}
 		off, n := 0, 0; fin, reset := false, false
 		if b.reset {
-			if b.reset_sent && !b.reset_retry {
+			if b.reset_acked || b.reset_sent && !b.reset_retry {
 				continue
 			}; reset = true
 		} else {

@@ -36,7 +36,7 @@ server :: proc(directory,scenario:string) {
  config:=saba.Server{handler=handler,handler_data=&state,control=&state.control,workers=2,port=0,http3={enabled=true,endpoint={net.IP4_Loopback,0},credentials=identity,tickets=&tickets,early_request_policy=early_policy,early_request_data=&state}}
  if scenario=="default" {config.http3.early_request_policy=nil}
  retry:quic.Retry_Tokens;defer quic.retry_tokens_destroy(&retry)
- if scenario=="retry" {secret:[32]u8;crypto.rand_bytes(secret[:]);assert(quic.retry_tokens_init(&retry,secret[:],1,60,time.to_unix_seconds(time.now()))==.None);crypto.zero_explicit(&secret,size_of(secret));config.http3.retry=&retry}
+ if (scenario=="retry"||scenario=="large-retry") {secret:[32]u8;crypto.rand_bytes(secret[:]);assert(quic.retry_tokens_init(&retry,secret[:],1,60,time.to_unix_seconds(time.now()))==.None);crypto.zero_explicit(&secret,size_of(secret));config.http3.retry=&retry}
  roots:tls.Root_Pool;defer tls.root_pool_destroy(&roots)
  auth:tls.Client_Auth_Config;tcp_tls:saba.TLS_Config
  if scenario=="mtls" {
@@ -52,7 +52,7 @@ server :: proc(directory,scenario:string) {
  until=time.tick_add(time.tick_now(),20*time.Second);for sync.atomic_load(&state.calls)<state.expected&&time.tick_diff(time.tick_now(),until)>0 {thread.yield()}
  assert(saba.drain_server(&state.control,time.Second));thread.join(worker);thread.destroy(worker)
  fmt.printf("RESULT calls=%d early=%d normal=%d\n",state.calls,state.early_calls,state.normal_calls)
- assert(state.calls==state.expected);if scenario=="accepted"||scenario=="replay"||scenario=="retry"||scenario=="mtls" {assert(state.early_calls==1)} else {assert(state.early_calls==0)}
+ assert(state.calls==state.expected);if scenario=="accepted"||scenario=="replay"||scenario=="retry"||scenario=="mtls"||scenario=="zero" {assert(state.early_calls==1)} else {assert(state.early_calls==0)}
  stats,stats_error:=store.stats(identity);assert(stats_error.kind==.None&&stats.active_leases==0)
 }
 sha256_leaf :: proc(bytes:[]u8)->(out:[32]u8) {hash:sha2.Context_256;sha2.init_256(&hash);sha2.update(&hash,bytes);sha2.final(&hash,out[:]);return}
@@ -80,7 +80,10 @@ main :: proc() {
   result:=http3.pool_exchange_request(&pool,address,"localhost",request,roots.roots[:roots.count],time.time_add(time.now(),8*time.Second))
   fmt.printf("RESULT %d error=%v reason=%s resumed=%v sentearly=%v accepted=%v status=%d\n",i,result.error,string(result.reason[:result.reason_len]),result.resumed,result.early_sent,result.early_accepted,result.status)
   assert(result.error==.None&&result.status==200&&string(result.body[:result.body_len])=="OK")
-  if i==0 {assert(!result.resumed);assert(tls.session_cache_lookup(&cache,"localhost",time.now())!=nil)} else {assert(result.early_sent);assert(result.resumed==(scenario!="reject"));assert(result.early_accepted==(scenario!="reject"))}
+  if i==0 {
+   assert(!result.resumed);saved:=tls.session_cache_lookup(&cache,"localhost",time.now());assert(saved!=nil)
+   if scenario=="large"||scenario=="large-retry" {saved.ticket_len=tls.SESSION_TICKET_MAX;for &b in saved.ticket {b=0x55}}
+  } else {expected:=scenario!="reject"&&scenario!="large"&&scenario!="large-retry";assert(result.early_sent);assert(result.resumed==expected);assert(result.early_accepted==expected)}
   http3.pool_close(&pool)
  }
 }

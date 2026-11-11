@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Independent aioquic1.3.0 HTTP3 full/resumed/0RTT peer; trusted synthetic CA."""
-import argparse, asyncio
+import argparse, asyncio, os
 from aioquic.asyncio import connect,serve
 from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.h3.connection import H3Connection
@@ -11,6 +11,14 @@ from aioquic.quic.events import HandshakeCompleted
 class Peer(QuicConnectionProtocol):
  def __init__(self,*a,**kw):
   super().__init__(*a,**kw);self.http=H3Connection(self._quic);self.server=not self._quic.configuration.is_client;self.queues={};self.handshake=None;self.handshake_event=asyncio.Event();self.requests=0;self.early_requests=0
+  if not self.server and self._quic.configuration.connection_id_length==0:
+   # aioquic couples local CID length to its initial peer destination length.
+   # RFC9000 requires >=8 initial destination bytes even with a zero local CID.
+   original=os.urandom(8);self._quic._peer_cid.cid=original;self._quic._original_destination_connection_id=original
+   # aioquic1.3 also replenishes zero-length IDs, which RFC9000 forbids.
+   # This fixture-only configuration suppresses that unsupported issuance;
+   # TLS, packet protection, parsing and all stream processing remain aioquic.
+   self._quic._replenish_connection_ids=lambda:None
  def quic_event_received(self,event):
   if isinstance(event,HandshakeCompleted):self.handshake=event;self.handshake_event.set()
   for e in self.http.handle_event(event):
@@ -35,13 +43,14 @@ class Peer(QuicConnectionProtocol):
 
 async def main(args):
  cfg=QuicConfiguration(is_client=args.mode=='client',alpn_protocols=['h3']);cfg.load_verify_locations(args.fixtures+'/root.pem');cfg.server_name='localhost'
+ if args.scenario=='zero':cfg.connection_id_length=0
  if args.scenario=='mtls':cfg.load_cert_chain(args.fixtures+'/client.pem',args.fixtures+'/client-key.pem')
  if args.mode=='server':
   cfg.load_cert_chain(args.fixtures+'/server.pem',args.fixtures+'/server-key.pem');tickets={};peers=[]
   def factory(*a,**kw):p=Peer(*a,**kw);peers.append(p);return p
   def store(ticket):tickets[ticket.ticket]=ticket
   def fetch(label):return None if args.scenario=='reject' else tickets.get(label)
-  server=await serve('127.0.0.1',0,configuration=cfg,create_protocol=factory,session_ticket_handler=store,session_ticket_fetcher=fetch,retry=args.scenario=='retry')
+  server=await serve('127.0.0.1',0,configuration=cfg,create_protocol=factory,session_ticket_handler=store,session_ticket_fetcher=fetch,retry=args.scenario in ('retry','large-retry'))
   print('READY 127.0.0.1:'+str(server._transport.get_extra_info('sockname')[1]),flush=True)
   until=asyncio.get_running_loop().time()+20
   while sum(p.requests for p in peers)<2 and asyncio.get_running_loop().time()<until:await asyncio.sleep(.01)
@@ -49,7 +58,7 @@ async def main(args):
   assert sum(p.requests for p in peers)==2
   assert len(peers)==2
   assert not peers[0].handshake.session_resumed
-  assert peers[1].handshake.session_resumed==(args.scenario!='reject')
+  assert peers[1].handshake.session_resumed==(args.scenario not in ('reject','large','large-retry'))
   assert peers[1].handshake.early_data_accepted==(args.scenario in ('accepted','retry'))
   assert sum(p.early_requests for p in peers)==(1 if args.scenario in ('accepted','retry') else 0)
   print('PASS aioquic-server',args.scenario,flush=True);return
@@ -69,4 +78,4 @@ async def main(args):
  print('PASS aioquic-client',args.scenario,flush=True)
 
 if __name__=='__main__':
- parser=argparse.ArgumentParser();parser.add_argument('mode',choices=['server','client']);parser.add_argument('--fixtures',required=True);parser.add_argument('--port',type=int,default=0);parser.add_argument('--scenario',default='accepted',choices=['accepted','reject','replay','deny','default','retry','mtls']);asyncio.run(main(parser.parse_args()))
+ parser=argparse.ArgumentParser();parser.add_argument('mode',choices=['server','client']);parser.add_argument('--fixtures',required=True);parser.add_argument('--port',type=int,default=0);parser.add_argument('--scenario',default='accepted',choices=['accepted','reject','replay','deny','default','retry','mtls','large','large-retry','zero']);asyncio.run(main(parser.parse_args()))

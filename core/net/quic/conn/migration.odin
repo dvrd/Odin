@@ -48,7 +48,8 @@ Migration :: struct {
 }
 
 // Enable only after peer transport parameters have been authenticated. Arrays
-// and reset tokens remain connection-owned. A zero-length CID cannot migrate.
+// and reset tokens remain connection-owned. Zero-length local CIDs use the
+// admitted endpoint tuple; nonzero local IDs still support peer rebinding.
 migration_enable :: proc(
 	c: ^Connection,
 	peer: net.Endpoint,
@@ -64,13 +65,12 @@ migration_enable :: proc(
 	if c.migration.enabled ||
 	   peer.address == nil ||
 	   peer_cid_limit < 2 ||
-	   c.local_cid_len == 0 ||
-	   c.peer_cid_len == 0 ||
 	   (len(initial_reset_token) != 0 && len(initial_reset_token) != 16) ||
-	   (len(peer_reset_token) != 0 && len(peer_reset_token) != 16) {
+	   (len(peer_reset_token) != 0 && len(peer_reset_token) != 16) ||
+       c.local_cid_len==0&&len(initial_reset_token)>0 || c.peer_cid_len==0&&len(peer_reset_token)>0 {
 		return .Invalid
 	}
-	m := &c.migration; m.reset_secrets=reset_secrets; m.enabled = true; m.peer_disables = peer_disables_migration
+	m := &c.migration; m.reset_secrets=reset_secrets; m.enabled = true; m.peer_disables = peer_disables_migration||c.peer_cid_len==0||c.local_cid_len==0
 	m.peer_limit = min(peer_cid_limit, u64(CID_SLOTS)); m.local_next = 1
 	m.local[0] = CID_Entry {
 		used = true,
@@ -87,7 +87,7 @@ migration_enable :: proc(
 	if len(peer_reset_token) == 16 {
 		copy(m.peer[0].token[:], peer_reset_token); m.peer[0].has_token = true
 	}
- if reset_secrets!=nil {
+ if reset_secrets!=nil&&c.local_cid_len>0 {
   lease,e:=quic.reset_cid_acquire(reset_secrets,c.local_cid[:c.local_cid_len],reset_now());if e!=.None{return .Invalid}
   m.local[0].reset_lease=lease;m.local[0].token=lease.token;m.local[0].has_token=true
  }
@@ -97,7 +97,9 @@ migration_enable :: proc(
 		endpoint  = peer,
 	}
 	c.model.has_path = true; c.model.path = 1; c.model.address_validated = true
-	return replenish_ids(c)
+	if e:=replenish_ids(c);e!=.None {return e}
+ if e:=early_flush_control(c);e!=.None {fail(c,"early control");return e}
+ return .None
 }
 
 accepts_destination_id :: proc(c: ^Connection, id: []u8) -> bool {
@@ -132,6 +134,7 @@ peer_reset_tokens :: proc(c: ^Connection, dst: [][16]u8) -> int {
 
 @(private)
 replenish_ids :: proc(c: ^Connection) -> Error {
+ if c.local_cid_len==0 {return .None}
 	m := &c.migration; count := 0
 	for &entry in m.local {
 		if entry.used {
@@ -224,6 +227,7 @@ apply_ids :: proc(c: ^Connection, p: Parsed, destination_id: []u8) -> Error {
 	if !m.enabled {
 		return .None
 	}
+ if p.new_id_n>0&&c.peer_cid_len==0||p.retire_id_n>0&&c.local_cid_len==0 {return .Protocol}
 	for i in 0 ..< p.new_id_n {
 		f := p.new_ids[i]
 		if f.retire_prior_to > f.sequence {
@@ -434,6 +438,7 @@ ingest_from :: proc(c: ^Connection, now: i64, from: net.Endpoint, datagram: []u8
 	if c == nil || !c.migration.enabled || from.address == nil {
 		return .Invalid
 	}
+	if c.local_cid_len==0&&from!=c.migration.paths[c.migration.active].endpoint {return .Discarded}
 	index := path_index(c, from); fresh := index < 0
 	if fresh {
 		index = candidate_slot(c)

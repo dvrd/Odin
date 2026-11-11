@@ -27,14 +27,15 @@ def main():
         with tempfile.TemporaryDirectory(prefix='webtools-zero-rtt-') as temp:
             native=Path(temp)/'native'
             run([args.odin,'build',source,'-vet','-warnings-as-errors','-collection:shared='+str(shared),'-out:'+str(native)]+(['-sanitize:'+args.sanitize] if args.sanitize else []),120)
-            for scenario in ['accepted','reject','retry']:
+            for scenario in ['accepted','reject','retry','large','large-retry']:
                 pair([args.python,source/'peer.py','server','--fixtures',fixtures,'--scenario',scenario],lambda address:run([native,fixtures,address,scenario]),'nativeHTTP3/aioquic/'+scenario)
             for scenario in ['accepted','reject','default']:
                 pair([args.python,source/'peer.py','server','--fixtures',fixtures,'--scenario',scenario],lambda address:run([native,fixtures,address,'surf-'+scenario]),'Surf/aioquic/'+scenario)
-            for scenario in ['accepted','replay','deny','default','mtls']:
+            for scenario in ['accepted','replay','deny','default','mtls','zero']:
                 pair([native,fixtures,'server',scenario],lambda address:run([args.python,source/'peer.py','client','--fixtures',fixtures,'--port',address.rsplit(':',1)[1],'--scenario',scenario]),'aioquic/Saba/'+scenario)
-            pair([native,fixtures,'server','retry'],lambda address:run([native,fixtures,address,'retry']),'nativeHTTP3/Saba/retry')
-            assert len(report['cases'])==12
+            for scenario in ['retry','large','large-retry']:
+                pair([native,fixtures,'server',scenario],lambda address:run([native,fixtures,address,scenario]),'nativeHTTP3/Saba/'+scenario)
+            assert len(report['cases'])==17
             report['source_unchanged']=before==manifest();assert report['source_unchanged'],'source changed during wire matrix';report['source_sha256']=before;report['passed']=True
     finally:args.report.write_text(json.dumps(report,indent=2)+'\n')
     print(json.dumps({'passed':report['passed'],'cases':len(report['cases']),'report':str(args.report)}))
