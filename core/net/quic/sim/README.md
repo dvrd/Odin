@@ -42,16 +42,24 @@ and clock; `destroy` also clears the link. Neither securely erases packet bytes.
 All calls on one link require external serialization. Only nonnil initialized
 links may be passed to the `now`/`stats` inspection functions.
 
-Tests exercise real v1 header datagrams through a loss/retransmission/duplicate
-driver, timer ABA/foreign-owner cancellation, replayable reordering and address
-changes, capacity/alias/overflow boundaries, and 10,000 iterations with nil
-allocators and fixed storage. Fake payloads deliberately carry no authenticated
-QUIC meaning. These checks establish the test seam, not handshake/recovery,
-flow control, network interoperability or independent-platform correctness.
-The broader QUIC interoperability issue remains open until those components
-and external-peer gates exist.
+`inject_allocation_failure` rejects the next slot admission and leaves queues
+unchanged. Drops, invalid calls, and `step` do not consume that counter.
+`clear` keeps it. `destroy` drops it with the link. The link still never calls
+the allocator.
+
+Tests exercise real v1 header datagrams through loss, duplication, reordering,
+and address changes, plus timer ABA, capacity, and nil-allocator runs. Handshake
+levels, packet-number spaces, ACK/loss/PTO, flow control, congestion, and
+anti-amplification live in the separate harness model (`core:net/quic/harness`),
+which a test may host on this link. That model is not the production connection.
+Looping it back is not an independent peer. Linux remains an unsupported peer
+platform; `core/net/quic/harness/peer` skips that comparison and fails only when
+the local harness vectors fail.
 
 ```sh
 ./odin test core/net/quic/sim/tests -warnings-as-errors \
   -sanitize:address -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+./odin test core/net/quic/harness/tests -warnings-as-errors \
+  -sanitize:address -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+./odin run core/net/quic/harness/peer -warnings-as-errors -sanitize:address
 ```

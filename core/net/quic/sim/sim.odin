@@ -18,6 +18,8 @@ Error :: enum {
 	Destination_Undersized,
 	Overlap,
 	Exhausted,
+	// inject_allocation_failure rejected a slot admission. Queues are unchanged.
+	Allocation,
 }
 Packet_Slot :: struct {
 	active:              bool,
@@ -74,6 +76,9 @@ Link :: struct {
 	now:         Tick,
 	sequence:    u64,
 	stats:       Stats,
+	// Remaining admissions to reject. Drops, invalid calls, and delivery do not
+	// consume it. clear keeps the counter; destroy drops it with the link.
+	fail_allocations: int,
 }
 
 init :: proc(
@@ -118,6 +123,28 @@ init :: proc(
 		now         = start,
 	}
 	return .None
+}
+
+// The next count successful slot admissions fail with Allocation and change
+// nothing else. A duplicate send is one admission. count must be nonnegative.
+inject_allocation_failure :: proc(link: ^Link, count: int) -> Error {
+	if link == nil || !link.initialized || count < 0 {
+		return .Invalid_State
+	}
+	if count > max(int) - link.fail_allocations {
+		return .Exhausted
+	}
+	link.fail_allocations += count
+	return .None
+}
+
+@(private)
+reject_allocation :: proc(link: ^Link) -> bool {
+	if link.fail_allocations <= 0 {
+		return false
+	}
+	link.fail_allocations -= 1
+	return true
 }
 
 now :: proc(link: ^Link) -> Tick {return link.now}
@@ -165,6 +192,9 @@ send :: proc(link: ^Link, source, destination: Address, payload: []u8, plan: Pla
 	if plan.drop {
 		return .None
 	}
+	if reject_allocation(link) {
+		return .Allocation
+	}
 	count := 1
 	if plan.duplicate {
 		count = 2
@@ -210,6 +240,9 @@ schedule :: proc(link: ^Link, peer: u32, at: Tick, tag: u64 = 0) -> (Timer, Erro
 	}
 	if at < link.now {
 		return {}, .Invalid_Time
+	}
+	if reject_allocation(link) {
+		return {}, .Allocation
 	}
 	if link.sequence == max(u64) {
 		return {}, .Exhausted

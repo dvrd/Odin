@@ -34,15 +34,31 @@ No existing exported procedure signature changes. New configuration/state fields
 are appended, preserving zero/named aggregates; use named fields when updating
 positional aggregates.
 
-## HTTP and transport policy
+## HTTP and transport policy (OKAMI-97)
 
-Core TLS treats names as opaque. The current Surf driver implements HTTP/1 only:
-it rejects every configured offer except `http/1.1` before DNS, socket or upload
-source I/O, including when the request itself uses cleartext HTTP. Surf sends no
-implicit `h2`/`h3` offer. Missing ALPN retains HTTP/1 fallback. Negotiating an `h2`
-token in a TLS fixture does not implement HTTP/2. HTTP/3's `h3` binding belongs to
-QUIC, and is not offered automatically over TCP. Server-side selection and QUIC
-integration remain separate work; parent OKAMI-97 is not complete.
+Core TLS still treats names as opaque bytes. The handshake codec and
+certificate path are unchanged. A selection is exposed only after hostname and
+certificate verification. No-overlap, malformed, duplicate and unsolicited
+selections stay fatal. Empty offers still omit the extension.
+
+`alpn_transport_offers` is the binding. It does no socket I/O and no handshake.
+
+- TCP may offer nothing, `http/1.1`, and `h2`. Nothing means HTTP/1 fallback.
+  There is no implicit `h2` or `h3`. Any other name, including `h3`, is
+  `Invalid_ALPN`. Surf applies this before DNS, sockets or upload reads,
+  including cleartext HTTP. Surf still speaks HTTP/1; an accepted `h2` token
+  is not an HTTP/2 driver.
+- QUIC may offer only the single opaque name `h3`. An empty list is not an
+  implicit HTTP/3 offer. A duplicated `h3` is rejected. This predicate has no
+  TCP record entry point and no QUIC packet driver.
+
+`dial` rejects `h3` before `net.dial_tcp`. `client` and `async_client` reject
+it before any record write. Other opaque names remain available on that generic
+client, including the existing no-overlap fixture. The recordless server
+selector (OKAMI-156) stays opaque and is not this binding.
+
+Offering or negotiating `h2` or `h3` does not implement HTTP/2 or HTTP/3.
+Those remain OKAMI-102 and OKAMI-98/99. Authentication is not relaxed.
 
 ## Storage and verification
 

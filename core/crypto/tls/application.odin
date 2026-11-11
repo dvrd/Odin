@@ -55,9 +55,16 @@ Application_State :: struct {
 	peer_closed:                                  bool,
 	key_update_pending:                           bool,
 	failure:                                      IO_Error,
+	resumption_secret:                            [32]u8,
+	have_resumption:                              bool,
 }
 
-application_init :: proc(state: ^Application_State, secrets: Application_Secrets) {
+application_init :: proc(
+	state: ^Application_State,
+	secrets: Application_Secrets,
+	resumption_master: [32]u8 = {},
+	remember: bool = false,
+) {
 	if state == nil do return
 
 	application_clear(state)
@@ -65,6 +72,10 @@ application_init :: proc(state: ^Application_State, secrets: Application_Secrets
 	record_protection_init(&state.receive, secrets.server_key, secrets.server_iv)
 	state.client_traffic_secret = secrets.client_traffic_secret
 	state.server_traffic_secret = secrets.server_traffic_secret
+	if remember {
+		state.resumption_secret = resumption_master
+		state.have_resumption = true
+	}
 	state.initialized = true
 }
 
@@ -81,6 +92,8 @@ read :: proc(conn: ^Conn, dst: []u8) -> (received: int, error: IO_Error) {
 	if err := application_ensure(conn); err.kind != .None {
 		return 0, err
 	}
+
+	if conn.tls12.negotiated do return tls12_application_read(conn, dst)
 
 	if len(dst) == 0 do return 0, {}
 
@@ -155,6 +168,7 @@ write :: proc(conn: ^Conn, src: []u8) -> (written: int, error: IO_Error) {
 	if err := application_ensure(conn); err.kind != .None {
 		return 0, err
 	}
+	if conn.tls12.negotiated do return tls12_application_write(conn, src)
 
 	for written < len(src) {
 		// Reserve the final allowed old-key record for KeyUpdate itself.
@@ -189,7 +203,11 @@ close :: proc(conn: ^Conn) -> IO_Error {
 	err: IO_Error
 	if conn.phase == .Established && conn.application.initialized {
 		alert := [?]u8{1, 0}
-		err = application_record_write(conn, .Alert, alert[:])
+		if conn.tls12.negotiated {
+			err = tls12_application_close_notify(conn)
+		} else {
+			err = application_record_write(conn, .Alert, alert[:])
+		}
 	}
 
 	conn.phase = .Closed
@@ -372,6 +390,9 @@ application_post_message :: proc(conn: ^Conn, message: []u8, record_ended: bool)
 		}
 	} else if !application_ticket_valid(message[4:]) {
 		return {kind = .Invalid_Post_Handshake}
+	} else if conn.config.remember_tickets && state.have_resumption {
+		// Storage failure keeps the previous session. Default 0-RTT stays off.
+		resumption_remember_ticket(conn, message)
 	}
 
 	return {}
@@ -422,8 +443,8 @@ application_rotate_send_key :: proc(conn: ^Conn) {
 	record_protection_init(&conn.application.send, key, iv)
 }
 
-// Parse and discard tickets: resumption/0-RTT were not offered. Validate all
-// nested vectors and extension uniqueness without trusting peer-sized lengths.
+// Validate every nested vector. Tickets are stored only by session_remember.
+// early_data is checked for shape here and never becomes a key.
 application_ticket_valid :: proc(body: []u8) -> bool {
 	if len(body) < 13 do return false
 

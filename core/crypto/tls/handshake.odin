@@ -30,6 +30,7 @@ Handshake_Error_Kind :: enum {
 	Deadline_Failed,
 	Allocation_Failed,
 	Invalid_ALPN,
+	Early_Data_Disabled,
 }
 
 Handshake_Error :: struct {
@@ -48,8 +49,9 @@ Handshake_Error :: struct {
 
 // Authenticate the server, verify Finished, then send our Finished before
 // allowing application bytes. Repeated successful calls perform no I/O.
-// This blocking client currently supports certificate authentication without
-// client certificates, PSKs or early data.
+// Certificate authentication is unchanged. An offered session may resume with
+// psk_dhe_ke. Early data is refused unless Config.early_data is set. That
+// policy is not installed as 0-RTT keys on this path.
 handshake :: proc(conn: ^Conn) -> Handshake_Error {
 	return handshake_until_internal(conn, {})
 }
@@ -101,6 +103,9 @@ handshake_until_internal :: proc(conn: ^Conn, deadline: time.Time) -> Handshake_
 	if error := handshake_until_check(conn, deadline); error.kind != .None {return error}
 	if hello_error := handshake_hello_exchange(conn); hello_error.kind != .None {
 		return hello_error
+	}
+	if conn.tls12.negotiated {
+		return tls12_client_establish(conn)
 	}
 	// A stable bounded allocation keeps borrowed DER valid while parsing and
 	// verifying the entire certificate chain. It is released before returning.
@@ -183,6 +188,10 @@ handshake_hello_exchange :: proc(conn: ^Conn) -> Handshake_Error {
 		}
 	}
 
+	if conn.tls12.negotiated {
+		return {}
+	}
+
 	if err := client_handshake_keys_init(conn); err.kind != .None {
 		return handshake_fail(conn, {kind = .Key_Derivation_Failed, keys = err})
 	}
@@ -231,17 +240,39 @@ handshake_server_flight_verify :: proc(conn: ^Conn, flight: []u8) -> ([32]u8, Ha
 		return {}, handshake_fail(conn, message_err)
 	}
 
-	selected, extension_error := encrypted_extensions_decode(encrypted_extensions, conn.config.server_name, conn.config.alpn_protocols)
+	allow_early := conn.early_offered && conn.config.early_data != nil && conn.config.early_data.allow != nil
+	selected, early_accepted, extension_error := encrypted_extensions_decode(
+		encrypted_extensions,
+		conn.config.server_name,
+		conn.config.alpn_protocols,
+		allow_early,
+	)
 	if extension_error.kind != .None {return {},handshake_fail(conn,extension_error)}
 
 	transcript_update(&transcript, encrypted_extensions)
-	if cert_error := handshake_flight_certificates_verify(conn, flight, &at, &transcript); cert_error.kind != .None do return {}, cert_error
+	// Abbreviate only when the PSK is still bound to this hostname and the peer
+	// omitted certificates. A certificate still takes the existing checks.
+	// Finished-only is not accepted for a full handshake.
+	bound_session := conn.offered_session
+	if bound_session == nil {
+		bound_session = conn.config.session
+	}
+	abbreviate := conn.psk_selected && session_offerable(bound_session, conn.config.server_name, time.now())
+	if !(abbreviate && at < len(flight) && flight[at] == u8(Handshake_Type.Finished)) {
+		if cert_error := handshake_flight_certificates_verify(conn, flight, &at, &transcript); cert_error.kind != .None do return {}, cert_error
+	}
 	hash, finished_error := handshake_flight_finished_verify(conn, flight, &at, &transcript)
 	if finished_error.kind != .None {return {},finished_error}
 	// The flight buffer is released by the async driver before Finished is sent.
 	// Retain a bounded owned copy, still hidden until authentication completes.
 	copy(conn.alpn_selected[:],selected)
 	conn.alpn_selected_size=len(selected)
+	conn.server_finished_transcript = transcript
+	conn.have_server_finished_transcript = true
+	if conn.early_offered {
+		conn.early_accepted = early_accepted
+		conn.early_rejected = !early_accepted
+	}
 	return hash,{}
 }
 
@@ -393,7 +424,8 @@ handshake_application_activate :: proc(
 		}
 	}
 
-	application_init(&conn.application, secrets)
+	resumption_capture(conn, secrets.master_secret)
+	application_init(&conn.application, secrets, conn.resumption_master, conn.have_resumption_master)
 	handshake_keys_clear(conn)
 	conn.phase = .Established
 	conn.handshake_complete = true
@@ -408,6 +440,11 @@ handshake_fail :: proc(conn: ^Conn, err: Handshake_Error) -> Handshake_Error {
 	conn.phase = .Failed
 	alpn_clear(conn)
 	conn.handshake_error = err
+	conn.offered_session = nil
+	conn.early_offered = false
+	conn.early_accepted = false
+	conn.early_rejected = false
+	conn.early_effect_done = false
 	handshake_keys_clear(conn)
 	application_clear(&conn.application)
 	return err
@@ -447,64 +484,81 @@ handshake_next_message :: proc(
 // Legacy no-ALPN validation keeps its exported signature and rejects unsolicited
 // protocol selections. The shared decoder also handles configured offers.
 encrypted_extensions_validate :: proc(message: []u8, server_name: string) -> Handshake_Error {
-	_, error := encrypted_extensions_decode(message,server_name,nil)
+	_, _, error := encrypted_extensions_decode(message, server_name, nil, false)
 	return error
 }
 
 @(private)
-encrypted_extensions_decode :: proc(message: []u8, server_name: string, offers: []string) -> (selected: []u8, error: Handshake_Error) {
+encrypted_extensions_decode :: proc(
+	message: []u8,
+	server_name: string,
+	offers: []string,
+	allow_early: bool,
+) -> (
+	selected: []u8,
+	early_accepted: bool,
+	error: Handshake_Error,
+) {
 	if len(message) < 6 {
-		return nil,{kind = .Malformed_Message}
+		return nil, false, {kind = .Malformed_Message}
 	}
 
 	extensions_size := cast(int)message[4] << 8 | cast(int)message[5]
 	if extensions_size != len(message) - 6 {
-		return nil,{kind = .Malformed_Message}
+		return nil, false, {kind = .Malformed_Message}
 	}
 
 	at := 6
-	name_seen, groups_seen, alpn_seen: bool
+	name_seen, groups_seen, alpn_seen, early_seen: bool
 	for at < len(message) {
 		if len(message) - at < 4 {
-			return nil,{kind = .Malformed_Message}
+			return nil, false, {kind = .Malformed_Message}
 		}
 
 		kind := cast(u16)message[at] << 8 | cast(u16)message[at + 1]
 		size := cast(int)message[at + 2] << 8 | cast(int)message[at + 3]
 		at += 4
 		if size > len(message) - at {
-			return nil,{kind = .Malformed_Message}
+			return nil, false, {kind = .Malformed_Message}
 		}
 
 		switch kind {
 		case cast(u16)Extension_Type.Server_Name:
 			if name_seen || size != 0 || !handshake_sni_offered(server_name) {
-				return nil,{kind = .Malformed_Message}
+				return nil, false, {kind = .Malformed_Message}
 			}
 
 			name_seen = true
 		case cast(u16)Extension_Type.Supported_Groups:
 			if groups_seen || size < 4 || size % 2 != 0 {
-				return nil,{kind = .Malformed_Message}
+				return nil, false, {kind = .Malformed_Message}
 			}
 
 			list_size := cast(int)message[at] << 8 | cast(int)message[at + 1]
 			if list_size != size - 2 {
-				return nil,{kind = .Malformed_Message}
+				return nil, false, {kind = .Malformed_Message}
 			}
 
 			groups_seen = true
 		case cast(u16)Extension_Type.Application_Layer_Protocol_Negotiation:
-			if alpn_seen {return nil,{kind=.Malformed_Message}}
-			alpn_seen=true
-			selected, error = alpn_selection_decode(message[at:at+size],offers)
-			if error.kind != .None {return nil,error}
+			if alpn_seen {return nil, false, {kind = .Malformed_Message}}
+			alpn_seen = true
+			selected, error = alpn_selection_decode(message[at:at + size], offers)
+			if error.kind != .None {return nil, false, error}
+		case 42:
+			if early_seen || size != 0 {
+				return nil, false, {kind = .Malformed_Message}
+			}
+			early_seen = true
+			if !allow_early {
+				return nil, false, {kind = .Early_Data_Disabled}
+			}
 		case:
-			return nil,{kind = .Unsupported_Extension}
+			return nil, false, {kind = .Unsupported_Extension}
 		}
 		at += size
 	}
-	return selected,{}
+	return selected, early_seen, {}
 }
 
 // Initial ClientHello exchange
@@ -552,11 +606,34 @@ client_hello_prepare :: proc(conn: ^Conn) -> Client_Hello_Send_Error {
 		alpn_protocols = conn.config.alpn_protocols,
 	}
 	crypto.rand_bytes(hello.random[:])
+	conn.tls12.client_random = hello.random
 	crypto.rand_bytes(conn.x25519_private_key[:])
 	x25519.scalarmult_basepoint(hello.x25519_public_key[:], conn.x25519_private_key[:])
-	size, encode_err := client_hello_encode(conn.client_hello[:], hello)
+	// One flight offers TLS 1.3 and the two TLS 1.2 AES-GCM suites. The
+	// TLS 1.3-only encoder stays available for tests and is not this path.
+	conn.psk_offered = false
+	conn.psk_selected = false
+	conn.offered_session = nil
+	conn.early_offered = false
+	conn.early_accepted = false
+	conn.early_rejected = false
+	conn.early_effect_done = false
+	size, encode_err := compatible_client_hello_encode(conn.client_hello[:], hello)
 	if encode_err != .None {
 		return client_hello_fail(conn, {kind = .Encode_Failed, encode = encode_err})
+	}
+	if chosen := session_resume_candidate(conn, time.now()); chosen != nil {
+		// Opt-in is the policy. Resumption alone does not install 0-RTT keys.
+		early := conn.config.early_data != nil && conn.config.early_data.allow != nil &&
+			chosen.saw_early_data && chosen.early_data_max > 0
+		bound, offered := resumption_client_hello_offer(conn.client_hello[:], size, chosen, time.now(), early)
+		if !offered {
+			return client_hello_fail(conn, {kind = .Encode_Failed, encode = .Destination_Undersized})
+		}
+		size = bound
+		conn.psk_offered = true
+		conn.offered_session = chosen
+		conn.early_offered = early
 	}
 
 	conn.client_hello_size = size
@@ -569,7 +646,7 @@ client_hello_send :: proc(conn: ^Conn) -> Client_Hello_Send_Error {
 	size := conn.client_hello_size
 
 	// Initial ClientHello may use legacy record version 0x0301. The inner
-	// ClientHello still uses 0x0303 plus supported_versions = TLS 1.3.
+	// ClientHello uses 0x0303 and offers TLS 1.3, then TLS 1.2.
 	header := record_header_encode(
 		{content_type = .Handshake, legacy_version = LEGACY_TLS_1_0, length = cast(u16)size},
 	)
@@ -592,6 +669,11 @@ client_hello_fail :: proc(conn: ^Conn, err: Client_Hello_Send_Error) -> Client_H
 	conn.phase = .Failed
 	alpn_clear(conn)
 	conn.client_hello_error = err
+	conn.offered_session = nil
+	conn.early_offered = false
+	conn.early_accepted = false
+	conn.early_rejected = false
+	conn.early_effect_done = false
 	crypto.zero_explicit(&conn.x25519_private_key, size_of(conn.x25519_private_key))
 	return err
 }
@@ -650,6 +732,12 @@ server_hello_read :: proc(conn: ^Conn) -> Server_Hello_Read_Error {
 	if hello_is_retry(message[:received]) {
 		return server_hello_retry_accept(conn, message[:received])
 	}
+	if tls12_server_hello_selected(message[:received]) {
+		return tls12_server_hello_accept(conn, message[:received])
+	}
+	if conn.tls12.prefix != nil {
+		return server_hello_fail(conn, {kind = .Record_Boundary_Violation})
+	}
 	return server_hello_accept(conn, message[:received])
 }
 
@@ -705,6 +793,66 @@ server_hello_ccs_validate :: proc(body: []u8, ignored_ccs: ^int) -> Server_Hello
 	return {}
 }
 
+// TLS 1.3 still rejects a ServerHello that shares its record with later
+// handshake bytes. TLS 1.2 keeps that tail for the certificate flight. The
+// 90-byte cap applies once the suite is TLS 1.3; a retry may be larger.
+server_hello_message_limit :: proc(message: []u8, received: int) -> (int, Server_Hello_Read_Error) {
+	if received < 4 do return len(message), {}
+	if received >= 39 && int(message[38]) > 32 {
+		return 0, {kind = .Invalid_Server_Hello, decode = .Session_ID_Mismatch}
+	}
+	limit := len(message)
+	if received >= 38 && !hello_is_retry(message[:received]) {
+		limit = TLS12_MAX_SERVER_HELLO_SIZE
+		if cipher, ok := tls12_server_hello_cipher(message[:received]); ok &&
+		   cipher != TLS12_ECDHE_RSA_AES128_GCM_SHA256 &&
+		   cipher != TLS12_ECDHE_ECDSA_AES128_GCM_SHA256 {
+			limit = MAX_SERVER_HELLO_SIZE
+		}
+	}
+	expected := 4 + handshake_body_size(message)
+	if expected > limit || expected > len(message) {
+		return 0, {kind = .Message_Oversized}
+	}
+	return expected, {}
+}
+
+server_hello_consume :: proc(
+	message, body: []u8,
+	received: ^int,
+) -> (
+	complete: bool,
+	consumed: int,
+	error: Server_Hello_Read_Error,
+) {
+	for consumed < len(body) {
+		expected := len(message)
+		if received^ >= 4 {
+			var_expected, limit_error := server_hello_message_limit(message, received^)
+			if limit_error.kind != .None do return false, consumed, limit_error
+			expected = var_expected
+			if received^ == expected do return true, consumed, {}
+			if received^ > expected do return false, consumed, {kind = .Record_Boundary_Violation}
+		}
+		goal := 4
+		if received^ >= 4 do goal = expected
+		// Classify the suite before accepting a large body. HelloRetryRequest
+		// is recognizable from its random, which sits in the first 38 bytes.
+		if received^ < 38 && goal > 38 do goal = 38
+		n := min(goal - received^, len(body) - consumed)
+		if n <= 0 do return false, consumed, {kind = .Invalid_Server_Hello}
+		copy(message[received^:], body[consumed:][:n])
+		received^ += n
+		consumed += n
+	}
+	if received^ >= 4 {
+		expected, limit_error := server_hello_message_limit(message, received^)
+		if limit_error.kind != .None do return false, consumed, limit_error
+		if received^ == expected do return true, consumed, {}
+	}
+	return false, consumed, {}
+}
+
 server_hello_message_read :: proc(conn: ^Conn, message: []u8) -> (int, Server_Hello_Read_Error) {
 	storage: [MAX_PLAINTEXT_SIZE]u8
 	received, ignored_ccs: int
@@ -725,9 +873,22 @@ server_hello_message_read :: proc(conn: ^Conn, message: []u8) -> (int, Server_He
 			if ccs_error := server_hello_ccs_validate(body, &ignored_ccs); ccs_error.kind != .None do return 0, ccs_error
 			continue
 		case .Handshake:
-			complete, append_error := server_hello_message_append(message, body, &received)
+			complete, consumed, append_error := server_hello_consume(message, body, &received)
 			if append_error.kind != .None do return 0, append_error
 			if !complete do continue
+			if consumed < len(body) {
+				if hello_is_retry(message[:received]) || !tls12_server_hello_selected(message[:received]) {
+					return 0, {kind = .Record_Boundary_Violation}
+				}
+				tail := body[consumed:]
+				copied, allocation_error := make([]u8, len(tail))
+				if allocation_error != nil {
+					return 0, {kind = .Message_Oversized}
+				}
+				copy(copied, tail)
+				conn.tls12.prefix = copied
+				conn.tls12.prefix_allocator = context.allocator
+			}
 		}
 		break
 	}
@@ -758,7 +919,7 @@ server_hello_retry_accept :: proc(conn: ^Conn, message: []u8) -> Server_Hello_Re
 server_hello_accept :: proc(conn: ^Conn, message: []u8) -> Server_Hello_Read_Error {
 	received := len(message)
 	copy(conn.server_hello[:], message[:received])
-	parameters, decode_err := server_hello_decode(conn.server_hello[:received])
+	parameters, decode_err := server_hello_decode(conn.server_hello[:received], conn.psk_offered)
 	if decode_err != .None {
 		return server_hello_fail(conn, {kind = .Invalid_Server_Hello, decode = decode_err})
 	}
@@ -776,6 +937,7 @@ server_hello_accept :: proc(conn: ^Conn, message: []u8) -> Server_Hello_Read_Err
 
 	conn.server_hello_size = received
 	conn.server_parameters = parameters
+	conn.psk_selected = parameters.psk_selected
 	conn.phase = .Server_Hello_Received
 	return {}
 }
@@ -831,11 +993,29 @@ client_handshake_keys_init :: proc(conn: ^Conn) -> Handshake_Keys_Error {
 		return {kind = .Invalid_State}
 	}
 
+	psk: []u8
+	if conn.psk_selected {
+		bound_session := conn.offered_session
+		if bound_session == nil {
+			bound_session = conn.config.session
+		}
+		if bound_session == nil || !bound_session.usable {
+			conn.phase = .Failed
+			alpn_clear(conn)
+			conn.offered_session = nil
+			conn.handshake_keys_error = {kind = .Derivation_Failed, cause = .Invalid_Secret_Length}
+			handshake_keys_clear(conn)
+			return conn.handshake_keys_error
+		}
+		// Handshake secrets only. 0-RTT packet keys are not installed here.
+		psk = bound_session.psk[:]
+	}
 	secrets, err := handshake_secrets_derive(
 		conn.shared_secret,
 		handshake_effective_client_hello(conn),
 		conn.server_hello[:conn.server_hello_size],
 		conn.retry_transcript[:conn.retry_transcript_size],
+		psk,
 	)
 	defer crypto.zero_explicit(&secrets, size_of(secrets))
 	if err != .None {
@@ -861,8 +1041,14 @@ handshake_keys_clear :: proc(conn: ^Conn) {
 	crypto.zero_explicit(&conn.x25519_private_key, size_of(conn.x25519_private_key))
 	crypto.zero_explicit(&conn.shared_secret, size_of(conn.shared_secret))
 	crypto.zero_explicit(&conn.handshake_secrets, size_of(conn.handshake_secrets))
+	crypto.zero_explicit(&conn.resumption_master, size_of(conn.resumption_master))
+	conn.have_resumption_master = false
+	crypto.zero_explicit(&conn.server_finished_transcript, size_of(conn.server_finished_transcript))
+	conn.have_server_finished_transcript = false
 	record_protection_clear(&conn.handshake_send)
 	record_protection_clear(&conn.handshake_receive)
+	tls12_client_clear(conn)
+	system_roots_release(conn)
 }
 
 handshake_effective_client_hello :: proc(conn: ^Conn) -> []u8 {
@@ -1060,6 +1246,9 @@ client_hello_retry_prepare :: proc(conn: ^Conn, retry: []u8, cookie: []u8) -> Se
 	   36 + len(retry) > len(conn.retry_transcript) ||
 	   !client_hello_retry_inputs_disjoint(conn, retry, cookie, new_size) {
 		return .Invalid_Retry_Client_Hello
+	}
+	if resumption_extension_offset(first, EXTENSION_PRE_SHARED_KEY) >= 0 {
+		return resumption_retry_prepare(conn, first, retry, cookie, layout)
 	}
 	copy(conn.retry_client_hello[:], first)
 	retry_put_u24(conn.retry_client_hello[:], 1, new_size - 4)

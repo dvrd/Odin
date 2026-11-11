@@ -45,9 +45,11 @@ wire records win cancellation races. Write counts include complete application
 records only. Protocol diagnostics are retained in `async_failure`.
 
 Authenticated close_notify becomes `Peer_Closed`. Raw transport EOF without it
-is a terminal truncation error. Post-handshake tickets are validated and
-discarded; key updates are processed, and responses share the ordered writer
-with application data.
+is a terminal truncation error. Post-handshake tickets are validated. They are
+stored only when `Config.session` or `Config.session_cache` and `remember_tickets`
+are set. That store does not install 0-RTT keys. `session_cache` is a caller-owned
+bound of eight tickets, expired on use and isolated by server name. Key updates are processed, and responses share the
+ordered writer with application data.
 
 Close rejects new I/O, cancels and drains pending operations, then releases the
 transport and clears key material. An idle established writer attempts a
@@ -75,8 +77,17 @@ The client supports cookie-only HelloRetryRequest, fragmented handshake messages
 record buffering, key updates, authenticated shutdown and truncation detection.
 Client [ALPN](ALPN.md) offers/selections are bounded and shared by blocking and
 asynchronous handshakes. Read authenticated selection through `connection_state`
-or `async_connection_state`; Surf currently permits only HTTP/1.1 offers.
-TLS 1.2, client certificates, session resumption and 0-RTT are not implemented.
+or `async_connection_state`. Surf's TCP binding allows a missing offer or the
+tokens `http/1.1` and `h2`; `h3` is rejected before TCP I/O. That is not HTTP/2
+or HTTP/3.
+Client certificates are not implemented. TLS 1.3 resumption is
+`psk_dhe_ke` through `Config.session` or `Config.session_cache`. Early data stays
+refused (`Early_Data_Disabled`) unless `Config.early_data` is set to a replay-safe
+method policy. Resumption does not install 0-RTT keys on the default path. Rejected
+early data falls back without applying the application effect twice. A full handshake, or a
+resumption that still sends a certificate, keeps the existing certificate and
+hostname checks. Omitting the certificate is accepted only when the PSK is
+bound to that same hostname.
 The separate restricted server API is described below. Certificate policy and revocation capabilities follow
 `core:crypto/x509`.
 

@@ -18,6 +18,13 @@ borrowed. Existing callers may accept Peer_Parameters normally, then start the
 flight: this selects the default optional TCP profile with no ALPN support.
 Neither h2 nor h3 is implicitly enabled by this engine.
 
+Client transport binding is separate and does not change this selector. TCP
+callers may offer nothing, `http/1.1`, or `h2`. `h3` is rejected before a TCP
+socket or record write. QUIC offer policy accepts only the opaque name `h3`
+and does not enter the TCP record stack. Missing client ALPN remains HTTP/1
+fallback. Negotiating either token still does not implement HTTP/2 or HTTP/3
+(OKAMI-102 and OKAMI-98/99). See ALPN.md.
+
 ALPN names use existing validation: 1–255 opaque bytes, at most16 local names and
 1,024 encoded list bytes including name prefixes. Duplicate local names are
 Invalid_Config. The ClientHello codec rejects malformed/empty/duplicate names,

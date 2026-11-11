@@ -1,7 +1,15 @@
 # QUIC wire foundation
 
-`core:net/quic` currently provides allocation-free QUIC v1 header and integer
-codecs. It has no connection, socket, TLS, recovery or HTTP API.
+`core:net/quic` provides allocation-free QUIC v1 codecs, Initial/Handshake/1-RTT
+packet protection, bounded CRYPTO reassembly and a handshake key owner.
+`core:net/quic/conn` is the connection: it owns UDP, packet protection and
+stream bytes. ACK, loss, PTO, flow control, congestion and anti-amplification
+stay in the harness model. `core:net` does not import this package. There is
+no HTTP API. 0-RTT stays off unless `handshake_install_zero_rtt` is called with a
+replay-safe policy. The interop server does not opt in. 1-RTT key update
+replaces the packet-protection secret, key, and IV for one phase. The header
+protection key stays the `quic hp` derived for the connection. The next update
+waits for `packet_keys_confirm_update`. A phase skip is refused.
 
 All decoded slices borrow the input. Keep that storage alive and unchanged while
 using a view. Encoding writes caller storage, never retains it, rejects overlap
@@ -42,8 +50,9 @@ Wire definitions: [RFC 8999 sections 5–6](https://www.rfc-editor.org/rfc/rfc89
 [RFC 9000 sections 12.2, 16–17](https://www.rfc-editor.org/rfc/rfc9000.html#section-16),
 and [RFC 9001 section 5.4](https://www.rfc-editor.org/rfc/rfc9001.html#section-5.4).
 Published integer vectors come from RFC 9000 Appendix A.1; Initial headers and
-Retry bytes come from RFC 9001 Appendix A.2–A.4. Vector tests check codecs only,
-not cryptographic verification.
+Retry bytes come from RFC 9001 Appendix A.2–A.4. Codec tests check structure.
+Protection tests check those Initial packets, Retry integrity, the Appendix A.5
+ChaCha20 packet, and AES Handshake/1-RTT round trips from the TLS secret seam.
 
 Run from an Odin root containing this package:
 
@@ -74,9 +83,10 @@ The explicit send sequence is:
 
 Receive by structurally delimiting one packet, calling
 `initial_header_protection_remove`, reconstructing its full PN in the caller,
-then `initial_payload_open` with the complete unmasked header through PN. No
-packet-number reconstruction, replay window, ACK/recovery or connection-state
-updates occur here. Only after a successful open may a caller use authenticated
+then `initial_payload_open` with the complete unmasked header through PN.
+`packet_number_reconstruct` implements RFC 9000 Appendix A.3 for that caller.
+Initial open does not update a replay window, ACK/recovery or connection state.
+Only after a successful open may a caller use authenticated
 packet contents or validate reserved bits. Successful GCM verification remains
 weaker than peer authentication because Initial keys are public.
 
@@ -97,15 +107,82 @@ of the value create additional owners to erase. Temporary derivation secrets (in
 nonces, masks and AES schedules are explicitly erased internally. Odin does not
 provide linear types or guarantees about compiler-created/register copies;
 callers must avoid accidental copies and must not reuse a packet number with the
-same sending keys. Key discard timing and connection cancellation remain caller
-policy.
+same sending keys. The handshake owner discards Initial keys when a client first
+sends Handshake, or a server first accepts Handshake, and discards Handshake keys
+on confirm. Other cancellation remains caller policy.
 
-This slice covers Initial AES-128-GCM plus AES-ECB header protection only. It does
-not implement TLS CRYPTO integration, certificate/server authentication, Retry
-integrity, application traffic keys, resumption or network interoperability.
+Initial protection is AES-128-GCM plus AES-ECB header protection. Handshake and
+1-RTT AES keys come from `core:crypto/tls` traffic secrets (`quic key` / `quic iv`
+/ `quic hp`), not from TLS record keys. A 1-RTT update installs
+`HKDF-Expand-Label(secret, "quic ku", "", 32)`, then `quic key` and `quic iv`
+from that secret. `quic hp` stays in place (RFC 9001 §§5.4 and 6) so header
+protection can expose the key-phase bit. The sender calls `packet_keys_advance`
+once. The receiver installs that generation only after AEAD success. Failure
+drops the trial secret, key, and IV. `packet_keys_confirm_update` is explicit
+and is the gate for another update. ChaCha20-Poly1305 is used only to check
+the published RFC 9001 A.5 short-header packet and its `quic ku` secret. Retry integrity is checked
+against Appendix A.4. Certificate, hostname and Finished checks stay in the TLS
+package; a transport-parameter mismatch with the handshake transcript discards
+this state. There is no resumption and no network peer in this package.
 Tests compare full RFC 9001 client/server Initial packets, derive the published
 keys and exercise both AES implementation selections, authentication failures,
 truncation, overlap, sample bounds and key erasure. `.Hardware` follows the AES
 package's normal portable fallback on machines without acceleration.
 
 Definitions and vectors: [RFC 9001 sections 5.2–5.4 and Appendix A](https://www.rfc-editor.org/rfc/rfc9001.html#section-5.2).
+
+## Connection
+
+`core:net/quic/conn` seals real QUIC frames with the handshake owner and asks
+the harness to account for the same UDP length. The harness datagram is never
+sent. One `send_udp` success is not a peer acknowledgment. A pending send
+retries the same datagram. A truncated datagram is not decoded. Caller-owned
+buffers are borrowed only for the call.
+
+Anti-amplification stays on until a Handshake packet is accepted. A new peer
+endpoint restarts that limit. That restart is not migration.
+
+Not implemented: connection migration, `PATH_CHALLENGE`, preferred address,
+version negotiation (unknown versions and Version Negotiation packets are
+discarded), Retry, 0-RTT and resumption, `NEW_CONNECTION_ID` and retirement,
+ECN, coalesced packets, multipath, stateless reset, address-validation tokens,
+and retransmission of a lost stream range. Loss sends a PTO probe. CRYPTO is
+resent from offset zero because identical overlap is idempotent. The ACK frame
+carries only the first contiguous range. Drain is three times the current PTO
+base, not a full idle timeout. A loopback of two connections, or of the
+harness, is not an independent peer. Linux is not run here.
+
+```sh
+./odin test core/net/quic/sim/tests -warnings-as-errors \
+  -sanitize:address -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+```
+
+## Harness model
+
+`core:net/quic/harness` is a deterministic test model. It is not the production
+connection API, not a UDP socket, and not TLS. Packet protection, header
+protection, and Retry integrity stay outside the harness and are not applied to
+its datagrams. The model borrows caller packet and stream tables,
+keeps no datagram bytes, and advances only when the test passes a tick.
+
+It hosts on `core:net/quic/sim`. The link injects time, loss, duplication,
+reordering, address changes, and allocation failure. The model covers v1 header
+levels, the three packet-number spaces, ACK/loss/PTO, flow control, congestion,
+bounded retention, reset/close, and the server anti-amplification limit.
+Published checks are RFC 9000 Appendix A.2–A.3 and RFC 9002's initial window,
+PTO constants, and §7.6.3 persistent-congestion arithmetic. The integer Initial
+PTO is 997 ms. The RFC's real-valued expression is 999 ms and is described as
+one second; the model follows the pseudocode assignment order.
+
+There is no independent Linux peer in this tree. `core/net/quic/harness/peer`
+prints that Linux is unsupported, skips the Darwin-vs-Linux comparison, and
+exits non-zero only when `self_check` fails. A loopback of this model is not
+that peer.
+
+```sh
+./odin test core/net/quic/tests -warnings-as-errors \
+  -sanitize:address -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+./odin test core/net/quic/harness/tests -warnings-as-errors \
+  -sanitize:address -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+./odin run core/net/quic/harness/peer -warnings-as-errors -sanitize:address
+```

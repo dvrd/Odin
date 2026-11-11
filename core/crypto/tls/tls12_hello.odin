@@ -3,8 +3,8 @@ package tls
 import "core:net"
 import "core:strings"
 
-// Separate codec for the TLS1.2 compatibility prerequisite. It does not alter
-// the TLS1.3-only Conn offer or imply that a TLS1.2 handshake is implemented.
+// TLS 1.2 hello codec. The live client offers these suites on the same
+// connection as TLS 1.3; this encoder itself stays TLS 1.2-only for tests.
 TLS12_VERSION :: u16(0x0303)
 TLS12_ECDHE_RSA_AES128_GCM_SHA256 :: u16(0xc02f)
 TLS12_ECDHE_ECDSA_AES128_GCM_SHA256 :: u16(0xc02b)

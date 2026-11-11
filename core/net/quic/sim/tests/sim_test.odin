@@ -320,3 +320,43 @@ exhaustion_never_reuses_identifiers :: proc(t: ^testing.T) {
 	testing.expect_value(t, sim.send(&link, {}, {}, nil, {delay = 1}), .Invalid_Time)
 	testing.expect_value(t, sim.send(&link, {}, {}, nil), .Exhausted)
 }
+
+@(test)
+allocation_failure_injection :: proc(t: ^testing.T) {
+	p: [2]sim.Packet_Slot
+	b: [16]u8
+	timers: [1]sim.Timer_Slot
+	link: sim.Link
+	testing.expect_value(t, sim.init(&link, p[:], b[:], 8, timers[:]), .None)
+	defer sim.destroy(&link)
+	testing.expect_value(t, sim.inject_allocation_failure(nil, 1), .Invalid_State)
+	testing.expect_value(t, sim.inject_allocation_failure(&link, -1), .Invalid_State)
+	testing.expect_value(t, sim.inject_allocation_failure(&link, 1), .None)
+	testing.expect_value(t, sim.send(&link, {}, {}, nil, {drop = true}), .None)
+	testing.expect_value(t, link.fail_allocations, 1)
+	testing.expect_value(t, sim.send(&link, {}, {}, nil, {delay = -1}), .Invalid_Time)
+	testing.expect_value(t, link.fail_allocations, 1)
+	testing.expect_value(t, sim.send(&link, {}, {}, []u8{1, 2}), .Allocation)
+	testing.expect(t, link.fail_allocations == 0 && sim.stats(&link).packets == 0 && sim.stats(&link).bytes == 0)
+	testing.expect_value(t, sim.send(&link, {}, {}, []u8{1, 2}), .None)
+	out: [8]u8
+	event, ok, se := sim.step(&link, 0, out[:])
+	testing.expect(t, ok && se == .None && event.size == 2 && out[0] == 1 && out[1] == 2)
+
+	testing.expect_value(t, sim.inject_allocation_failure(&link, 1), .None)
+	testing.expect_value(t, sim.send(&link, {}, {}, []u8{3}, {duplicate = true, duplicate_delay = 1}), .Allocation)
+	testing.expect(t, sim.stats(&link).packets == 0 && link.fail_allocations == 0)
+	_, e := sim.schedule(&link, 1, 0)
+	testing.expect_value(t, e, .None)
+	testing.expect_value(t, sim.inject_allocation_failure(&link, 1), .None)
+	_, e = sim.schedule(&link, 1, 1)
+	testing.expect(t, e == .Allocation && sim.stats(&link).timers == 1 && link.fail_allocations == 0)
+	sim.clear(&link)
+	testing.expect(t, link.fail_allocations == 0 && sim.stats(&link).timers == 0 && sim.now(&link) == 0)
+	testing.expect_value(t, sim.inject_allocation_failure(&link, 4), .None)
+	sim.clear(&link)
+	testing.expect_value(t, link.fail_allocations, 4)
+	sim.destroy(&link)
+	testing.expect_value(t, link.fail_allocations, 0)
+	testing.expect_value(t, sim.inject_allocation_failure(&link, 1), .Invalid_State)
+}

@@ -17,6 +17,10 @@ Protection_Error :: enum {
 	Sample_Too_Short,
 	Authentication_Failed,
 	Invalid_Implementation,
+	Zero_RTT_Disabled,
+	Key_Update_Disabled,
+	Header_Protection_Failed,
+	Unauthenticated,
 }
 
 // Caller owns this key material. Copies create additional secrets that the

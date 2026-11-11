@@ -50,7 +50,9 @@ hkdf_expand_label :: proc(
 	return .None
 }
 
-// No-PSK AES-128-GCM/SHA-256 handshake schedule (RFC 8446 sections 7.1, 7.3).
+// AES-128-GCM/SHA-256 handshake schedule (RFC 8446 sections 7.1, 7.3).
+// psk is empty for a full handshake (zero IKM). A 32-byte resumption PSK
+// selects psk_dhe_ke. This does not derive early traffic keys or a replay window.
 // Hashes exact ClientHello || ServerHello handshake messages, including their
 // four-byte headers and excluding record headers. Message semantics must have
 // been checked by the handshake layer; this procedure checks framing only.
@@ -61,6 +63,7 @@ handshake_secrets_derive :: proc(
 	client_hello: []u8,
 	server_hello: []u8,
 	transcript_prefix: []u8 = nil,
+	psk: []u8 = nil,
 ) -> (
 	secrets: Handshake_Secrets,
 	err: Key_Schedule_Error,
@@ -78,7 +81,7 @@ handshake_secrets_derive :: proc(
 	transcript_update(&t, transcript_prefix)
 	transcript_update(&t, client_hello)
 	transcript_update(&t, server_hello)
-	return handshake_secrets_derive_from_hash(shared_secret, transcript_snapshot(&t))
+	return handshake_secrets_derive_from_hash(shared_secret, transcript_snapshot(&t), psk)
 }
 
 // The caller has validated message framing/order. Hash CH through SH inclusive,
@@ -88,19 +91,28 @@ handshake_secrets_derive :: proc(
 handshake_secrets_derive_from_hash :: proc(
 	shared_secret: [32]u8,
 	transcript_hash: [32]u8,
+	psk: []u8 = nil,
 ) -> (secrets: Handshake_Secrets, err: Key_Schedule_Error) {
 	shared := shared_secret
 	defer crypto.zero_explicit(&shared, size_of(shared))
+	if len(psk) != 0 && len(psk) != 32 {
+		return {}, .Invalid_Secret_Length
+	}
 	if crypto.is_zero_constant_time(shared[:]) == 1 {
 		return {}, .Invalid_Shared_Secret
 	}
 
-	zero: [32]u8
+	zero, ikm: [32]u8
+	defer crypto.zero_explicit(&ikm, size_of(ikm))
+	if len(psk) == 32 {
+		copy(ikm[:], psk)
+	}
 	early_secret, derived_secret: [32]u8
 	defer crypto.zero_explicit(&early_secret, size_of(early_secret))
 	defer crypto.zero_explicit(&derived_secret, size_of(derived_secret))
 	// With no PSK the IKM is Hash.length zero bytes, not an empty string.
-	hkdf.extract(.SHA256, zero[:], zero[:], early_secret[:])
+	// A resumption PSK replaces that IKM. Early traffic keys are not derived.
+	hkdf.extract(.SHA256, zero[:], ikm[:], early_secret[:])
 	empty_hash := transcript_empty_hash()
 	key_schedule_expand_label(early_secret[:], "derived", empty_hash[:], derived_secret[:])
 	hkdf.extract(.SHA256, derived_secret[:], shared[:], secrets.handshake_secret[:])

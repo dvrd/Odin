@@ -18,6 +18,62 @@ dial_tcp_until :: proc(endpoint: Endpoint, deadline: time.Time, options := DEFAU
 	}
 }
 
+// A blackholed earlier answer must leave time for a later one.
+DIAL_CANDIDATE_SLICE :: 250 * time.Millisecond
+
+// Dials resolved addresses in order. Every attempt except the last is capped
+// so one dead address cannot spend the caller's whole deadline.
+dial_tcp_candidates_until :: proc(
+	endpoints: Resolved_Endpoints,
+	deadline: time.Time,
+	options := DEFAULT_TCP_OPTIONS,
+) -> (
+	TCP_Socket,
+	Network_Error,
+) {
+	if endpoints.count <= 0 {
+		return 0, Resolve_Error.Unable_To_Resolve
+	}
+	last_error: Network_Error = Resolve_Error.Unable_To_Resolve
+	for i in 0 ..< endpoints.count {
+		now := time.now()
+		if deadline != (time.Time{}) && time.diff(now, deadline) <= 0 {
+			return 0, Dial_Error.Timeout
+		}
+		attempt := deadline
+		if i+1 < endpoints.count && deadline != (time.Time{}) {
+			remaining := time.diff(now, deadline)
+			if remaining > DIAL_CANDIDATE_SLICE {
+				attempt = time.time_add(now, DIAL_CANDIDATE_SLICE)
+			}
+		}
+		socket, dial_error := dial_tcp_until(endpoints.items[i], attempt, options)
+		if dial_error == nil {
+			return socket, nil
+		}
+		last_error = dial_error
+	}
+	return 0, last_error
+}
+
+// Resolves A and AAAA, then dials later answers inside the same deadline.
+dial_tcp_resolved_until :: proc(
+	hostname: string,
+	port: int,
+	deadline: time.Time,
+	options: Resolver_Options = {},
+	allocator := context.allocator,
+) -> (
+	TCP_Socket,
+	Network_Error,
+) {
+	endpoints, resolve_error := resolve_endpoints_until(hostname, port, deadline, options, allocator)
+	if resolve_error != nil {
+		return 0, resolve_error
+	}
+	return dial_tcp_candidates_until(endpoints, deadline)
+}
+
 @(private)
 dial_poll_timeout :: proc(deadline: time.Time) -> i32 {
 	remaining := time.diff(time.now(), deadline)

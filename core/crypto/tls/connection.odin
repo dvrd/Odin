@@ -1,6 +1,7 @@
 package tls
 
 import "core:crypto"
+import "core:crypto/sha2"
 import "core:crypto/x509"
 import "core:mem"
 import trans "core:net"
@@ -22,6 +23,18 @@ Config :: struct {
 	// Ordered opaque names, borrowed and immutable through the full handshake
 	// (including async completion). Zero offers preserve legacy behavior.
 	alpn_protocols: []string,
+	// Nil keeps a full handshake. Tickets are validated and discarded unless
+	// remember_tickets stores one into this borrowed session and, when set,
+	// into session_cache. The cache is caller-owned, bounded, and isolated by
+	// server name. 0-RTT stays off unless early_data is set. Certificate checks
+	// are unchanged when the server sends a certificate or does not select the PSK.
+	session:          ^Session,
+	session_cache:    ^Session_Cache,
+	remember_tickets: bool,
+	// Nil refuses early data. A policy is the only opt-in, and its allow
+	// procedure must accept only replay-safe methods. It is borrowed for the
+	// handshake and must not apply application effects itself.
+	early_data: ^Early_Data_Policy,
 }
 
 Client_Error :: enum {
@@ -91,6 +104,23 @@ Conn :: struct {
 	retry_transcript_size:        int,
 	retry_client_hello:           [MAX_RETRY_CLIENT_HELLO_SIZE]u8,
 	retry_client_hello_size:      int,
+	// Owned only when the caller supplied no roots. Explicit roots are the
+	// sole trust set for that connection.
+	system_roots:                 ^Root_Pool,
+	system_roots_allocator:       mem.Allocator,
+	tls12:                        TLS12_Client,
+	psk_offered:                  bool,
+	psk_selected:                 bool,
+	// Borrowed from session or session_cache for this handshake. Not owned.
+	offered_session:              ^Session,
+	early_offered:                bool,
+	early_accepted:               bool,
+	early_rejected:               bool,
+	early_effect_done:            bool,
+	resumption_master:            [32]u8,
+	have_resumption_master:       bool,
+	server_finished_transcript:   sha2.Context_256,
+	have_server_finished_transcript: bool,
 }
 
 config_validate :: proc(config: Config) -> Client_Error {
@@ -106,10 +136,11 @@ config_validate :: proc(config: Config) -> Client_Error {
 		return .Invalid_Server_Name
 	}
 
-	if len(config.root_cas) == 0 {
+	// A nil slice is omitted trust and fails before any dial. A non-nil empty
+	// slice asks for platform anchors. Verification is never skipped.
+	if raw_data(config.root_cas) == nil {
 		return .Missing_Trust_Roots
 	}
-
 	for root in config.root_cas {
 		if root == nil do return .Invalid_Trust_Root
 	}
@@ -129,16 +160,79 @@ client :: proc(conn: ^Conn, underlying: trans.Connection, config: Config) -> Cli
 
 	if !trans.connection_valid(underlying) do return .Invalid_Transport
 
-	if err := config_validate(config); err != .None {
+	settings, roots, roots_allocator, trust_error := client_trust(config)
+	if trust_error != .None {
+		return trust_error
+	}
+	// h3 is not a TCP record offer. Reject before any handshake write.
+	if err := alpn_tcp_rejects_h3(settings.alpn_protocols); err != .None {
+		system_roots_release_pool(roots, roots_allocator)
 		return err
 	}
 
 	conn^ = {
 		transport = underlying,
-		config    = config,
+		config    = settings,
 		phase     = .Handshake_Pending,
 	}
+	conn.system_roots = roots
+	conn.system_roots_allocator = roots_allocator
 	return .None
+}
+
+// Loads Darwin/Unix system anchors for a non-nil empty root list.
+// A nil list is omitted trust. An explicit slice is not combined with the system store.
+@(private)
+client_trust :: proc(
+	config: Config,
+) -> (
+	settings: Config,
+	roots: ^Root_Pool,
+	roots_allocator: mem.Allocator,
+	err: Client_Error,
+) {
+	settings = config
+	if len(settings.root_cas) == 0 {
+		if raw_data(settings.root_cas) == nil {
+			return {}, nil, {}, .Missing_Trust_Roots
+		}
+		roots_allocator = context.allocator
+		allocated, allocation_error := new(Root_Pool, roots_allocator)
+		if allocation_error != nil || allocated == nil {
+			return {}, nil, {}, .Missing_Trust_Roots
+		}
+		loaded := root_pool_load_system(allocated)
+		if loaded.kind != .None || allocated.count == 0 {
+			root_pool_destroy(allocated)
+			free(allocated, roots_allocator)
+			return {}, nil, {}, .Missing_Trust_Roots
+		}
+		settings.root_cas = allocated.roots[:allocated.count]
+		roots = allocated
+	}
+	if validate_error := config_validate(settings); validate_error != .None {
+		system_roots_release_pool(roots, roots_allocator)
+		return {}, nil, {}, validate_error
+	}
+	return settings, roots, roots_allocator, .None
+}
+
+@(private)
+system_roots_release_pool :: proc(pool: ^Root_Pool, allocator: mem.Allocator) {
+	if pool == nil do return
+	root_pool_destroy(pool)
+	free(pool, allocator)
+}
+
+system_roots_release :: proc(conn: ^Conn) {
+	if conn == nil || conn.system_roots == nil do return
+	// root_cas borrows the pool. Drop that view before the bytes are freed.
+	conn.config.root_cas = nil
+	pool := conn.system_roots
+	allocator := conn.system_roots_allocator
+	conn.system_roots = nil
+	conn.system_roots_allocator = {}
+	system_roots_release_pool(pool, allocator)
 }
 
 // Connection establishment and inspection
@@ -173,6 +267,10 @@ dial :: proc(conn: ^Conn, host: string, port: int, config: Config) -> Dial_Error
 	}
 
 	if err := config_validate(settings); err != .None {
+		return {kind = .Invalid_Config, config = err}
+	}
+	// Before any TCP socket. QUIC's h3 token never enters this record stack.
+	if err := alpn_tcp_rejects_h3(settings.alpn_protocols); err != .None {
 		return {kind = .Invalid_Config, config = err}
 	}
 
@@ -362,13 +460,24 @@ async_client :: proc(
 	if conn == nil do return .Nil_Connection
 	if conn.initialized do return .Already_Initialized
 	if underlying.submit == nil || underlying.cancel == nil || executor.schedule == nil do return .Invalid_Transport
-	if err := config_validate(config); err != .None do return err
+	settings, roots, _, trust_error := client_trust(config)
+	if trust_error != .None do return trust_error
+	if err := alpn_tcp_rejects_h3(settings.alpn_protocols); err != .None {
+		system_roots_release_pool(roots, context.allocator)
+		return err
+	}
 	conn^ = {
 		initialized = true,
 		transport = underlying,
 		executor = executor,
 		allocator = allocator,
-		protocol = {config = config, phase = .Handshake_Pending, defer_key_updates = true},
+		protocol = {
+			config = settings,
+			phase = .Handshake_Pending,
+			defer_key_updates = true,
+			system_roots = roots,
+			system_roots_allocator = context.allocator,
+		},
 	}
 	conn.rx = {
 		callback  = async_receive_done,
@@ -527,6 +636,10 @@ async_terminal :: proc(conn: ^Async_Conn, error: net.Connection_Error, details: 
 		}
 		conn.protocol.phase = .Failed
 		alpn_clear(&conn.protocol)
+		crypto.zero_explicit(&conn.protocol.resumption_master, size_of(conn.protocol.resumption_master))
+		conn.protocol.have_resumption_master = false
+		crypto.zero_explicit(&conn.protocol.server_finished_transcript, size_of(conn.protocol.server_finished_transcript))
+		conn.protocol.have_server_finished_transcript = false
 	}
 	async_queue(conn)
 }

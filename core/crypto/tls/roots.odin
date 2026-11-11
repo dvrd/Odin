@@ -36,6 +36,8 @@ Root_Pool :: struct {
 	certificates: [MAX_ROOT_CERTIFICATES]x509.Certificate,
 	roots:        [MAX_ROOT_CERTIFICATES]^x509.Certificate,
 	blocks:       [MAX_ROOT_CERTIFICATES]^pem.Block,
+	// DER copies for roots that did not arrive as PEM. Nil for PEM entries.
+	owned:        [MAX_ROOT_CERTIFICATES][]u8,
 	count:        int,
 	allocator:    mem.Allocator,
 }
@@ -45,9 +47,52 @@ root_pool_destroy :: proc(pool: ^Root_Pool) {
 
 	for i in 0 ..< pool.count {
 		x509.destroy(&pool.certificates[i], pool.allocator)
-		pem.block_delete(pool.blocks[i])
+		if pool.blocks[i] != nil {
+			pem.block_delete(pool.blocks[i])
+		}
+		if pool.owned[i] != nil {
+			delete(pool.owned[i], pool.allocator)
+		}
 	}
 	pool^ = {}
+}
+
+// Copies one DER certificate into the pool. Unparseable inputs are refused
+// without disturbing certificates already admitted.
+root_pool_add_der :: proc(
+	pool: ^Root_Pool,
+	der: []u8,
+	allocator := context.allocator,
+) -> Root_Error {
+	if pool == nil {
+		return {kind = .Invalid_State}
+	}
+	if pool.count == MAX_ROOT_CERTIFICATES {
+		return {kind = .Certificate_Limit}
+	}
+	if len(der) == 0 || len(der) > (1 << 16) {
+		return {kind = .Invalid_Certificate}
+	}
+	alloc := pool.allocator
+	if alloc.procedure == nil do alloc = allocator
+	owned, allocation_err := make([]u8, len(der), alloc)
+	if allocation_err != nil {
+		return {kind = .Allocation_Failed, allocation = allocation_err}
+	}
+	copy(owned, der)
+	cert, parse_err := x509.parse(owned, alloc)
+	if parse_err != .None {
+		delete(owned, alloc)
+		if pool.count == 0 do pool.allocator = {}
+		return {kind = .Invalid_Certificate, certificate = parse_err}
+	}
+	if pool.allocator.procedure == nil do pool.allocator = alloc
+	i := pool.count
+	pool.certificates[i] = cert
+	pool.roots[i] = &pool.certificates[i]
+	pool.owned[i] = owned
+	pool.count += 1
+	return {}
 }
 
 root_pool_parse :: proc(
@@ -139,9 +184,27 @@ root_pool_load_file :: proc(pool: ^Root_Pool, path: string) -> Root_Error {
 	return root_pool_parse(pool, data[:used])
 }
 
-// Uses the platform's conventional PEM bundle, without shell commands or a
-// bundled frozen CA list. An explicit application path can use load_file.
+// Uses the platform trust store, without shell commands or a bundled frozen
+// CA list. An explicit application path can use load_file and is not merged
+// with this store. Darwin reads Security.framework anchors; other systems
+// read the conventional PEM bundle. Verification is never disabled.
 root_pool_load_system :: proc(pool: ^Root_Pool) -> Root_Error {
+	when ODIN_OS == .Darwin {
+		loaded := root_pool_load_darwin(pool)
+		if loaded.kind == .None && pool.count > 0 {
+			return {}
+		}
+		if loaded.kind != .None && loaded.kind != .No_Certificates && loaded.kind != .Read_Failed {
+			return loaded
+		}
+		if pool.count > 0 {
+			return {}
+		}
+	}
+	return root_pool_load_system_files(pool)
+}
+
+root_pool_load_system_files :: proc(pool: ^Root_Pool) -> Root_Error {
 	paths := [?]string {
 		"/etc/ssl/certs/ca-certificates.crt",
 		"/etc/ssl/cert.pem",
