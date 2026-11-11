@@ -27,11 +27,10 @@ conn_early_stream_confirmation_rejection_and_shared_packet_numbers :: proc(t:^te
   view,_,ve:=quic.packet_decode_v1(packet[:n],8);testing.expect_value(t,ve,.None);testing.expect_value(t,view.kind,.Zero_RTT)
   original:=packet;original_n:=n
   if accepted {
-   // Drop the first protected0RTT packet, then retransmit retained bytes on
-   // an actual PTO with a fresh number in the shared Application space.
-   timer:=conn.timer(client,clock);testing.expect(t,timer.armed);clock=timer.at
-   n,pe=conn.on_timeout(client,clock,packet[:]);testing.expect_value(t,pe,.None);testing.expect(t,n>0)
-   testing.expect_value(t,conn.ingest(server,clock,1,packet[:n]),.None)
+   // Application PTO is forbidden until actual handshake confirmation.
+   // The external handshake driver owns Initial/Handshake retransmission.
+   timer:=conn.timer(client,clock);testing.expect(t,!timer.armed)
+   testing.expect_value(t,conn.ingest(server,clock+1,1,packet[:n]),.None)
    output:[16]u8;rn,fin,re:=conn.read(server,0,output[:]);testing.expect_value(t,re,.None);testing.expect_value(t,rn,4);testing.expect(t,fin&&string(output[:rn])==string(payload))
    sn,se:=conn.pump(server,clock+1,packet[n:]);testing.expect_value(t,se,.None);testing.expect_value(t,sn,0)
   }

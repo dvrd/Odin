@@ -415,6 +415,7 @@ candidate_slot :: proc(c: ^Connection) -> int {
 // Called by the real UDP owner. A free candidate slot is reserved provisionally;
 // authentication must succeed before any bytes or validation state are changed.
 ingest_from :: proc(c: ^Connection, now: i64, from: net.Endpoint, datagram: []u8) -> Error {
+ if idle_tick(c,now) {return .Closed}
 	if c == nil || !c.migration.enabled || from.address == nil {
 		return .Invalid
 	}
@@ -583,6 +584,7 @@ promote_path :: proc(c: ^Connection, index: int, now: i64) {
 }
 
 pump_to :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, net.Endpoint, Error) {
+ if idle_tick(c,now) {return 0,{},.Closed}
 	if c == nil || !c.migration.enabled {
 		return 0, {}, .Invalid
 	}

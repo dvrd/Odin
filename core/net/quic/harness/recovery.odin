@@ -97,7 +97,7 @@ pto_duration :: proc(m: ^Model, space: Space) -> i64 {
 	return duration
 }
 
-loss_detection_timer :: proc(m: ^Model, now: i64) -> Timer {
+loss_detection_timer :: proc(m: ^Model, now: i64,allow_application_pto:bool=true) -> Timer {
 	if m == nil || !m.initialized || m.closed {
 		return {}
 	}
@@ -144,7 +144,7 @@ loss_detection_timer :: proc(m: ^Model, now: i64) -> Timer {
 		if sp.ack_eliciting_flight <= 0 || sp.discarded {
 			continue
 		}
-		if s == .Application && !m.handshake_confirmed {
+		if s == .Application && (!m.handshake_confirmed||!allow_application_pto) {
 			if !found {
 				return {}
 			}
@@ -375,12 +375,13 @@ on_timeout :: proc(
 	m: ^Model,
 	now: i64,
 	lost_out: []u64,
+ allow_application_pto:bool=true,
 ) -> (
 	lost_n: int,
 	kind: Timer_Kind,
 	err: Error,
 ) {
-	timer := loss_detection_timer(m, now)
+	timer := loss_detection_timer(m, now,allow_application_pto)
 	if !timer.armed {
 		return 0, .None, .Invalid_State
 	}
@@ -453,4 +454,13 @@ reject_zero_rtt :: proc(m: ^Model) -> Error {
 		}
 	}
 	return .None
+}
+
+// The idle floor uses the current RTT-based PTO, independently of loss backoff.
+base_pto :: proc(m:^Model,space:Space=.Application)->i64 {
+ if m==nil||!m.initialized {return 1000}
+ varied:=max(m.granularity,4*min(m.rttvar,max(i64)/4))
+ result:=saturating_add(m.smoothed_rtt,varied)
+ if space==.Application {result=saturating_add(result,m.max_ack_delay)}
+ return max(result,m.granularity)
 }

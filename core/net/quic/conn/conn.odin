@@ -21,6 +21,7 @@ package conn
 
 import "core:bytes"
 import "core:net"
+import "core:net/quic/idle"
 import "core:crypto"
 import "core:crypto/tls"
 import "core:crypto/x509"
@@ -86,6 +87,7 @@ Config :: struct {
 }
 
 Timer :: struct {
+ idle:bool,
 	armed: bool,
 	at:    i64,
 	kind:  harness.Timer_Kind,
@@ -122,6 +124,10 @@ Buf :: struct {
 }
 
 Connection :: struct {
+ idle:idle.State,
+ idle_expired:bool,
+ idle_expiry_pto:i64,
+ output_eliciting:bool,
  migration: Migration,
  post_handshake:Post_Handshake_State,
  stateless_reset:bool,
@@ -172,6 +178,7 @@ Connection :: struct {
 	await_update:                                bool,
 	udp_hold:                                    [MAX_DATAGRAM]u8,
 	udp_hold_len:                                int,
+ udp_hold_eliciting:bool,
  udp_hold_peer:net.Endpoint, udp_hold_ecn:net.ECN_Codepoint,
 	tx:                                          [PACKETS]Tx_Packet,
 	path_response_pending:                       bool,
@@ -469,7 +476,9 @@ timer :: proc(c: ^Connection, now: i64) -> Timer {
 	if c.phase == .Draining {
 		return {armed = now < c.draining_until, at = c.draining_until}
 	}
-	got := harness.loss_detection_timer(&c.model, now)
+	if idle_tick(c,now) {return {}}
+	got := harness.loss_detection_timer(&c.model, now,application_pto_confirmed(c))
+ if at,armed:=idle.deadline(&c.idle,harness.base_pto(&c.model));armed&&(!got.armed||at<got.at) {return {armed=true,at=at,idle=true}}
 	return {armed = got.armed, at = got.at, kind = got.kind, space = got.space}
 }
 
@@ -492,9 +501,10 @@ on_timeout :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 		}
 		return 0, .None
 	}
-	due := harness.loss_detection_timer(&c.model, now)
+	if idle_tick(c,now) {return 0,.Closed}
+	due := harness.loss_detection_timer(&c.model, now,application_pto_confirmed(c))
 	lost: [PACKETS]u64
-	_, _, err := harness.on_timeout(&c.model, now, lost[:])
+	_, _, err := harness.on_timeout(&c.model, now, lost[:],application_pto_confirmed(c))
 	if err == .Invalid_Input || err == .Invalid_State {
 		return 0, .Not_Ready
 	}
@@ -513,6 +523,7 @@ on_timeout :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 }
 
 ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
+ if idle_tick(c,now) {return .Closed}
 	if c == nil || !c.initialized {
 		return .Invalid
 	}
@@ -693,6 +704,7 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 	}
 	if c.migration.enabled && c.migration.receiving != c.migration.active {c.model.path_received=received_before}
 	if !dup {
+        idle.received(&c.idle,now)
         ecn_received(c,int(space))
         ecn_ack(c,now,int(space),parsed)
         if level==.One_RTT {post_handshake_ack(c,parsed);migration_ack(c,parsed)}
@@ -742,6 +754,7 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 }
 
 pump :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
+ if idle_tick(c,now) {return 0,.Closed}
 	if c == nil || !c.initialized {
 		return 0, .Invalid
 	}
@@ -1751,7 +1764,8 @@ seal_and_emit :: proc(
 	}
 	c.ecn.output=ecn.mark(&c.ecn.sender)
  ecn.sent(&c.ecn.sender,int(req.space),c.ecn.output)
- for &p in c.model.packets[int(req.space)] {if p.active&&p.number==full {p.ecn_mark=u8(c.ecn.output);break}}
+ c.output_eliciting=false
+ for &p in c.model.packets[int(req.space)] {if p.active&&p.number==full {p.ecn_mark=u8(c.ecn.output);c.output_eliciting=p.ack_eliciting;break}}
 	copy(dst[:total], packet[:total])
 	_ = stream_off
 	return total, .None

@@ -1,6 +1,7 @@
 package conn
 import "core:crypto"
 import "core:net"
+import "core:net/quic/idle"
 import quic ".."
 import "../harness"
 
@@ -78,7 +79,7 @@ early_seal_and_emit :: proc(c:^Connection,now:i64,dst:[]u8,request:harness.Emit,
  n,e:=quic.handshake_zero_rtt_payload_seal(&c.hs,packet[hn:],packet[:hn],plain[:plain_n],space.next_send);if e!=.None||n!=plain_n+16 {return 0,.Handshake}
  if quic.handshake_zero_rtt_header_protection_apply(&c.hs,packet[:total])!=.None {return 0,.Handshake}
  req:=request;req.bytes=total;discard:[MAX_DATAGRAM]u8;written,err:=harness.emit(&c.model,now,discard[:],req);if err!=.None {return 0,map_harness(err)}
- if written!=total {return 0,.Protocol};copy(dst,packet[:total]);return total,.None
+ if written!=total {return 0,.Protocol};c.output_eliciting=false;for p in c.model.packets[2] {if p.active&&p.number==space.next_send {c.output_eliciting=p.ack_eliciting;break}};copy(dst,packet[:total]);return total,.None
 }
 @(private)
 early_ingest :: proc(c:^Connection,now:i64,path:u32,datagram:[]u8)->Error {
@@ -103,7 +104,7 @@ early_ingest :: proc(c:^Connection,now:i64,path:u32,datagram:[]u8)->Error {
  if !shadow_packet(c,shadow[:size],.Application,fields.packet_number_length,u64(fields.packet_number),req,0) {return .Protocol}
  model_path:=path;if c.migration.enabled {model_path=c.model.path}
  if re:=harness.receive(&c.model,now,model_path,shadow[:size]);re!=.None {return map_harness(re)}
- if !duplicate {if re:=early_defer_control(c,parsed,destination);re!=.None {fail(c,"early control capacity");return re};ecn_received(c,2);payload:=parsed;payload.path_challenge=false;if re:=apply_parsed(c,.One_RTT,payload);re!=.None {return re};quic.handshake_note_authenticated_pn(&c.hs,.One_RTT,full)}
+ if !duplicate {if re:=early_defer_control(c,parsed,destination);re!=.None {fail(c,"early control capacity");return re};ecn_received(c,2);payload:=parsed;payload.path_challenge=false;if re:=apply_parsed(c,.One_RTT,payload);re!=.None {return re};quic.handshake_note_authenticated_pn(&c.hs,.One_RTT,full);idle.received(&c.idle,now)}
  return .None
 }
 

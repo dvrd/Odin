@@ -24,6 +24,7 @@ exchange_udp :: proc(
 	if c.cancelled {
 		return 0, 0, .Cancelled
 	}
+	if idle_tick(c,now) {return 0,0,.Closed}
 	if _,policy_error:=configure_udp(socket);policy_error!=.None {return 0,0,policy_error}
 
 	sent, blocked, serr := flush_udp(c, socket, peer, send_buf, now, deadline)
@@ -70,7 +71,7 @@ flush_udp :: proc(
 	deadline: async.Deadline,
 ) -> (int, bool, Error) {
 	if c.udp_hold_len > 0 {
-		n, err := send_hold(c, socket, peer, deadline)
+		n, err := send_hold(c, socket, peer, deadline,now)
 		return n, err != .None, err
 	}
 	if len(send_buf) == 0 || c.phase == .Draining || c.phase == .Closed || c.phase == .Failed {
@@ -88,8 +89,8 @@ flush_udp :: proc(
 	}
 	copy(c.udp_hold[:n], send_buf[:n])
 	c.udp_hold_len = n
- c.udp_hold_peer=target;c.udp_hold_ecn=output_ecn(c)
-	sent, serr := send_hold(c, socket, peer, deadline)
+ c.udp_hold_peer=target;c.udp_hold_ecn=output_ecn(c);c.udp_hold_eliciting=output_ack_eliciting(c)
+	sent, serr := send_hold(c, socket, peer, deadline,now)
 	return sent, serr != .None, serr
 }
 
@@ -99,11 +100,13 @@ send_hold :: proc(
 	socket: async.Datagram_Socket,
 	peer: net.Endpoint,
 	deadline: async.Deadline,
+ now:i64,
 ) -> (int, Error) {
 	target:=peer;if c.udp_hold_peer.address!=nil {target=c.udp_hold_peer}
  n, err := async.send_udp_ecn(socket, target, c.udp_hold[:c.udp_hold_len], c.udp_hold_ecn,deadline)
 	#partial switch err.kind {
 	case .None:
+  output_sent(c,now,c.udp_hold_eliciting)
 		c.udp_hold_len = 0
 		return n, .None
 	case .Pending:
