@@ -67,7 +67,7 @@ server_owner_admission_and_address_identity :: proc(t: ^testing.T) {
 	testing.expect(t,size_of(o) <= 4096)
 	fmt.printf("recordless owner=%d event=%d fixed bytes; CH cap=%d scratch=%d\n",size_of(o),size_of(Server_Handshake_Event),SERVER_CLIENT_HELLO_MAX_WIRE,SERVER_HANDSHAKE_OUTPUT_CAP)
 	testing.expect_value(t,server_handshake_init(nil,SERVER_HANDSHAKE_DEFAULT_CONFIG,context.allocator),.Invalid_Owner)
-	for config in ([]Server_Handshake_Config{{44,128,nil},{65537,128,nil},{65536,0,nil},{65536,129,nil}}) {
+	for config in ([]Server_Handshake_Config{{44,128,nil,nil},{65537,128,nil,nil},{65536,0,nil,nil},{65536,129,nil,nil}}) {
 		testing.expect_value(t,server_handshake_init(&o,config,context.allocator),.Invalid_Config)
 		testing.expect(t,o._self == nil)
 	}
@@ -129,7 +129,7 @@ server_owner_single_byte_and_limits :: proc(t: ^testing.T) {
 	wire := transmute([]u8)#load("testdata/server_openssl_client_hello.wire")
 	a := Owner_Test_Audit{backing=context.allocator}
 	o: Server_Handshake
-	config := Server_Handshake_Config{len(wire),128,nil}
+	config := Server_Handshake_Config{len(wire),128,nil,nil}
 	server_handshake_init(&o,config,owner_test_allocator(&a))
 	for i in 0..<len(wire) {
 		n,status,e := server_handshake_feed(&o,.Initial,wire[i:i+1])
@@ -147,7 +147,7 @@ server_owner_single_byte_and_limits :: proc(t: ^testing.T) {
 		server_handshake_destroy(&p); owner_test_clean(t,&b)
 	}
 	p: Server_Handshake; b := Owner_Test_Audit{backing=context.allocator}
-	server_handshake_init(&p,{len(wire)-1,128,nil},owner_test_allocator(&b))
+	server_handshake_init(&p,{len(wire)-1,128,nil,nil},owner_test_allocator(&b))
 	n,_,e := server_handshake_feed(&p,.Initial,wire)
 	testing.expect_value(t,n,4); testing.expect_value(t,e,.Limit); testing.expect_value(t,b.calls,0)
 	server_handshake_destroy(&p)

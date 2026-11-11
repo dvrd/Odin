@@ -96,6 +96,7 @@ Server_Async_Conn :: struct {
 	_name: [253]u8,
 	_alpn_size, _name_size: int,
 	_peer_identity: Peer_Identity,
+	_resumed:bool,
 }
 
 @(private)
@@ -112,7 +113,7 @@ server_async_server :: proc(s:^Server_Async_Conn, transport:net.Async_Connection
 	if config.max_handshake_records==0 {config.max_handshake_records=4096}
 	if config.handshake.max_client_hello_bytes==0 && config.handshake.max_extensions==0 {config.handshake.max_client_hello_bytes=SERVER_CLIENT_HELLO_MAX_WIRE;config.handshake.max_extensions=SERVER_CLIENT_HELLO_MAX_ENTRIES}
 	_,valid:=alpn_protocols_size(config.parameters.alpn_protocols)
-	if allocator.procedure==nil || config.store==nil || !valid || config.parameters.mode!=.TCP ||
+	if !server_ticket_config_valid(config.handshake.tickets)||!client_auth_config_valid(config.handshake.client_auth)||allocator.procedure==nil || config.store==nil || !valid || config.parameters.mode!=.TCP ||
 	   len(config.parameters.quic_transport_parameters)!=0 || config.handshake_timeout<0 || config.close_timeout<0 ||
 	   config.max_owned_bytes<1024 || config.max_owned_bytes>SERVER_ASYNC_MAX_OWNED_BYTES ||
 	   config.max_handshake_records<1 || config.max_handshake_records>65536 ||
@@ -122,7 +123,7 @@ server_async_server :: proc(s:^Server_Async_Conn, transport:net.Async_Connection
 	if config.handshake.max_client_hello_bytes<45 || config.handshake.max_client_hello_bytes>SERVER_CLIENT_HELLO_MAX_WIRE ||
 	   config.handshake.max_extensions<1 || config.handshake.max_extensions>SERVER_CLIENT_HELLO_MAX_ENTRIES {return .Invalid_Config}
 	s._self,s._transport,s._executor,s._allocator,s._config,s._phase=s,transport,executor,allocator,config,.Ready
-	assert(server_handshake_init(&s._engine,config.handshake,{server_async_allocator,s})==.None)
+	if server_handshake_init(&s._engine,config.handshake,{server_async_allocator,s})!=.None {s^={};return .Invalid_Config}
 	s._rx={callback=server_async_receive_done,user_data=s}
 	s._tx={callback=server_async_send_done,user_data=s}
 	s._shutdown={callback=server_async_shutdown_done,user_data=s}
@@ -157,7 +158,7 @@ server_async_connection :: proc(s:^Server_Async_Conn) -> net.Async_Connection {
 server_async_connection_state :: proc(s:^Server_Async_Conn) -> Connection_State {
 	if !server_async_valid(s) || s._phase!=.Established || s._failure.kind!=.None || s._closing {return {}}
 	return {handshake_complete=true,version=VERSION_TLS_1_3,cipher_suite=.AES_128_GCM_SHA256,
-		server_name=string(s._name[:s._name_size]),negotiated_protocol=string(s._alpn[:s._alpn_size]),peer_identity=s._peer_identity}
+		server_name=string(s._name[:s._name_size]),negotiated_protocol=string(s._alpn[:s._alpn_size]),peer_identity=s._peer_identity,resumed=s._resumed}
 }
 server_async_failure :: proc(s:^Server_Async_Conn) -> Server_Async_Failure {
 	if !server_async_valid(s) {return {kind=.Invalid_State}}

@@ -185,7 +185,7 @@ loss_delay :: proc(m: ^Model) -> i64 {
 retire_packet :: proc(m: ^Model, space, index: int) -> Packet {
 	p := &m.packets[space][index]
 	copy := p^
-	if p.in_flight {
+	if p.in_flight && p.path_epoch==m.path_epoch && p.path==m.path {
 		m.bytes_in_flight -= p.sent_bytes
 		if m.bytes_in_flight < 0 {
 			m.bytes_in_flight = 0
@@ -347,13 +347,13 @@ acknowledge :: proc(
 			eliciting = true
 		}
 	}
-	if eliciting && acked[largest_i].number == largest {
+	if eliciting && acked[largest_i].number == largest && acked[largest_i].path_epoch==m.path_epoch && acked[largest_i].path==m.path {
 		update_rtt(m, now, ack_delay, acked[largest_i].sent_at)
 	}
 	if has_ecn && (!m.has_ecn[si] || ecn_ce > m.ecn_ce[si]) {
 		m.has_ecn[si] = true
 		m.ecn_ce[si] = ecn_ce
-		if acked[largest_i].number == largest {
+		if acked[largest_i].number == largest && acked[largest_i].path_epoch==m.path_epoch && acked[largest_i].path==m.path {
 			on_congestion_event(m, now, acked[largest_i].sent_at)
 		}
 	}
@@ -362,7 +362,7 @@ acknowledge :: proc(
 		return lost_n, err
 	}
 	for i in 0 ..< acked_n {
-		on_packet_acked_cc(m, acked[i].sent_at, acked[i].sent_bytes)
+		if acked[i].path_epoch==m.path_epoch && acked[i].path==m.path {on_packet_acked_cc(m, acked[i].sent_at, acked[i].sent_bytes)}
 		retire_stream_ack(m, acked[i])
 	}
 	if peer_completed(m) {

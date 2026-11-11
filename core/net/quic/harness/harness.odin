@@ -72,6 +72,7 @@ Recv_State :: enum u8 {
 }
 
 Packet :: struct {
+ path_epoch:u64, path:u32, ecn_mark:u8,
 	active:        bool,
 	number:        u64,
 	sent_at:       i64,
@@ -123,6 +124,7 @@ Space_State :: struct {
 
 // Noncopyable after init: packet and stream slices borrow caller storage.
 Model :: struct {
+ path_epoch:u64,
 	initialized:              bool,
 	role:                     Role,
 	local_cid, peer_cid:      [20]u8,

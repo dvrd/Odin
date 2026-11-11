@@ -132,3 +132,6 @@ input boundaries, transient erasure and event acceptance requirements.
 The [server acceptance contract](SERVER_BASELINE.md) maps native credential,
 recordless and async TCP behavior to their validation boundaries, including
 PSS-SHA256 certificate-chain admission without weakening authentication.
+
+Server TLS1.3 ticket issuance, key rotation and authenticated PSK-DHE resumption
+are documented in [SERVER_RESUMPTION.md](SERVER_RESUMPTION.md).

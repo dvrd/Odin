@@ -119,6 +119,9 @@ Conn :: struct {
 	psk_selected:                 bool,
 	// Borrowed from session or session_cache for this handshake. Not owned.
 	offered_session:              ^Session,
+ session_identity:[32]u8,
+ session_roots_identity:[32]u8,
+ session_identity_present,session_identity_valid:bool,
 	early_offered:                bool,
 	early_accepted:               bool,
 	early_rejected:               bool,
@@ -324,6 +327,7 @@ Connection_State :: struct {
 	// and when the server omits ALPN. Does not borrow the server flight.
 	negotiated_protocol: string,
 	peer_identity: Peer_Identity,
+	resumed:bool,
 }
 
 connection_state :: proc(conn: ^Conn) -> Connection_State {
@@ -335,6 +339,7 @@ connection_state :: proc(conn: ^Conn) -> Connection_State {
 	}
 	return {
 		handshake_complete = conn.handshake_complete,
+		resumed=conn.handshake_complete&&conn.psk_selected,
 		version = conn.server_parameters.version,
 		cipher_suite = conn.server_parameters.cipher_suite,
 		server_name = conn.config.server_name,

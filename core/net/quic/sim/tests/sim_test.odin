@@ -281,8 +281,8 @@ fixed_storage_under_long_run :: proc(t: ^testing.T) {
 		timer, error := sim.schedule(&link, 1, sim.now(&link) + 1); assert(error == .None)
 		assert(sim.cancel(&link, timer))
 		for _ in 0 ..< 2 {
-			out: [16]u8; event, ok, error := sim.step(&link, sim.now(&link) + 1, out[:])
-			assert(ok && error == .None && event.source.path == u32(i) && out[0] == byte[0])
+			out: [16]u8; event, ok, step_error := sim.step(&link, sim.now(&link) + 1, out[:])
+			assert(ok && step_error == .None && event.source.path == u32(i) && out[0] == byte[0])
 		}
 	}
 	s := sim.stats(&link)

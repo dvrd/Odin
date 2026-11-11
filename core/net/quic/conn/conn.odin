@@ -3,9 +3,9 @@
 // bytes. 0-RTT stays refused unless a caller opts in elsewhere. This connection
 // does not enable it. There is no replay policy on this path.
 //
-// Not implemented: migration and path validation, version negotiation (unknown
-// versions and Version Negotiation packets are discarded), Retry, connection-ID
-// retirement, preferred address, ECN, coalesced packets, multipath, and
+// Not implemented here: version negotiation (unknown versions and Version
+// Negotiation packets are discarded), Retry, preferred address, coalesced
+// packets, multipath, and
 // migration of retained stream IDs beyond the bounded stream table. STREAM
 // bytes and FIN/RESET are retained until acknowledged and retransmitted on loss.
 // Receive fragments are buffered inside a sliding window; consumed bytes return
@@ -20,11 +20,13 @@
 package conn
 
 import "core:bytes"
+import "core:net"
 import "core:crypto"
 import "core:crypto/tls"
 import "core:crypto/x509"
 import "core:net/quic"
 import "core:net/quic/harness"
+import ecn "core:net/quic/ecn"
 import "core:time"
 
 STREAMS :: 32
@@ -115,6 +117,9 @@ Buf :: struct {
 }
 
 Connection :: struct {
+ migration: Migration,
+ post_handshake:Post_Handshake_State,
+ ecn:ECN_Transport,
 	initialized:                                 bool,
 	role:                                        quic.Role,
 	phase:                                       Phase,
@@ -159,6 +164,7 @@ Connection :: struct {
 	await_update:                                bool,
 	udp_hold:                                    [MAX_DATAGRAM]u8,
 	udp_hold_len:                                int,
+ udp_hold_peer:net.Endpoint, udp_hold_ecn:net.ECN_Codepoint,
 	tx:                                          [PACKETS]Tx_Packet,
 	path_response_pending:                       bool,
 	path_response_token:                         [8]u8,
@@ -254,6 +260,7 @@ destroy :: proc(c: ^Connection) {
 	if c == nil {
 		return
 	}
+ post_handshake_clear(c)
 	if c.initialized {
 		harness.destroy(&c.model)
 	}
@@ -430,6 +437,7 @@ cancel :: proc(c: ^Connection) {
 	if c == nil || !c.initialized {
 		return
 	}
+ post_handshake_clear(c)
 	c.cancelled = true
 	c.phase = .Closed
 	c.model.closed = true
@@ -513,9 +521,9 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 	}
 	inv, ierr := quic.invariant_decode(datagram, c.local_cid_len)
 	if ierr != .None {
-		return .Protocol
+		return .Discarded
 	}
-	if !cid_equal(c.local_cid[:c.local_cid_len], inv.destination_id) {
+	if !accepts_destination_id(c, inv.destination_id) {
 		return .Discarded
 	}
 	if inv.long_header && (inv.version == 0 || inv.version != 1) {
@@ -576,7 +584,7 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 	}
 	header_end := fields_header_end(packet[:consumed], c.local_cid_len)
 	if header_end <= 0 || header_end >= consumed {
-		return .Protocol
+		return .Discarded
 	}
 	plain: [MAX_DATAGRAM]u8
 	pn, oerr := quic.handshake_payload_open(
@@ -588,10 +596,12 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 		full,
 	)
 	if oerr != .None {
+        if oerr==.Invalid_Header&&fields.reserved_bits!=0 {fail(c,"authenticated reserved bits");return .Protocol}
 		note_unparsed(c, path, len(datagram))
 		c.reason = "decrypt"
 		return .None
 	}
+    if fields.reserved_bits!=0 {fail(c,"authenticated reserved bits");return .Protocol}
 	parsed, ok := parse_frames(plain[:pn])
 	if !ok {
 		fail(c, "frame")
@@ -601,7 +611,7 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 		fail(c, "ACK of unsent packet"); return .Protocol
 	}
 	if level != .One_RTT &&
-	   (parsed.stream ||
+	   (parsed.new_id_n>0 || parsed.retire_id_n>0 || parsed.path_n>0 || parsed.stream ||
 			   parsed.reset ||
 			   parsed.stop ||
 			   parsed.max_data ||
@@ -620,6 +630,11 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 		}
 	}
 	dup := already_received(sp, full)
+ if !dup {if e:=migration_receive(c,now,path,level,full,parsed,inv.destination_id);e!=.None{return e}}
+ if c.migration.enabled {p:=&c.migration.paths[c.migration.receiving];if p.used {p.received+=len(datagram)}}
+ received_before:=c.model.path_received
+ model_path:=path
+ if c.migration.enabled {model_path=c.model.path}
 	req := shadow_from_parsed(parsed)
 	// Payload ownership is accounted once by the real stream owner, not by a
 	// shadow packet or every retransmission.
@@ -649,7 +664,7 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 		fail(c, "shadow")
 		return .Protocol
 	}
-	if err := harness.receive(&c.model, now, path, shadow[:len(datagram)]);
+	if err := harness.receive(&c.model, now, model_path, shadow[:len(datagram)]);
 	   err != .None && err != .Closed {
 		if err == .Discarded {
 			return .None
@@ -659,7 +674,11 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 	} else if err == .Closed {
 		enter_drain(c, now)
 	}
+	if c.migration.enabled && c.migration.receiving != c.migration.active {c.model.path_received=received_before}
 	if !dup {
+        ecn_received(c,int(space))
+        ecn_ack(c,now,int(space),parsed)
+        if level==.One_RTT {post_handshake_ack(c,parsed);migration_ack(c,parsed)}
 		acknowledge_tx(c, parsed)
 		// Retire lower acknowledged ranges before the largest ACK can detect
 		// loss in intervening packet numbers.
@@ -724,6 +743,7 @@ pump :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 		}
 		return 0, .None
 	}
+ if c.ecn.sender.state==.Testing&&now-c.ecn.started>=9*max(c.model.smoothed_rtt,i64(333)) {ecn.timeout(&c.ecn.sender)}
 	if c.want_close && !c.close_sent {
 		return send_close(c, now, dst)
 	}
@@ -759,12 +779,14 @@ pump :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 		}
 	}
 	if c.phase == .Established || c.model.handshake_confirmed {
-		if c.path_response_pending {
+		if !c.migration.enabled && c.path_response_pending {
 			return send_path_response(c, now, dst)
 		}
+		if n,e,sent:=migration_control(c,now,dst);sent {return n,e}
 		if c.role == .Server && !c.done_sent {
 			return send_done(c, now, dst)
 		}
+        if n,e,sent:=post_handshake_pump(c,now,dst);sent{return n,e}
 		if n, err, sent := send_stream_progress(c, now, dst); sent {
 			return n, err
 		}
@@ -797,6 +819,7 @@ usable :: proc(c: ^Connection) -> Error {
 
 @(private)
 fail :: proc(c: ^Connection, reason: string) {
+ post_handshake_clear(c)
 	c.phase = .Failed
 	c.reason = reason
 	c.model.closed = true
@@ -929,6 +952,7 @@ cid_equal :: proc(a, b: []u8) -> bool {
 
 @(private)
 note_unparsed :: proc(c: ^Connection, path: u32, n: int) {
+	if c.migration.enabled {return}
 	m := &c.model
 	if !m.has_path || path != m.path {
 		m.has_path = true
@@ -989,6 +1013,7 @@ rewind :: proc(c: ^Connection, space: harness.Space) {
 			c.fin_off = 0
 		}
 	case .Application:
+        post_handshake_rewind(c)
 	}
 }
 
@@ -1237,11 +1262,13 @@ apply_parsed :: proc(c: ^Connection, level: quic.Encryption_Level, parsed: Parse
 		c.peer_uni_streams = max(c.peer_uni_streams, parsed.max_streams_uni_value)
 	}
 	if parsed.crypto {
+        if level==.One_RTT {if e:=post_handshake_received(c,parsed);e!=.None{return e}} else {
 		if quic.handshake_ingest_crypto(&c.hs, level, parsed.crypto_off, parsed.crypto_data) !=
 		   .None {
 			fail(c, "crypto")
 			return .Handshake
 		}
+        }
 	}
 
 	if parsed.reset {
@@ -1354,7 +1381,7 @@ send_crypto :: proc(
 	frame: [MAX_DATAGRAM]u8
 	at := 0
 	aok: bool
-	at, aok = encode_ack_if(frame[:], at, req)
+	at, aok = encode_ack_if(c,frame[:], at, req)
 	if !aok {
 		return 0, .Protocol
 	}
@@ -1397,7 +1424,7 @@ send_done :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 	}
 	attach_ack(c, &req, .Application)
 	frame: [64]u8
-	at, ok := encode_ack_if(frame[:], 0, req)
+	at, ok := encode_ack_if(c,frame[:], 0, req)
 	if !ok {
 		return 0, .Protocol
 	}
@@ -1445,7 +1472,7 @@ send_ping_in :: proc(c: ^Connection, now: i64, dst: []u8, space: harness.Space) 
 	}
 	attach_ack(c, &req, space)
 	frame: [64]u8
-	at, ok := encode_ack_if(frame[:], 0, req)
+	at, ok := encode_ack_if(c,frame[:], 0, req)
 	if !ok {
 		return 0, .Protocol
 	}
@@ -1511,7 +1538,7 @@ send_ack_only :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, bool)
 			ack_smallest = lo,
 		}
 		frame: [64]u8
-		at, ok := encode_ack(frame[:], 0, hi, lo)
+		at, ok := encode_transport_ack(c,frame[:],0,int(space),hi,lo)
 		if !ok {
 			return 0, .Protocol, true
 		}
@@ -1538,11 +1565,11 @@ attach_ack :: proc(c: ^Connection, req: ^harness.Emit, space: harness.Space) {
 }
 
 @(private)
-encode_ack_if :: proc(dst: []u8, at: int, req: harness.Emit) -> (int, bool) {
+encode_ack_if :: proc(c:^Connection,dst: []u8, at: int, req: harness.Emit) -> (int, bool) {
 	if !req.attach_ack {
 		return at, true
 	}
-	return encode_ack(dst, at, req.ack_largest, req.ack_smallest)
+	return encode_transport_ack(c,dst,at,int(req.space),req.ack_largest,req.ack_smallest)
 }
 
 @(private)
@@ -1696,6 +1723,9 @@ seal_and_emit :: proc(
 		fail(c, "size")
 		return 0, .Protocol
 	}
+	c.ecn.output=ecn.mark(&c.ecn.sender)
+ ecn.sent(&c.ecn.sender,int(req.space),c.ecn.output)
+ for &p in c.model.packets[int(req.space)] {if p.active&&p.number==full {p.ecn_mark=u8(c.ecn.output);break}}
 	copy(dst[:total], packet[:total])
 	_ = stream_off
 	return total, .None

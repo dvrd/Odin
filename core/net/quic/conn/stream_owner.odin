@@ -312,7 +312,7 @@ send_owned_stream :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, b
 				space = .Application,
 				ping  = true,
 			}; attach_ack(c, &req, .Application)
-			frame: [MAX_DATAGRAM]u8; at, ok := encode_ack_if(frame[:], 0, req)
+			frame: [MAX_DATAGRAM]u8; at, ok := encode_ack_if(c,frame[:], 0, req)
 			if ok {
 				at, ok = encode_credit(frame[:], at, b.id, b.recv_credit, c.model.recv_max_data)
 			}
@@ -357,7 +357,7 @@ send_owned_stream :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, b
 			ping      = true,
 			more_data = true,
 		}; attach_ack(c, &req, .Application)
-		frame: [MAX_DATAGRAM]u8; at, ok := encode_ack_if(frame[:], 0, req)
+		frame: [MAX_DATAGRAM]u8; at, ok := encode_ack_if(c,frame[:], 0, req)
 		if !ok {
 			return 0, .Capacity, true
 		}
@@ -403,7 +403,7 @@ send_path_response :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) 
 		space = .Application,
 		ping  = true,
 	}; attach_ack(c, &req, .Application)
-	frame: [64]u8; at, ok := encode_ack_if(frame[:], 0, req); if !ok || len(frame) - at < 9 {
+	frame: [64]u8; at, ok := encode_ack_if(c,frame[:], 0, req); if !ok || len(frame) - at < 9 {
 		return 0, .Capacity
 	}
 	frame[at] = 0x1b; at += 1; copy(frame[at:at + 8], c.path_response_token[:]); at += 8

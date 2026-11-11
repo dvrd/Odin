@@ -36,10 +36,12 @@ server_client_auth_verify_chain :: proc(owner:^Server_Handshake,message:[]u8)->b
  previous:=context.allocator;context.allocator=owner._allocator;defer context.allocator=previous
  certs,e:=server_certificates_parse(message);if e.kind!=.None {return false};auth.certs=certs
  leaf:=&auth.certs.chain[0]
+ owner._peer_expires=time.to_unix_seconds(leaf.not_after)
  if leaf.has_key_usage&&.Digital_Signature not_in leaf.key_usage {return false}
  inter:[MAX_SERVER_CERTIFICATES-1]^x509.Certificate
  for i in 1..<certs.count {inter[i-1]=&auth.certs.chain[i]}
  now:=owner._config.client_auth.current_time;if now==(time.Time{}) {now=time.now()}
+ for i in 1..<auth.certs.count {owner._peer_expires=min(owner._peer_expires,time.to_unix_seconds(auth.certs.chain[i].not_after))}
  chain,ce:=x509.verify_chain(leaf,{roots=owner._config.client_auth.roots,intermediates=inter[:certs.count-1],current_time=now,required_eku=x509.EKU_Bit.Client_Auth})
  if ce!=.None {return false};delete(chain)
  return true

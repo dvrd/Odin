@@ -359,6 +359,7 @@ emit :: proc(m: ^Model, now: i64, dst: []u8, req: Emit) -> (int, Error) {
 		p := &m.packets[int(req.space)][packet_index]
 		p^ = {}
 		p.active = true
+        p.path_epoch=m.path_epoch;p.path=m.path
 		p.number = sp.next_send
 		p.sent_at = now
 		p.sent_bytes = target

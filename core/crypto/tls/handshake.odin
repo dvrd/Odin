@@ -264,6 +264,7 @@ handshake_server_flight_verify :: proc(conn: ^Conn, flight: []u8) -> ([32]u8, Ha
 		bound_session = conn.config.session
 	}
 	abbreviate := conn.psk_selected && session_offerable(bound_session, conn.config.server_name, time.now())
+ if abbreviate && string(selected)!=string(bound_session.alpn[:bound_session.alpn_len]) {return {},handshake_fail(conn,{kind=.Malformed_Message})}
 	if !(abbreviate && at < len(flight) && flight[at] == u8(Handshake_Type.Finished)) {
 		if cert_error := handshake_flight_certificates_verify(conn, flight, &at, &transcript); cert_error.kind != .None do return {}, cert_error
 	}
@@ -645,9 +646,15 @@ client_hello_prepare :: proc(conn: ^Conn) -> Client_Hello_Send_Error {
 		conn.psk_offered = true
 		conn.offered_session = chosen
 		conn.early_offered = early
-	}
+ } else if conn.config.remember_tickets {
+  // Advertise psk_dhe_ke on the initial full handshake too; independent
+  // servers otherwise correctly decline to issue any resumption tickets.
+  layout,valid:=client_hello_layout_decode(conn.client_hello[:size]);if !valid||size+6>len(conn.client_hello) {return client_hello_fail(conn,{kind=.Encode_Failed,encode=.Destination_Undersized})}
+  at:=size;resumption_put_u16(conn.client_hello[:],&at,EXTENSION_PSK_MODES);resumption_put_u16(conn.client_hello[:],&at,2);conn.client_hello[at],conn.client_hello[at+1]=1,PSK_DHE_KE;size=at+2
+  retry_put_u24(conn.client_hello[:],1,size-4);retry_put_u16(conn.client_hello[:],layout.extensions_length_offset,u16(layout.extensions_size+6))
+ }
 
-	conn.client_hello_size = size
+ conn.client_hello_size = size
 
 	return {}
 }

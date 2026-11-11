@@ -1,6 +1,7 @@
 package conn
 
 import "core:net/quic"
+import ecn "core:net/quic/ecn"
 
 // Real QUIC v1 frames. The harness never sees these bytes. All bounded ACK
 // ranges are parsed; ACK emission uses the highest contiguous received range.
@@ -12,7 +13,16 @@ Stream_Frame :: struct {
 Credit_Frame :: struct {
 	id, value: u64,
 }
+CID_Frame :: struct {
+ sequence, retire_prior_to:u64,
+ id:[]u8,
+ token:[16]u8,
+}
+Path_Frame :: struct { response:bool, token:[8]u8 }
 Parsed :: struct {
+ new_ids:[16]CID_Frame, new_id_n:int,
+ retire_ids:[16]u64, retire_id_n:int,
+ paths:[16]Path_Frame, path_n:int,
 	streams:                                       [32]Stream_Frame,
 	stream_n:                                      int,
 	credits:                                       [32]Credit_Frame,
@@ -21,6 +31,7 @@ Parsed :: struct {
 	path_challenge:                                bool,
 	path_token:                                    [8]u8,
 	ack:                                           bool,
+ ack_ecn:bool, ecn_counts:ecn.Counts,
 	ack_largest, ack_smallest:                     u64,
 	ack_ranges:                                    [65][2]u64,
 	ack_n:                                         int,
@@ -247,14 +258,12 @@ parse_frames :: proc(src: []u8) -> (parsed: Parsed, ok: bool) {
 				}
 				low = hi - span; parsed.ack_ranges[parsed.ack_n] = {low, hi}; parsed.ack_n += 1
 			}
-			if kind == 0x03 {
-				for _ in 0 ..< 3 {
-					_, at, ok = take_varint(src, at)
-					if !ok {
-						return {}, false
-					}
-				}
-			}
+            if kind==0x03 {
+             parsed.ack_ecn=true
+             parsed.ecn_counts.ect0,at,ok=take_varint(src,at);if !ok{return {},false}
+             parsed.ecn_counts.ect1,at,ok=take_varint(src,at);if !ok{return {},false}
+             parsed.ecn_counts.ce,at,ok=take_varint(src,at);if !ok{return {},false}
+            }
 			_ = delay
 			if parsed.ack {
 				return {}, false
@@ -361,7 +370,7 @@ parse_frames :: proc(src: []u8) -> (parsed: Parsed, ok: bool) {
 			at += 1; n: u64; n, at, ok = take_varint(src, at); if !ok || n > u64(len(src) - at) {
 				return {}, false
 			}; at += int(n); parsed.control_eliciting = true
-		case 0x14, 0x16, 0x17, 0x19:
+		case 0x14, 0x16, 0x17:
 			// advisory BLOCKED / retired locally issued CID
 			at += 1; _, at, ok = take_varint(src, at); if !ok {
 				return {}, false
@@ -383,20 +392,20 @@ parse_frames :: proc(src: []u8) -> (parsed: Parsed, ok: bool) {
 			n := int(src[at]); at += 1; if n == 0 || n > 20 || n + 16 > len(src) - at {
 				return {}, false
 			}
-			// Migration is disabled: keep using sequence zero. A peer may offer
-			// additional CIDs without obliging this endpoint to use them.
-			if prior != 0 {
-				return {}, false
-			}
-			at += n + 16; parsed.control_eliciting = true
-		case 0x1a, 0x1b:
-			at += 1; if len(src) - at < 8 {
-				return {}, false
-			}
-			if kind == 0x1a {
-				parsed.path_challenge = true; copy(parsed.path_token[:], src[at:at + 8])
-			}
-			at += 8; parsed.control_eliciting = true
+            if parsed.new_id_n == len(parsed.new_ids) {return {},false}
+            f:=&parsed.new_ids[parsed.new_id_n]; parsed.new_id_n+=1
+            f.sequence=seq; f.retire_prior_to=prior; f.id=src[at:at+n]; copy(f.token[:],src[at+n:at+n+16])
+            at+=n+16; parsed.control_eliciting=true
+        case 0x19:
+            at+=1; seq:u64; seq,at,ok=take_varint(src,at)
+            if !ok || parsed.retire_id_n==len(parsed.retire_ids) {return {},false}
+            parsed.retire_ids[parsed.retire_id_n]=seq; parsed.retire_id_n+=1; parsed.control_eliciting=true
+        case 0x1a, 0x1b:
+            at+=1
+            if len(src)-at<8 || parsed.path_n==len(parsed.paths) {return {},false}
+            f:=&parsed.paths[parsed.path_n]; parsed.path_n+=1
+            f.response=kind==0x1b; copy(f.token[:],src[at:at+8]);
+            if !f.response {parsed.path_challenge=true;parsed.path_token=f.token}; at+=8; parsed.control_eliciting=true
 		case 0x11:
 			at += 1; id, value: u64
 			id, at, ok = take_varint(src, at); if !ok {

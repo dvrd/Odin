@@ -40,7 +40,12 @@ server_handshake_finished_feed :: proc(owner: ^Server_Handshake, level: Server_H
 		server_handshake_fail(owner, .Malformed)
 		return consumed, .Terminal, .Malformed
 	}
-	// No post-handshake transcript consumers in this profile. Wipe handshake
+	if owner._resumed {
+  owner._peer_identity={authenticated=owner._resumption.claims.authenticated,certificate_sha256=owner._resumption.claims.peer}
+  owner._peer_expires=owner._resumption.claims.peer_expires
+ }
+ ticket:=server_resumption_issue(owner,owner._output[:FINISHED_MESSAGE_SIZE])
+ // Final authenticated transcript has been consumed by ticket derivation. Wipe handshake
 	// transients before Complete; keep selected parameters until its acceptance.
 	server_handshake_cleanup(owner, true)
 	if !server_handshake_id(owner) {
@@ -49,5 +54,6 @@ server_handshake_finished_feed :: proc(owner: ^Server_Handshake, level: Server_H
 	}
 	owner._phase = .Complete
 	owner._event = {id=owner._next_id, kind=.Complete}
+ if ticket {owner._event={id=owner._next_id,kind=.Handshake_Bytes,level=.Application,bytes=owner._resumption.wire[:owner._resumption.wire_size]}}
 	return consumed, .Need_Event_Drain, .None
 }

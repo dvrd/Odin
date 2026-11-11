@@ -50,10 +50,9 @@ HTTP3 inherits its TCP TLS client-auth policy when no HTTP3 override is supplied
 an explicit Disabled policy can opt out.
 
 Only initial TLS1.3 authentication is introduced here. Post-handshake client auth
-and TLS1.2 client certificates remain outside this profile. Existing client tickets
-are hostname-bound; configured/client-authenticated handshakes use full handshakes
-and do not publish tickets into that anonymous cache. Identity-bound server/client
-resumption is tracked separately by OKAMI-382. Anonymous resumption is unchanged.
+and TLS1.2 client certificates remain outside this profile. Identity-bound server/client resumption is described in SERVER_RESUMPTION.md;
+tickets bind client identity, trust roots and negotiated ALPN. Server mTLS tickets
+also retain authenticated peer identity, expiry and policy scope.
 
 Verification:
 

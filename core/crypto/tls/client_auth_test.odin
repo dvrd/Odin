@@ -127,11 +127,18 @@ mutual_tls_rejects_cross_store_pins_and_anonymous_resumption_cache :: proc(t:^te
  testing.expect(t,session_resume_candidate(&conn,time.now())==nil)
  conn.config.session=nil
  testing.expect(t,session_resume_candidate(&conn,time.now())==nil)
+ transcript_init(&conn.server_finished_transcript)
  master:[32]u8;master[0]=1
- resumption_capture(&conn,master);testing.expect(t,!conn.have_resumption_master)
- // A server-requested certificate must not create a ticket later reusable by
- // an anonymous connection, including when no client identity was available.
+ resumption_capture(&conn,master);testing.expect(t,conn.have_resumption_master)
+ // Ticket cache identity metadata prevents reuse by another configured client.
+ session.client_identity=conn.session_identity;session.has_client_identity=true
+ conn.config.session=&session;testing.expect(t,session_resume_candidate(&conn,time.now())==&session)
+ different:=mtls_store(t,#load("testdata/mtls/client-large.pem"),#load("testdata/mtls/client-large-key.pem"));defer store.destroy(&different)
+ conn.config.client_credentials=different;testing.expect(t,session_resume_candidate(&conn,time.now())==nil)
+ conn.config.client_credentials=owner
+ malformed:=session;malformed.alpn_len=256;testing.expect(t,!session_offerable(&malformed,"localhost",time.now()))
  conn.config.client_credentials=nil;conn.client_auth_used=true
- resumption_capture(&conn,master);testing.expect(t,!conn.have_resumption_master)
+ conn.config.session_cache=nil;conn.config.session=&session;testing.expect(t,session_resume_candidate(&conn,time.now())==nil)
+ resumption_capture(&conn,master);testing.expect(t,conn.have_resumption_master)
  testing.expect_value(t,cache,before)
 }

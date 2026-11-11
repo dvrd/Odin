@@ -319,15 +319,15 @@ resumption_ticket_remember_refuses_early_data :: proc(t: ^testing.T) {
 	testing.expect(t, keys.secret == [32]u8{})
 
 	kept := session.psk
-	huge: [4 + 9 + 2 + 513 + 2]u8
+	huge: [4 + 9 + 2 + (SESSION_TICKET_MAX+1) + 2]u8
 	huge[0] = NEW_SESSION_TICKET_TYPE
-	huge_body := 4 + 4 + 1 + 2 + 513 + 2
+	huge_body := 4 + 4 + 1 + 2 + (SESSION_TICKET_MAX+1) + 2
 	huge[1] = u8(huge_body >> 16)
 	huge[2] = u8(huge_body >> 8)
 	huge[3] = u8(huge_body)
 	huge[7] = 100
 	huge[12] = 0
-	huge[13], huge[14] = 0x02, 0x01
+	huge[13], huge[14] = u8((SESSION_TICKET_MAX+1)>>8), u8((SESSION_TICKET_MAX+1)&255)
 	testing.expect(t, !session_remember(&session, master, huge[:], "example.com", time.now()))
 	testing.expect(t, session.usable && session.psk == kept && session.ticket_len == 4)
 	crypto.zero_explicit(&kept, size_of(kept))

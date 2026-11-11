@@ -31,13 +31,15 @@ exchange_udp :: proc(
 	if len(recv_buf) == 0 {
 		return sent, 0, serr
 	}
-	n, from, rerr := async.receive_udp(socket, recv_buf, deadline)
+	n, from, metadata, rerr := async.receive_udp_metadata(socket, recv_buf, deadline)
 	#partial switch rerr.kind {
 	case .None:
 		if n == 0 {
 			return sent, 0, serr
 		}
-		if e := ingest(c, now, path_of(from), recv_buf[:n]); e != .None {
+		e:Error
+        if c.migration.enabled {e=ingest_from_ecn(c,now,from,recv_buf[:n],metadata.ecn,metadata.ecn_valid&&!metadata.control_truncated)}else{e=ingest(c,now,path_of(from),recv_buf[:n])}
+        if e != .None {
 			return sent, n, e
 		}
 		return sent, n, serr
@@ -72,7 +74,9 @@ flush_udp :: proc(
 	if len(send_buf) == 0 || c.phase == .Draining || c.phase == .Closed || c.phase == .Failed {
 		return 0, false, .None
 	}
-	n, err := pump(c, now, send_buf)
+	target:=peer
+ n:int;err:Error
+ if c.migration.enabled {n,target,err=pump_to(c,now,send_buf)}else{n,err=pump(c,now,send_buf)}
 	if err != .None || n <= 0 {
 		soft := err == .None || err == .Congestion || err == .Anti_Amplification || err == .Discarded || err == .Not_Ready
 		return 0, !soft, err
@@ -82,6 +86,7 @@ flush_udp :: proc(
 	}
 	copy(c.udp_hold[:n], send_buf[:n])
 	c.udp_hold_len = n
+ c.udp_hold_peer=target;c.udp_hold_ecn=output_ecn(c)
 	sent, serr := send_hold(c, socket, peer, deadline)
 	return sent, serr != .None, serr
 }
@@ -93,7 +98,8 @@ send_hold :: proc(
 	peer: net.Endpoint,
 	deadline: async.Deadline,
 ) -> (int, Error) {
-	n, err := async.send_udp(socket, peer, c.udp_hold[:c.udp_hold_len], deadline)
+	target:=peer;if c.udp_hold_peer.address!=nil {target=c.udp_hold_peer}
+ n, err := async.send_udp_ecn(socket, target, c.udp_hold[:c.udp_hold_len], c.udp_hold_ecn,deadline)
 	#partial switch err.kind {
 	case .None:
 		c.udp_hold_len = 0

@@ -9,15 +9,16 @@ Server_Handshake_Direction :: enum {Read, Write} // Relative to the local server
 Server_Handshake_Event_Kind :: enum {None, Handshake_Bytes, Traffic_Secret, Peer_Parameters, Complete, Fatal}
 Server_Handshake_Error :: enum {
 	None, Invalid_Config, Invalid_Owner, Invalid_State, Invalid_Event,
-	Wrong_Level, Malformed, Unsupported, Limit, Allocation_Failed, Cancelled, Identity_Exhausted, Credential_Failed, Signing_Failed, Entropy_Unavailable, Client_Authentication_Failed, Finished_Failed, No_Application_Protocol,
+	Wrong_Level, Malformed, Unsupported, Limit, Allocation_Failed, Cancelled, Identity_Exhausted, Credential_Failed, Signing_Failed, Entropy_Unavailable, Client_Authentication_Failed, Binder_Failed, Finished_Failed, No_Application_Protocol,
 }
 Server_Handshake_Status :: enum {Need_Input, Need_Event_Drain, Await_Flight, Await_Client_Finished, Terminal, Invalid_Owner}
 Server_Handshake_Config :: struct {
 	max_client_hello_bytes: int,
 	max_extensions: int,
 	client_auth: ^Client_Auth_Config,
+	tickets: ^Server_Ticket_Config,
 }
-SERVER_HANDSHAKE_DEFAULT_CONFIG :: Server_Handshake_Config{SERVER_CLIENT_HELLO_MAX_WIRE, SERVER_CLIENT_HELLO_MAX_ENTRIES, nil}
+SERVER_HANDSHAKE_DEFAULT_CONFIG :: Server_Handshake_Config{SERVER_CLIENT_HELLO_MAX_WIRE, SERVER_CLIENT_HELLO_MAX_ENTRIES, nil, nil}
 
 // All fields are tentative offers, never authenticated negotiated parameters.
 Server_Handshake_Peer_Parameters :: struct {
@@ -66,12 +67,16 @@ Server_Handshake :: struct {
 	_parameters: Server_Parameters,
 	_client_auth: ^Server_Client_Auth,
 	_peer_identity: Peer_Identity,
+	_peer_expires:i64,
+	_resumption:^Server_Resumption,
+	_resumed:bool,
+	_binder_transcript:Handshake_Transcript,
 }
 
 server_handshake_init :: proc(owner: ^Server_Handshake, config: Server_Handshake_Config, allocator: mem.Allocator) -> Server_Handshake_Error {
 	if owner == nil {return .Invalid_Owner}
 	if owner._self != nil || owner._phase != .Uninitialized {return .Invalid_State}
-	if !client_auth_config_valid(config.client_auth) || allocator.procedure == nil || config.max_client_hello_bytes < 45 ||
+	if !server_ticket_config_valid(config.tickets) || !client_auth_config_valid(config.client_auth) || allocator.procedure == nil || config.max_client_hello_bytes < 45 ||
 	   config.max_client_hello_bytes > SERVER_CLIENT_HELLO_MAX_WIRE || config.max_extensions < 1 ||
 	   config.max_extensions > SERVER_CLIENT_HELLO_MAX_ENTRIES {return .Invalid_Config}
 	owner._self = owner
@@ -122,7 +127,7 @@ server_handshake_clear_event :: proc(owner: ^Server_Handshake) {
 }
 @(private)
 server_handshake_cleanup :: proc(owner: ^Server_Handshake, keep_parameters := false) {
-	if !keep_parameters {server_parameters_clear(owner);owner._peer_identity={}}
+	if !keep_parameters {server_resumption_clear(owner);server_parameters_clear(owner);owner._peer_identity={};owner._resumed=false;owner._peer_expires=0}
 	server_handshake_clear_event(owner)
 	server_client_auth_clear(owner)
 	server_flight_cleanup(owner)
@@ -159,7 +164,7 @@ server_handshake_feed :: proc(owner: ^Server_Handshake, level: Server_Handshake_
 	}
 	if owner._event.kind != .None {return 0, .Need_Event_Drain, .None}
 	if owner._phase == .Await_Client_Finished {
-		if owner._config.client_auth != nil && owner._config.client_auth.mode != .Disabled {return server_client_auth_feed(owner, level, input)}
+		if !owner._resumed && owner._config.client_auth != nil && owner._config.client_auth.mode != .Disabled {return server_client_auth_feed(owner, level, input)}
 		return server_handshake_finished_feed(owner, level, input)
 	}
 	if owner._phase == .Await_Flight {return 0, .Await_Flight, .None}
@@ -210,6 +215,7 @@ server_handshake_feed :: proc(owner: ^Server_Handshake, level: Server_Handshake_
 		server_handshake_fail(owner, e); return consumed, .Terminal, e
 	}
 	owner._hello, owner._selection = hello, selection
+	owner._binder_transcript=owner._transcript
 	transcript_update(&owner._transcript, owner._input)
 	owner._phase = .Await_Flight
 	if decoded == .Retry_Required {
@@ -236,10 +242,15 @@ server_handshake_peek :: proc(owner: ^Server_Handshake) -> (Server_Handshake_Eve
 server_handshake_accept :: proc(owner: ^Server_Handshake, id: u64) -> Server_Handshake_Error {
 	if !server_handshake_valid(owner) {return .Invalid_Owner}
 	if id == 0 || owner._event.kind == .None || id != owner._event.id {return .Invalid_Event}
-	if owner._event.kind == .Complete {server_parameters_clear(owner)}
+	if owner._event.kind == .Complete {server_resumption_clear(owner);server_parameters_clear(owner)}
+	ticket:=owner._event.kind==.Handshake_Bytes&&owner._event.level==.Application
 	retry := server_retry_active(owner) && owner._event.kind == .Handshake_Bytes
-	if owner._event.kind == .Handshake_Bytes {transcript_update(&owner._transcript, owner._event.bytes)}
+	if owner._event.kind == .Handshake_Bytes && owner._event.level!=.Application {transcript_update(&owner._transcript, owner._event.bytes)}
 	server_handshake_clear_event(owner)
+	if ticket {
+	 if !server_handshake_id(owner) {server_handshake_fail(owner,.Identity_Exhausted);return .Identity_Exhausted}
+	 owner._event={id=owner._next_id,kind=.Complete}
+	}
 	if retry {owner._phase = .Retry_Client_Hello}
 	if owner._flight.stage == .End {_ = server_flight_next(owner)}
 	return .None

@@ -107,6 +107,9 @@ client_auth_prepare :: proc(conn:^Conn,hash:^[32]u8,allocator:mem.Allocator)->Ha
  if raw_data(conn.client_auth_flight)!=nil {hash^=transcript_snapshot(&conn.server_finished_transcript);return {}}
  flight,e:=client_authentication_flight(conn.config.client_credentials,conn.client_auth_schemes[:conn.client_auth_scheme_count],&conn.server_finished_transcript,allocator,conn.config.client_credential_lease)
  if e.kind!=.None {return e}
+ if len(flight)>13&&flight[0]==11 {
+  n:=authentication_u24(flight,8);if n>0&&n<=len(flight)-11 {conn.session_identity=ticket_hash(flight[11:11+n]);conn.session_identity_present=true;conn.session_identity_valid=true}
+ }
  conn.client_auth_flight=flight;conn.client_auth_allocator=allocator
  hash^=transcript_snapshot(&conn.server_finished_transcript)
  return {}

@@ -260,7 +260,7 @@ server_hello_psk_valid :: proc(identities, binders: []u8) -> bool {
 server_client_hello_negotiate :: proc(hello: Server_Client_Hello_View) -> (Server_Client_Hello_Selection, Server_Hello_Codec_Status) {
 	if !server_hello_offer_contains(hello.versions, VERSION_TLS_1_3) ||
 	   !server_hello_offer_contains(hello.cipher_suites,u16(Cipher_Suite.AES_128_GCM_SHA256)) ||
-	   (!server_hello_offer_contains(hello.signature_algorithms,u16(Signature_Scheme.RSA_PSS_RSAE_SHA256)) &&
+	   (!hello.has_psk && !server_hello_offer_contains(hello.signature_algorithms,u16(Signature_Scheme.RSA_PSS_RSAE_SHA256)) &&
 	    !server_hello_offer_contains(hello.signature_algorithms,u16(Signature_Scheme.ECDSA_SECP256R1_SHA256))) {return {}, .Unsupported}
 	group: Named_Group
 	if server_hello_offer_contains(hello.groups,u16(Named_Group.X25519)) {group=.X25519} else if server_hello_offer_contains(hello.groups,u16(Named_Group.SECP256R1)) {group=.SECP256R1} else {return {},.Unsupported}

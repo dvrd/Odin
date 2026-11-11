@@ -568,8 +568,8 @@ conn_flow_reset_close_congestion_and_bounds :: proc(t: ^testing.T) {
 	hit := false
 	cwnd := conn.stats(p.client).congestion_window
 	for id: u64 = 0; id < 128; id += 4 {
-		_, we := conn.write(p.client, id, []u8{1}, true)
-		if we != .None {
+		_, write_error := conn.write(p.client, id, []u8{1}, true)
+		if write_error != .None {
 			break
 		}
 		_, pe := post(p, p.client, {drop = true})
@@ -599,7 +599,7 @@ conn_flow_reset_close_congestion_and_bounds :: proc(t: ^testing.T) {
 	now: i64
 	limited := false
 	for _ in 0 ..< 24 {
-		n, err := conn.pump(p.server, now, buf[:])
+		_, err := conn.pump(p.server, now, buf[:])
 		if err == .Anti_Amplification {
 			limited = true
 			break
@@ -723,10 +723,10 @@ review_stream_loss_must_retransmit_data :: proc(t: ^testing.T) {
 		}
 		p.link.now = sim.Tick(timer.at)
 		packet: [conn.MAX_DATAGRAM]u8
-		n, err := conn.on_timeout(p.client, timer.at, packet[:]); assert(err == .None)
-		if n > 0 {
+		timeout_n, err := conn.on_timeout(p.client, timer.at, packet[:]); assert(err == .None)
+		if timeout_n > 0 {
 			src, dst := endpoint(p.client, p)
-			assert(sim.send(&p.link, src, dst, packet[:n], {}) == .None)
+			assert(sim.send(&p.link, src, dst, packet[:timeout_n], {}) == .None)
 		}
 		assert(deliver(p, i64(p.link.now)) == .None); settle(t, p)
 	}

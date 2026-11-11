@@ -26,7 +26,7 @@ server_async_handshake_drive :: proc(s:^Server_Async_Conn) {
 			// profiles explicitly; this TCP binding never skips/replays 0RTT.
 			if s._engine._hello.early_data {server_async_fail(s,{kind=.Protocol_Failed},{kind=.Handshake,engine=.Unsupported});return}
 			s._ccs_allowed=true
-			if event.level==.Application || (event.level==.Handshake)!=s._write_keys {server_async_fail(s,{kind=.Protocol_Failed},{kind=.Handshake,engine=.Wrong_Level});return}
+			if event.level!=.Application && (event.level==.Handshake)!=s._write_keys {server_async_fail(s,{kind=.Protocol_Failed},{kind=.Handshake,engine=.Wrong_Level});return}
 			s._engine_event=event.id
 			_=server_async_send_record(s,.Handshake,event.bytes,.Handshake,s._handshake_deadline)
 			return
@@ -49,6 +49,7 @@ server_async_handshake_drive :: proc(s:^Server_Async_Conn) {
 			if e!=.None || !p.authenticated {server_async_fail(s,{kind=.Protocol_Failed},{kind=.Handshake,engine=.Invalid_State});return}
 			s._alpn_size=copy(s._alpn[:],p.alpn)
 			s._peer_identity=server_handshake_peer_identity(&s._engine)
+			s._resumed=server_handshake_resumed(&s._engine)
 			if server_handshake_accept(&s._engine,event.id)!=.None {server_async_fail(s,{kind=.Protocol_Failed},{kind=.Handshake,engine=.Invalid_Event});return}
 			keys:=server_async_keys(s)
 			server_async_install(s,.Read,keys.application_read)

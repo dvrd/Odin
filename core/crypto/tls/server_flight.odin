@@ -69,7 +69,9 @@ server_handshake_start_flight :: proc(
 	if credential_store.check_server_leaf(store, lease, now).kind != .None {
 		server_handshake_fail(owner, .Credential_Failed); return .Credential_Failed
 	}
-	scheme,se:=credential_store.signature_scheme(store,lease)
+	if re:=server_resumption_prepare(owner,now);re!=.None {server_handshake_fail(owner,re);return re}
+ if owner._resumed {owner._flight.stage=.Hello;return .None}
+ scheme,se:=credential_store.signature_scheme(store,lease)
 	if se.kind!=.None || scheme==.None {server_handshake_fail(owner,.Credential_Failed);return .Credential_Failed}
 	if !server_hello_offer_contains(owner._hello.signature_algorithms,u16(scheme)) {server_handshake_fail(owner,.Unsupported);return .Unsupported}
 	owner._selection.signature=cast(Signature_Scheme)u16(scheme)
@@ -204,7 +206,7 @@ server_flight_next :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 		f.stage = .Extensions
 		return server_flight_secret(owner, f.handshake.client_traffic_secret[:], .Read)
 	case .Extensions:
-		f.stage = .Certificate_Request
+		f.stage = .Finished if owner._resumed else .Certificate_Request
 		return server_parameters_extensions(owner)
 	case .Certificate_Request:
 		f.stage = .Certificate_Header
@@ -277,6 +279,7 @@ server_flight_next :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 			f.handshake.handshake_secret,
 			transcript_snapshot(&owner._transcript),
 		)
+		if owner._resumption!=nil {owner._resumption.master=f.application.master_secret}
 		f.client_finished_secret = f.handshake.client_traffic_secret
 		crypto.zero_explicit(&f.handshake, size_of(f.handshake))
 		f.stage = .Application_Read
@@ -336,10 +339,15 @@ server_flight_prepare_ecdh :: proc(owner: ^Server_Handshake, private: ^ecdh.Priv
 	   !ecdh.ecdh(private,&peer,shared[:]) {return .Malformed}
 	size := 32 if curve == .X25519 else 65
 	ecdh.private_key_public_bytes(private,public[:size])
-	wire: [155]u8
+	wire: [161]u8
 	n := server_flight_group_hello(wire[:],owner._hello.session_id,owner._selection.group,public[:size],random)
+ if owner._resumed {
+  at:=n;hello_put_u16(wire[:],&at,41);hello_put_u16(wire[:],&at,2);hello_put_u16(wire[:],&at,owner._resumption.selected_index)
+  ext_at:=42+len(owner._hello.session_id);retry_put_u16(wire[:],ext_at,u16(at-ext_at-2));n=at;server_flight_put24(wire[1:4],n-4)
+ }
 	staged := owner._transcript; transcript_update(&staged,wire[:n])
-	secrets,e := handshake_secrets_derive_from_hash(shared,transcript_snapshot(&staged))
+	psk:[]u8;if owner._resumed {psk=owner._resumption.claims.psk[:]}
+	secrets,e := handshake_secrets_derive_from_hash(shared,transcript_snapshot(&staged),psk)
 	defer crypto.zero_explicit(&secrets,size_of(secrets))
 	if e != .None {return .Malformed}
 	f.handshake=secrets
