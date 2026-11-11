@@ -69,6 +69,7 @@ handshake_init :: proc(
 	role: Role,
 	alpn: []string,
 	initial_crypto, handshake_crypto, one_rtt_crypto: []u8,
+ coverage:[3][]u8={},
 ) -> Session_Error {
 	if h == nil {
 		return .Invalid_State
@@ -82,9 +83,9 @@ handshake_init :: proc(
 	if tls.alpn_transport_offers(.QUIC, alpn) != .None {
 		return .Invalid_ALPN
 	}
-	if crypto_reassembly_init(&h.crypto[0], initial_crypto) != .None ||
-	   crypto_reassembly_init(&h.crypto[1], handshake_crypto) != .None ||
-	   crypto_reassembly_init(&h.crypto[2], one_rtt_crypto) != .None {
+	if crypto_reassembly_init(&h.crypto[0], initial_crypto,coverage[0]) != .None ||
+	   crypto_reassembly_init(&h.crypto[1], handshake_crypto,coverage[1]) != .None ||
+	   crypto_reassembly_init(&h.crypto[2], one_rtt_crypto,coverage[2]) != .None {
 		return .Invalid_State
 	}
 	h.role = role

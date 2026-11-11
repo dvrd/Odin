@@ -226,8 +226,10 @@ crypto_reassembly_bounds_overlap_and_frames :: proc(t: ^testing.T) {
 	for i in 0 ..< quic.CRYPTO_SPAN_CAP {
 		testing.expect_value(t, quic.crypto_reassembly_write(&r3, u64(i * 2), one[:]), .None)
 	}
-	testing.expect_value(t, quic.crypto_reassembly_write(&r3, 80, one[:]), .Span_Exhausted)
-	testing.expect(t, r3.discarded)
+	testing.expect_value(t, quic.crypto_reassembly_write(&r3, 80, one[:]), .None)
+	testing.expect(t, !r3.discarded && r3.span_count == 33)
+    testing.expect_value(t,quic.crypto_reassembly_write(&r3,128,one[:]),.Cap_Overflow)
+    testing.expect(t,r3.discarded)
 
 	frame_storage: [8]u8
 	frame := hex(frame_storage[:], "060003010203")
