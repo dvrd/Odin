@@ -24,6 +24,8 @@ exchange_udp :: proc(
 	if c.cancelled {
 		return 0, 0, .Cancelled
 	}
+	if _,policy_error:=configure_udp(socket);policy_error!=.None {return 0,0,policy_error}
+
 	sent, blocked, serr := flush_udp(c, socket, peer, send_buf, now, deadline)
 	if blocked {
 		return sent, 0, serr

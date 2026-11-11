@@ -55,6 +55,7 @@ Error :: enum {
 	Partial,
 	Discarded,
  Stateless_Reset,
+ Unsupported,
 }
 
 Phase :: enum {
