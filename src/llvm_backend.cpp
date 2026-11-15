@@ -4279,6 +4279,11 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 	TIME_SECTION("LLVM Verify Procedures");
 	lb_verify_generated_procedures(gen, do_threading);
 
+	TIME_SECTION("LLVM Snapshot Large Aggregate Copies");
+	for (auto const &entry : gen->modules) {
+		lb_lower_large_aggregate_copies(entry.value);
+	}
+
 	TIME_SECTION("LLVM Function Pass");
 	lb_llvm_function_passes(gen, do_threading);
 
