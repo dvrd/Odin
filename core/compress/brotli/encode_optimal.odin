@@ -585,7 +585,11 @@ relax :: proc(e: ^Encoder, o: ^Optimal, starts: []Start, at, position, limit: in
 	reach := min(position, e.window_max)
 	nodes := o.nodes
 
-	for start, rank in starts[:min(len(starts), STARTS_RECENT)] {
+	// Below the top level only the cheapest start is extended.
+	recent := STARTS_RECENT if e.level >= .Optimal else 1
+	matched := STARTS_MATCHED if e.level >= .Optimal else 1
+
+	for start, rank in starts[:min(len(starts), recent)] {
 		run := at - start.position
 		insert := insert_code(run)
 		arrival := start.relative + o.literal_sum[at]
@@ -657,7 +661,7 @@ relax :: proc(e: ^Encoder, o: ^Optimal, starts: []Start, at, position, limit: in
 			best = max(best, length)
 		}
 
-		if rank >= STARTS_MATCHED {
+		if rank >= matched {
 			continue
 		}
 
