@@ -478,6 +478,123 @@ write_switch :: #force_inline proc(e: ^Encoder, block: ^Meta_Block, category: Ca
 }
 
 // Builds and writes one prefix code per histogram row.
+SMOOTH_LEVEL_MIN :: Level(4)
+
+// Evens out neighbouring counts so that the code lengths built from them
+// form runs, which the code-length code stores cheaply. Follows the
+// reference encoder; arithmetic on averages is in 24.8 fixed point.
+@(private)
+smooth_for_rle :: proc(counts: []u32) {
+	STREAK_LIMIT :: 1240
+	length := len(counts)
+	nonzeros := 0
+	smallest := u32(1 << 30)
+
+	for length > 0 && counts[length - 1] == 0 {
+		length -= 1
+	}
+
+	for count in counts[:length] {
+		if count != 0 {
+			nonzeros += 1
+			smallest = min(smallest, count)
+		}
+	}
+
+	if nonzeros < 16 {
+		return
+	}
+
+	if smallest < 4 && length - nonzeros < 6 {
+		for index in 1 ..< length - 1 {
+			if counts[index - 1] != 0 && counts[index] == 0 && counts[index + 1] != 0 {
+				counts[index] = 1
+			}
+		}
+	}
+
+	if nonzeros < 28 {
+		return
+	}
+
+	// Runs that already code well are left alone: five zeros, seven equals.
+	good: [ALPHABET_MAX]bool
+	symbol := counts[0]
+	step := 0
+
+	for index in 0 ..= length {
+		if index < length && counts[index] == symbol {
+			step += 1
+			continue
+		}
+
+		if symbol == 0 && step >= 5 || symbol != 0 && step >= 7 {
+			for back in 1 ..= step {
+				good[index - back] = true
+			}
+		}
+
+		step = 1
+
+		if index != length {
+			symbol = counts[index]
+		}
+	}
+
+	stride := u64(0)
+	sum := u64(0)
+	limit := 256 * (u64(counts[0]) + u64(counts[1]) + u64(counts[2])) / 3 + 420
+
+	for index in 0 ..= length {
+		// Unsigned wrap-around: true when the count is far from the limit.
+		ends :=
+			index == length ||
+			good[index] ||
+			index != 0 && good[index - 1] ||
+			256 * u64(counts[index]) - limit + STREAK_LIMIT >= 2 * STREAK_LIMIT
+
+		if ends {
+			if stride >= 4 || stride >= 3 && sum == 0 {
+				count := max((sum + stride / 2) / stride, 1)
+
+				if sum == 0 {
+					count = 0
+				}
+
+				for back in 1 ..= int(stride) {
+					counts[index - back] = u32(count)
+				}
+			}
+
+			stride = 0
+			sum = 0
+
+			switch {
+			case index + 2 < length:
+				limit = 256 * (u64(counts[index]) + u64(counts[index + 1]) + u64(counts[index + 2])) / 3 + 420
+			case index < length:
+				limit = 256 * u64(counts[index])
+			case:
+				limit = 0
+			}
+		}
+
+		stride += 1
+
+		if index != length {
+			sum += u64(counts[index])
+
+			if stride >= 4 {
+				limit = (256 * sum + stride / 2) / stride
+			}
+
+			if stride == 4 {
+				limit += 120
+			}
+		}
+	}
+}
+
 @(private)
 write_codes :: proc(
 	e: ^Encoder,
@@ -490,6 +607,10 @@ write_codes :: proc(
 	resize(codes, rows * stride) or_return
 
 	for row in 0 ..< rows {
+		if e.level >= SMOOTH_LEVEL_MIN {
+			smooth_for_rle(histograms[row * stride:][:alphabet])
+		}
+
 		build_and_write_code(
 			e,
 			histograms[row * stride:][:alphabet],
