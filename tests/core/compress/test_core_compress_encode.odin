@@ -10,7 +10,6 @@ ENCODE_LEVELS := [?]zlib.Level{.Store, .Fastest, .Fast, .Default, .Best, .Optima
 
 // Deterministic inputs that exercise literals, short and long matches, runs,
 // incompressible data and the stored-block size boundaries.
-@(private = "file")
 encode_sample :: proc(kind, size: int, allocator := context.allocator) -> []u8 {
 	data := make([]u8, size, allocator)
 	state := u32(0x9e3779b9) + u32(kind) * 7919
