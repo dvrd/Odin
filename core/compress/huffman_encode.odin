@@ -1,4 +1,4 @@
-package compress_brotli
+package compress
 
 import "core:math/bits"
 
@@ -132,7 +132,6 @@ huffman_lengths :: proc(scratch: ^Huffman_Scratch, frequencies: []u32, limit: in
 	}
 }
 
-@(private)
 count_leaves :: proc(scratch: ^Huffman_Scratch, index: i32, lengths: []u8) {
 	node := scratch.nodes[index]
 
@@ -146,7 +145,6 @@ count_leaves :: proc(scratch: ^Huffman_Scratch, index: i32, lengths: []u8) {
 }
 
 // Insertion sort by (frequency, symbol); alphabets here have at most ~300 entries.
-@(private)
 sort_symbols :: proc(order: []i32, frequencies: []u32) {
 	for index in 1 ..< len(order) {
 		value := order[index]

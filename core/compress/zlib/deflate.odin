@@ -87,7 +87,7 @@ Encoder :: struct {
 	distance_len:  [DISTANCE_SYMBOLS]u8,
 	literal_code:  [LITERAL_SYMBOLS]u16,
 	distance_code: [DISTANCE_SYMBOLS]u16,
-	huffman:       Huffman_Scratch,
+	huffman:       compress.Huffman_Scratch,
 }
 
 deflate_bound :: proc(size: int) -> int {
@@ -280,8 +280,8 @@ flush_block :: proc(e: ^Encoder, end: int, final: bool) {
 		put_bits(e, final ? 1 : 0, 1)
 		put_bits(e, 2, 2)
 		write_dynamic_header(e, &header)
-		huffman_codes(e.literal_len[:], e.literal_code[:])
-		huffman_codes(e.distance_len[:], e.distance_code[:])
+		compress.huffman_codes(e.literal_len[:], e.literal_code[:])
+		compress.huffman_codes(e.distance_len[:], e.distance_code[:])
 		write_tokens(e)
 	}
 
@@ -321,8 +321,8 @@ measure_block :: proc(e: ^Encoder, span: int, header: ^Dynamic_Header) -> (dynam
 	// Dynamic Huffman cost.
 	ensure_two_symbols(e.literal_freq[:])
 	ensure_two_symbols(e.distance_freq[:])
-	huffman_lengths(&e.huffman, e.literal_freq[:], 15, e.literal_len[:])
-	huffman_lengths(&e.huffman, e.distance_freq[:], 15, e.distance_len[:])
+	compress.huffman_lengths(&e.huffman, e.literal_freq[:], 15, e.literal_len[:])
+	compress.huffman_lengths(&e.huffman, e.distance_freq[:], 15, e.distance_len[:])
 
 	plan_dynamic_header(e, header)
 
@@ -398,7 +398,7 @@ set_fixed_codes :: proc(e: ^Encoder) {
 		full[symbol] = u8(fixed_literal_length(symbol))
 	}
 
-	huffman_codes(full[:], codes[:])
+	compress.huffman_codes(full[:], codes[:])
 
 	for symbol in 0 ..< LITERAL_SYMBOLS {
 		e.literal_len[symbol] = full[symbol]
@@ -550,8 +550,8 @@ plan_dynamic_header :: proc(e: ^Encoder, header: ^Dynamic_Header) {
 	}
 
 	ensure_two_symbols(header.code_freq[:])
-	huffman_lengths(&e.huffman, header.code_freq[:], 7, header.code_len[:])
-	huffman_codes(header.code_len[:], header.code_code[:])
+	compress.huffman_lengths(&e.huffman, header.code_freq[:], 7, header.code_len[:])
+	compress.huffman_codes(header.code_len[:], header.code_code[:])
 
 	header.code_count = 19
 

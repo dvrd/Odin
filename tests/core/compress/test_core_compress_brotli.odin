@@ -4,6 +4,13 @@ import "core:bytes"
 import "core:compress/brotli"
 import "core:testing"
 
+brotli_decode :: proc(data: []u8) -> (plain: []u8, err: brotli.Error) {
+	buf: bytes.Buffer
+	err = brotli.load(data, &buf)
+
+	return buf.buf[:], err
+}
+
 BROTLI_LEVELS := [?]brotli.Level{.Fastest, .Fast, .Default, .Best, .Optimal}
 
 // Stream from the reference test data: several meta-blocks and block switches.
@@ -28,19 +35,19 @@ BROTLI_DICTIONARY_STREAM := [?]u8 {
 
 @(test)
 brotli_decodes_reference_streams :: proc(t: ^testing.T) {
-	text, text_error := brotli.decode(BROTLI_REFERENCE_STREAM[:])
+	text, text_error := brotli_decode(BROTLI_REFERENCE_STREAM[:])
 	defer delete(text)
 
 	testing.expect_value(t, text_error, nil)
 	testing.expect_value(t, string(text), BROTLI_REFERENCE_TEXT)
 
-	words, words_error := brotli.decode(BROTLI_DICTIONARY_STREAM[:])
+	words, words_error := brotli_decode(BROTLI_DICTIONARY_STREAM[:])
 	defer delete(words)
 
 	testing.expect_value(t, words_error, nil)
 	testing.expect_value(t, string(words), BROTLI_DICTIONARY_TEXT)
 
-	empty, empty_error := brotli.decode([]u8{0x06})
+	empty, empty_error := brotli_decode([]u8{0x06})
 	defer delete(empty)
 
 	testing.expect_value(t, empty_error, nil)
@@ -62,7 +69,7 @@ brotli_encode_round_trips_every_level :: proc(t: ^testing.T) {
 
 				testing.expect_value(t, encode_error, nil)
 
-				plain, decode_error := brotli.decode(packed)
+				plain, decode_error := brotli_decode(packed)
 				defer delete(plain)
 
 				testing.expect_value(t, decode_error, nil)
@@ -81,7 +88,7 @@ brotli_encode_uses_the_static_dictionary :: proc(t: ^testing.T) {
 	testing.expect_value(t, encode_error, nil)
 	testing.expectf(t, len(packed) < len(text) * 3 / 4, "%d bytes for %d of dictionary text", len(packed), len(text))
 
-	plain, decode_error := brotli.decode(packed)
+	plain, decode_error := brotli_decode(packed)
 	defer delete(plain)
 
 	testing.expect_value(t, decode_error, nil)
@@ -125,14 +132,19 @@ brotli_decode_rejects_damaged_streams :: proc(t: ^testing.T) {
 	testing.expect_value(t, encode_error, nil)
 
 	for size in 0 ..< len(packed) {
-		plain, decode_error := brotli.decode(packed[:size])
+		plain, decode_error := brotli_decode(packed[:size])
 		delete(plain)
 
 		testing.expectf(t, decode_error != nil, "a %d byte prefix decoded", size)
 	}
 
-	limited, limit_error := brotli.decode(packed, context.allocator, len(data) - 1)
-	delete(limited)
+	trailing := make([]u8, len(packed) + 1)
+	defer delete(trailing)
 
-	testing.expect_value(t, limit_error, brotli.Error(brotli.Decode_Error.Output_Limit_Exceeded))
+	copy(trailing, packed)
+
+	extra, trailing_error := brotli_decode(trailing)
+	delete(extra)
+
+	testing.expect_value(t, trailing_error, brotli.Error(brotli.E_Brotli.Trailing_Data))
 }

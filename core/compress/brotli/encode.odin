@@ -2,6 +2,7 @@ package compress_brotli
 
 import "base:intrinsics"
 import "base:runtime"
+import "core:compress"
 import "core:math"
 import "core:math/bits"
 
@@ -80,7 +81,7 @@ Encoder :: struct {
 	chain:         []u32,
 	ring:          Ring,
 	commands:      [dynamic]Command,
-	huffman:       Huffman_Scratch,
+	huffman:       compress.Huffman_Scratch,
 	allocator:     runtime.Allocator,
 	// Static dictionary words chained by the hash of their first four bytes.
 	word_head:     [1 << DICTIONARY_HASH_BITS]u16,
@@ -1002,8 +1003,8 @@ build_and_write_code :: proc(e: ^Encoder, histogram: []u32, lengths: []u8, codes
 		return
 	}
 
-	huffman_lengths(&e.huffman, histogram, CODE_LENGTH_MAX, lengths)
-	huffman_codes(lengths, codes)
+	compress.huffman_lengths(&e.huffman, histogram, CODE_LENGTH_MAX, lengths)
+	compress.huffman_codes(lengths, codes)
 
 	if used_count <= 4 {
 		// Simple code: symbols in order of (length, value).
@@ -1115,8 +1116,8 @@ write_complex_code :: proc(e: ^Encoder, lengths: []u8) {
 			}
 		}
 	} else {
-		huffman_lengths(&e.huffman, histogram[:], 5, meta_lengths[:])
-		huffman_codes(meta_lengths[:], meta_codes[:])
+		compress.huffman_lengths(&e.huffman, histogram[:], 5, meta_lengths[:])
+		compress.huffman_codes(meta_lengths[:], meta_codes[:])
 	}
 
 	skip := 0

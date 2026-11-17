@@ -127,6 +127,7 @@ Error :: union #shared_nil {
 	PPMd_Error,
 	BCJ2_Error,
 	XZ_Error,
+	Brotli_Error,
 	io.Error,
 	runtime.Allocator_Error,
 }
@@ -264,4 +265,18 @@ Deflate_Error :: enum {
 	Bad_Huffman_Code,
 	Len_Nlen_Mismatch,
 	BType_3,
+}
+
+Brotli_Error :: enum {
+	None = 0,
+	Invalid_Window_Size,
+	Invalid_Meta_Block,
+	Invalid_Prefix_Code,
+	Invalid_Context_Map,
+	Invalid_Block_Switch,
+	Invalid_Command,
+	Invalid_Distance,
+	Invalid_Dictionary_Reference,
+	Invalid_Padding,
+	Trailing_Data,
 }
