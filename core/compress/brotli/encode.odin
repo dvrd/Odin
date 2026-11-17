@@ -3,7 +3,6 @@ package compress_brotli
 import "base:intrinsics"
 import "base:runtime"
 import "core:compress"
-import "core:math"
 import "core:math/bits"
 
 // Brotli (RFC 7932) encoder for input held in memory.
@@ -51,6 +50,10 @@ Command :: struct {
 	// 0..15 for a recent-distance code, else distance + 15. Fixed when the
 	// command is created because it depends on the ring at that point.
 	code:          u32,
+	// Command alphabet symbol and the insert and copy length codes behind it.
+	symbol:        u16,
+	insert_code:   u8,
+	copy_code:     u8,
 }
 
 Ring :: [4]i32
@@ -134,8 +137,8 @@ encode :: proc(src: []u8, level := Level.Default, allocator := context.allocator
 		index_dictionary(e)
 	}
 
-	block := new(Meta_Block, allocator) or_return
-	defer free(block, allocator)
+	block := block_make(allocator) or_return
+	defer block_destroy(block, allocator)
 
 	block_max := META_BLOCK_MAX
 	optimal: ^Optimal
@@ -175,10 +178,10 @@ encode :: proc(src: []u8, level := Level.Default, allocator := context.allocator
 			parse_optimal(e, optimal, block, start, end) or_return
 		} else {
 			parse_range(e, start, end) or_return
-			gather(e, block, start, end)
+			gather(e, block, start, end, level >= .Best) or_return
 		}
 
-		write_meta_block(e, block, start, end, end == len(src), ring)
+		write_meta_block(e, block, start, end, end == len(src), ring) or_return
 		start = end
 	}
 
@@ -551,6 +554,12 @@ push_command :: proc(e: ^Encoder, position, insert_length, copy_length, distance
 		}
 	}
 
+	insert := insert_code(insert_length)
+	copy := copy_code(max(copy_length, 2))
+	command.insert_code = u8(insert)
+	command.copy_code = u8(copy)
+	command.symbol = u16(command_symbol(insert, copy, copy_length == 0 || command.code == 0))
+
 	_, append_error := append(&e.commands, command)
 
 	return append_error
@@ -620,425 +629,6 @@ hash4_safe :: #force_inline proc(e: ^Encoder, position: int) -> u32 {
 	}
 
 	return hash4(e.src, position) >> e.hash_shift
-}
-
-// ---------------------------------------------------------------- meta-blocks
-
-Meta_Block :: struct {
-	// Literal context mode and distance parameters.
-	mode:               int,
-	postfix:            uint,
-	direct:             uint,
-	literal_map:        [LITERAL_CONTEXTS]u8,
-	literal_trees:      int,
-	distance_map:       [DISTANCE_CONTEXTS]u8,
-	distance_trees:     int,
-	literal_lengths:    [LITERAL_CONTEXTS][LITERAL_ALPHABET]u8,
-	literal_codes:      [LITERAL_CONTEXTS][LITERAL_ALPHABET]u16,
-	command_lengths:    [COMMAND_ALPHABET]u8,
-	command_codes:      [COMMAND_ALPHABET]u16,
-	distance_lengths:   [DISTANCE_CONTEXTS][DISTANCE_ALPHABET]u8,
-	distance_codes:     [DISTANCE_CONTEXTS][DISTANCE_ALPHABET]u16,
-	literal_histogram:  [LITERAL_CONTEXTS][LITERAL_ALPHABET]u32,
-	command_histogram:  [COMMAND_ALPHABET]u32,
-	distance_histogram: [DISTANCE_CONTEXTS][DISTANCE_ALPHABET]u32,
-}
-
-@(private)
-literal_context :: #force_inline proc(src: []u8, position, mode: int) -> int {
-	p1 := int(src[position - 1]) if position > 0 else 0
-	p2 := int(src[position - 2]) if position > 1 else 0
-
-	return int(CONTEXT_LOOKUP[mode * 512 + p1] | CONTEXT_LOOKUP[mode * 512 + 256 + p2])
-}
-
-// Whether at least three quarters of `data` is well-formed UTF-8.
-@(private)
-mostly_utf8 :: proc(data: []u8) -> bool {
-	valid := 0
-
-	for index := 0; index < len(data); {
-		lead := data[index]
-		size := 1
-
-		switch {
-		case lead < 0x80:
-		case lead >= 0xc2 && lead < 0xe0:
-			size = 2
-		case lead >= 0xe0 && lead < 0xf0:
-			size = 3
-		case lead >= 0xf0 && lead < 0xf5:
-			size = 4
-		case:
-			index += 1
-			continue
-		}
-
-		whole := index + size <= len(data)
-
-		for tail := 1; whole && tail < size; tail += 1 {
-			whole = data[index + tail] & 0xc0 == 0x80
-		}
-
-		if whole {
-			valid += size
-			index += size
-		} else {
-			index += 1
-		}
-	}
-
-	return valid * 4 >= len(data) * 3
-}
-
-@(private)
-distance_context :: #force_inline proc(copy_length: u32) -> int {
-	return 3 if copy_length > 4 else int(copy_length) - 2
-}
-
-@(private)
-command_code :: proc(command: Command) -> (symbol, insert, copy: int) {
-	insert = insert_code(int(command.insert_length))
-	copy = copy_code(int(max(command.copy_length, 2)))
-	symbol = command_symbol(insert, copy, command.copy_length == 0 || command.code == 0)
-
-	return
-}
-
-// True when the command's distance is carried by the command symbol itself.
-@(private)
-distance_is_implicit :: #force_inline proc(symbol: int) -> bool {
-	return symbol < 128
-}
-
-// Fills the histograms of e.commands over src[start:end] and clusters the
-// contexts into trees.
-@(private)
-gather :: proc(e: ^Encoder, block: ^Meta_Block, start, end: int) {
-	src := e.src
-	block^ = {}
-	block.mode = CONTEXT_MODE_UTF8
-
-	if e.parameters.modelled && !mostly_utf8(src[start:end]) {
-		block.mode = CONTEXT_MODE_SIGNED
-	}
-
-	if e.level >= .Best {
-		choose_distance_parameters(e, block)
-	}
-
-	position := start
-
-	for command in e.commands {
-		symbol, _, _ := command_code(command)
-		block.command_histogram[symbol] += 1
-
-		for _ in 0 ..< command.insert_length {
-			block.literal_histogram[literal_context(src, position, block.mode)][src[position]] += 1
-			position += 1
-		}
-
-		if command.copy_length > 0 {
-			if !distance_is_implicit(symbol) {
-				prefix, _, _ := distance_prefix(command.code, block.postfix, block.direct)
-				block.distance_histogram[distance_context(command.copy_length)][prefix] += 1
-			}
-
-			position += int(command.copy_length)
-		}
-	}
-
-	assert(position == end)
-
-	block.literal_trees = cluster_histograms(block.literal_histogram[:], block.literal_map[:], e.parameters.modelled)
-	block.distance_trees = cluster_histograms(block.distance_histogram[:], block.distance_map[:], e.parameters.modelled)
-}
-
-// Picks the NPOSTFIX and NDIRECT that code the explicit distances of
-// e.commands in the fewest bits.
-@(private)
-choose_distance_parameters :: proc(e: ^Encoder, block: ^Meta_Block) {
-	histogram: [DISTANCE_ALPHABET]u32
-	best := max(f64)
-	direct_high: uint
-
-	for postfix in uint(0) ..= 3 {
-		for ; direct_high < 16; direct_high += 1 {
-			direct := direct_high << postfix
-			histogram = {}
-			extra: f64
-
-			for command in e.commands {
-				if command.copy_length == 0 {
-					continue
-				}
-
-				symbol, _, _ := command_code(command)
-
-				if !distance_is_implicit(symbol) {
-					prefix, extra_bits, _ := distance_prefix(command.code, postfix, direct)
-					histogram[prefix] += 1
-					extra += f64(extra_bits)
-				}
-			}
-
-			cost := histogram_cost(histogram[:]) + extra
-
-			if cost >= best {
-				break
-			}
-
-			best = cost
-			block.postfix = postfix
-			block.direct = direct
-		}
-
-		if direct_high > 0 {
-			direct_high -= 1
-		}
-
-		direct_high /= 2
-	}
-}
-
-// Writes src[start:end] as one meta-block, stored when coding does not pay.
-// `ring` is the recent-distance state from before the block was parsed.
-@(private)
-write_meta_block :: proc(e: ^Encoder, block: ^Meta_Block, start, end: int, last: bool, ring: Ring) {
-	w := &e.writer
-	src := e.src
-	length := end - start
-	nibbles := 6 if length > 1 << 20 else 5 if length > 1 << 16 else 4
-	mark_size := len(w.out)
-	mark_accumulator := w.accumulator
-	mark_count := w.count
-
-	write_bits(w, 1 if last else 0, 1)
-
-	if last {
-		write_bits(w, 0, 1)
-	}
-
-	write_bits(w, u64(nibbles - 4), 2)
-	write_bits(w, u64(length - 1), uint(nibbles * 4))
-
-	if !last {
-		write_bits(w, 0, 1)
-	}
-
-	// One block type for literals, commands and distances.
-	write_bits(w, 0, 3)
-
-	write_bits(w, u64(block.postfix), 2)
-	write_bits(w, u64(block.direct >> block.postfix), 4)
-	write_bits(w, u64(block.mode), 2)
-
-	distance_alphabet := 16 + int(block.direct) + 48 << block.postfix
-
-	write_context_map(e, block.literal_map[:], block.literal_trees)
-	write_context_map(e, block.distance_map[:], block.distance_trees)
-
-	for tree in 0 ..< block.literal_trees {
-		build_and_write_code(e, block.literal_histogram[tree][:], block.literal_lengths[tree][:], block.literal_codes[tree][:])
-	}
-
-	build_and_write_code(e, block.command_histogram[:], block.command_lengths[:], block.command_codes[:])
-
-	for tree in 0 ..< block.distance_trees {
-		build_and_write_code(
-			e,
-			block.distance_histogram[tree][:distance_alphabet],
-			block.distance_lengths[tree][:distance_alphabet],
-			block.distance_codes[tree][:distance_alphabet],
-		)
-	}
-
-	position := start
-
-	for command in e.commands {
-		symbol, insert, copy := command_code(command)
-		write_bits(w, u64(block.command_codes[symbol]), uint(block.command_lengths[symbol]))
-		write_bits(w, u64(command.insert_length - INSERT_BASE[insert]), uint(INSERT_EXTRA[insert]))
-		write_bits(w, u64(max(command.copy_length, 2) - COPY_BASE[copy]), uint(COPY_EXTRA[copy]))
-
-		for _ in 0 ..< command.insert_length {
-			tree := block.literal_map[literal_context(src, position, block.mode)]
-			literal := src[position]
-			write_bits(w, u64(block.literal_codes[tree][literal]), uint(block.literal_lengths[tree][literal]))
-			position += 1
-		}
-
-		if command.copy_length > 0 {
-			if !distance_is_implicit(symbol) {
-				tree := block.distance_map[distance_context(command.copy_length)]
-				prefix, extra_bits, extra := distance_prefix(command.code, block.postfix, block.direct)
-				write_bits(w, u64(block.distance_codes[tree][prefix]), uint(block.distance_lengths[tree][prefix]))
-				write_bits(w, u64(extra), uint(extra_bits))
-			}
-
-			position += int(command.copy_length)
-		}
-	}
-
-	coded := (len(w.out) - mark_size) * 8 + int(w.count) - int(mark_count)
-
-	if coded <= (length + 4) * 8 {
-		return
-	}
-
-	// Stored meta-block; it cannot be the last one, so an empty one follows.
-	resize(&w.out, mark_size)
-	w.accumulator = mark_accumulator
-	w.count = mark_count
-	e.ring = ring
-
-	write_bits(w, 0, 1)
-	write_bits(w, u64(nibbles - 4), 2)
-	write_bits(w, u64(length - 1), uint(nibbles * 4))
-	write_bits(w, 1, 1)
-	flush_bits(w)
-
-	_, append_error := append(&w.out, ..src[start:end])
-
-	if append_error != nil {
-		w.err = append_error
-	}
-
-	if last {
-		write_bits(w, 3, 2)
-	}
-}
-
-// Estimated bits to store a histogram's code and all of its symbols.
-@(private)
-histogram_cost :: proc(histogram: []u32) -> f64 {
-	total: u64
-	used := 0
-	weighted: f64
-
-	for frequency in histogram {
-		if frequency != 0 {
-			total += u64(frequency)
-			used += 1
-			weighted += f64(frequency) * math.log2(f64(frequency))
-		}
-	}
-
-	switch used {
-	case 0:
-		return 0
-	case 1:
-		return 12
-	}
-
-	return f64(total) * math.log2(f64(total)) - weighted + 20 + 5 * f64(used)
-}
-
-// Merges the per-context histograms into trees while that saves bits; context
-// `c` then uses tree `mapping[c]`, and histograms[t] holds the counts of tree `t`.
-@(private)
-cluster_histograms :: proc(histograms: [][$N]u32, mapping: []u8, modelled: bool) -> int {
-	count := len(histograms)
-
-	if !modelled {
-		for index in 1 ..< count {
-			for symbol in 0 ..< N {
-				histograms[0][symbol] += histograms[index][symbol]
-			}
-		}
-
-		for &tree in mapping {
-			tree = 0
-		}
-
-		return 1
-	}
-
-	cost: [LITERAL_CONTEXTS]f64
-	alive: [LITERAL_CONTEXTS]bool
-	gain: [LITERAL_CONTEXTS][LITERAL_CONTEXTS]f64
-	merged: [N]u32
-
-	for index in 0 ..< count {
-		cost[index] = histogram_cost(histograms[index][:])
-		alive[index] = cost[index] != 0
-		mapping[index] = u8(index)
-	}
-
-	for a in 0 ..< count {
-		for b in a + 1 ..< count {
-			if alive[a] && alive[b] {
-				for symbol in 0 ..< N {
-					merged[symbol] = histograms[a][symbol] + histograms[b][symbol]
-				}
-
-				gain[a][b] = cost[a] + cost[b] - histogram_cost(merged[:])
-			}
-		}
-	}
-
-	for {
-		best: f64
-		best_a, best_b := -1, -1
-
-		for a in 0 ..< count {
-			for b in a + 1 ..< count {
-				if alive[a] && alive[b] && gain[a][b] > best {
-					best = gain[a][b]
-					best_a, best_b = a, b
-				}
-			}
-		}
-
-		if best_a < 0 {
-			break
-		}
-
-		for symbol in 0 ..< N {
-			histograms[best_a][symbol] += histograms[best_b][symbol]
-		}
-
-		alive[best_b] = false
-		cost[best_a] = histogram_cost(histograms[best_a][:])
-
-		for &tree in mapping[:count] {
-			if int(tree) == best_b {
-				tree = u8(best_a)
-			}
-		}
-
-		for other in 0 ..< count {
-			if !alive[other] || other == best_a {
-				continue
-			}
-
-			for symbol in 0 ..< N {
-				merged[symbol] = histograms[best_a][symbol] + histograms[other][symbol]
-			}
-
-			low, high := min(best_a, other), max(best_a, other)
-			gain[low][high] = cost[low] + cost[high] - histogram_cost(merged[:])
-		}
-	}
-
-	// Renumber the surviving trees densely; a tree never moves to a later slot.
-	renumbered: [LITERAL_CONTEXTS]u8
-	trees := 0
-
-	for index in 0 ..< count {
-		if alive[index] {
-			histograms[trees] = histograms[index]
-			renumbered[index] = u8(trees)
-			trees += 1
-		}
-	}
-
-	// Contexts that never occur may use any tree.
-	for &tree, index in mapping[:count] {
-		tree = renumbered[tree] if cost[index] != 0 || alive[tree] else 0
-	}
-
-	return max(trees, 1)
 }
 
 // --------------------------------------------------------------- prefix codes

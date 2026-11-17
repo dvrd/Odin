@@ -73,16 +73,18 @@ parse_optimal :: proc(e: ^Encoder, o: ^Optimal, block: ^Meta_Block, start, end: 
 
 	// First model: every byte as a literal, flat command and distance costs.
 	push_command(e, end, end - start, 0, 0) or_return
-	gather(e, block, start, end)
+	gather(e, block, start, end, false) or_return
 	set_model(e, o, block, start, end, true)
 
 	for iteration in 0 ..< OPTIMAL_ITERATIONS {
 		clear(&e.commands)
 		e.ring = ring
 		shortest_path(e, o, start, end) or_return
-		gather(e, block, start, end)
+		// The cost model reads unsplit histograms; only the last parse is split.
+		final := iteration + 1 == OPTIMAL_ITERATIONS
+		gather(e, block, start, end, final) or_return
 
-		if iteration + 1 < OPTIMAL_ITERATIONS {
+		if !final {
 			set_model(e, o, block, start, end, false)
 		}
 	}
@@ -184,7 +186,7 @@ set_model :: proc(e: ^Encoder, o: ^Optimal, block: ^Meta_Block, start, end: int,
 	src := e.src
 
 	for tree in 0 ..< block.literal_trees {
-		symbol_costs(block.literal_histogram[tree][:], o.tree_cost[tree][:], 8)
+		symbol_costs(block.literal_histogram[tree * LITERAL_ALPHABET:][:LITERAL_ALPHABET], o.tree_cost[tree][:], 8)
 	}
 
 	for position in start ..< end {
@@ -209,10 +211,10 @@ set_model :: proc(e: ^Encoder, o: ^Optimal, block: ^Meta_Block, start, end: int,
 		return
 	}
 
-	symbol_costs(block.command_histogram[:], o.model.command[:], 8)
+	symbol_costs(block.command_histogram[:COMMAND_ALPHABET], o.model.command[:], 8)
 
 	for &costs, slot in o.model.distance {
-		symbol_costs(block.distance_histogram[block.distance_map[slot]][:], costs[:], 6)
+		symbol_costs(block.distance_histogram[int(block.distance_map[slot]) * DISTANCE_ALPHABET:][:DISTANCE_ALPHABET], costs[:], 6)
 	}
 }
 
