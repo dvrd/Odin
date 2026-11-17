@@ -207,7 +207,7 @@ gather :: proc(e: ^Encoder, block: ^Meta_Block, start, end: int, split: bool) ->
 		block.mode = CONTEXT_MODE_SIGNED
 	}
 
-	if e.level >= .Best {
+	if e.parameters.split {
 		choose_distance_parameters(e, block)
 	}
 
@@ -230,7 +230,7 @@ gather :: proc(e: ^Encoder, block: ^Meta_Block, start, end: int, split: bool) ->
 			append(&block.streams[.Distance], prefix) or_return
 		}
 
-		position += int(command.copy_length)
+		position += int(command.copy_length) - int(command.omit)
 	}
 
 	assert(position == end)
@@ -278,20 +278,33 @@ gather :: proc(e: ^Encoder, block: ^Meta_Block, start, end: int, split: bool) ->
 	split_cost := gather_literals(e, block, start) or_return
 
 	if block.splits[.Literal].count > 1 {
-		literals := &block.splits[.Literal]
-		blocks := len(literals.types)
-		clear(&literals.types)
-		clear(&literals.lengths)
-		append(&literals.types, 0) or_return
-		append(&literals.lengths, u32(len(block.streams[.Literal]))) or_return
-		literals.count = 1
+		// Set the split result aside and model the literals unsplit.
+		kept := block.splits[.Literal]
+		kept_histogram := block.literal_histogram
+		kept_map := block.literal_map
+		kept_trees := block.literal_trees
+		flat := Split{count = 1}
+		flat.types = make([dynamic]u8, e.allocator) or_return
+		flat.lengths = make([dynamic]u32, e.allocator) or_return
+		block.literal_histogram = make([dynamic]u32, e.allocator) or_return
+		block.literal_map = make([dynamic]u8, e.allocator) or_return
+		append(&flat.types, 0) or_return
+		append(&flat.lengths, u32(len(block.streams[.Literal]))) or_return
+		block.splits[.Literal] = flat
 
 		flat_cost := gather_literals(e, block, start) or_return
 
-		if split_cost + f64(blocks) * SWITCH_BITS < flat_cost {
-			split_stream(e, block.streams[.Literal][:], LITERAL_ALPHABET, .Literal, literals, true) or_return
-			gather_literals(e, block, start) or_return
+		if split_cost + f64(len(kept.types)) * SWITCH_BITS < flat_cost {
+			kept, block.splits[.Literal] = block.splits[.Literal], kept
+			kept_histogram, block.literal_histogram = block.literal_histogram, kept_histogram
+			kept_map, block.literal_map = block.literal_map, kept_map
+			block.literal_trees = kept_trees
 		}
+
+		delete(kept.types)
+		delete(kept.lengths)
+		delete(kept_histogram)
+		delete(kept_map)
 	}
 
 	return nil
@@ -320,7 +333,7 @@ gather_literals :: proc(e: ^Encoder, block: ^Meta_Block, start: int) -> (cost: f
 			position += 1
 		}
 
-		position += int(command.copy_length)
+		position += int(command.copy_length) - int(command.omit)
 	}
 
 	block.literal_trees = cluster(
@@ -596,7 +609,7 @@ write_meta_block :: proc(
 			write_bits(w, u64(extra), uint(extra_bits))
 		}
 
-		position += int(command.copy_length)
+		position += int(command.copy_length) - int(command.omit)
 	}
 
 	coded := (len(w.out) - mark_size) * 8 + int(w.count) - int(mark_count)
@@ -736,8 +749,8 @@ cluster :: proc(
 	parent := make([]i32, rows, e.allocator) or_return
 	defer delete(parent, e.allocator)
 
-	merged := make([]u32, stride, e.allocator) or_return
-	defer delete(merged, e.allocator)
+	stats := make([]Row_Stats, rows, e.allocator) or_return
+	defer delete(stats, e.allocator)
 
 	survivors := make([dynamic]i32, 0, rows, e.allocator) or_return
 	defer delete(survivors)
@@ -746,7 +759,8 @@ cluster :: proc(
 	defer delete(numbers, e.allocator)
 
 	for row in 0 ..< rows {
-		cost[row] = histogram_cost(histograms[row * stride:][:stride])
+		stats[row] = row_stats(histograms[row * stride:][:stride])
+		cost[row] = stats_cost(stats[row])
 		parent[row] = i32(row)
 	}
 
@@ -762,7 +776,7 @@ cluster :: proc(
 			}
 		}
 
-		merge_group(e, histograms, stride, members[:count], cost, parent, merged) or_return
+		merge_group(e, histograms, stride, members[:count], cost, parent, stats) or_return
 
 		for member in members[:count] {
 			if parent[member] == member {
@@ -772,9 +786,9 @@ cluster :: proc(
 	}
 
 	if len(survivors) <= CLUSTER_PAIRWISE_MAX {
-		merge_group(e, histograms, stride, survivors[:], cost, parent, merged) or_return
+		merge_group(e, histograms, stride, survivors[:], cost, parent, stats) or_return
 	} else {
-		merge_leaders(histograms, stride, survivors[:], cost, parent, merged)
+		merge_leaders(histograms, stride, survivors[:], cost, parent, stats)
 	}
 
 	// Number the clusters in order of first use and move them to the front; a
@@ -811,23 +825,92 @@ cluster :: proc(
 	return clusters, nil
 }
 
-@(private)
-merged_cost :: proc(histograms: []u32, stride: int, a, b: i32, merged: []u32) -> f64 {
-	for symbol in 0 ..< stride {
-		merged[symbol] = histograms[int(a) * stride + symbol] + histograms[int(b) * stride + symbol]
-	}
+// What clustering needs of a histogram: symbol total, distinct symbols and
+// the sum of n*log2(n) over its counters.
+Row_Stats :: struct {
+	total:    u64,
+	used:     int,
+	weighted: f64,
+}
 
-	return histogram_cost(merged)
+LOG2_TABLE_SIZE :: 4096
+
+LOG2_TABLE: [LOG2_TABLE_SIZE]f32
+
+@(init, private)
+fill_log2_table :: proc "contextless" () {
+	for index in 1 ..< LOG2_TABLE_SIZE {
+		LOG2_TABLE[index] = f32(math.log2(f64(index)))
+	}
 }
 
 @(private)
-merge_rows :: proc(histograms: []u32, stride: int, into, from: i32, cost: []f64, parent: []i32) {
+fast_log2 :: #force_inline proc(value: u64) -> f64 {
+	return f64(LOG2_TABLE[value]) if value < LOG2_TABLE_SIZE else math.log2(f64(value))
+}
+
+@(private)
+row_stats :: proc(histogram: []u32) -> (stats: Row_Stats) {
+	for frequency in histogram {
+		if frequency != 0 {
+			stats.total += u64(frequency)
+			stats.used += 1
+			stats.weighted += f64(frequency) * fast_log2(u64(frequency))
+		}
+	}
+
+	return
+}
+
+// Cheap estimate of a histogram's coded size for clustering decisions.
+@(private)
+stats_cost :: #force_inline proc(stats: Row_Stats) -> f64 {
+	if stats.used == 0 {
+		return 0
+	}
+
+	if stats.used == 1 {
+		return 12
+	}
+
+	return f64(stats.total) * fast_log2(stats.total) - stats.weighted + 20 + 5 * f64(stats.used)
+}
+
+// Cost of rows `a` and `b` as one histogram; only symbols both rows use need
+// their logarithms recomputed.
+@(private)
+merged_cost :: proc(histograms: []u32, stride: int, a, b: i32, stats: []Row_Stats) -> f64 #no_bounds_check {
+	combined := Row_Stats {
+		total    = stats[a].total + stats[b].total,
+		used     = stats[a].used + stats[b].used,
+		weighted = stats[a].weighted + stats[b].weighted,
+	}
+
+	first := histograms[int(a) * stride:][:stride]
+	second := histograms[int(b) * stride:][:stride]
+
+	for symbol in 0 ..< stride {
+		x := u64(first[symbol])
+		y := u64(second[symbol])
+
+		if x != 0 && y != 0 {
+			combined.used -= 1
+			combined.weighted += f64(x + y) * fast_log2(x + y) - f64(x) * fast_log2(x) - f64(y) * fast_log2(y)
+		}
+	}
+
+	return stats_cost(combined)
+}
+
+@(private)
+merge_rows :: proc(histograms: []u32, stride: int, into, from: i32, cost: []f64, parent: []i32, stats: []Row_Stats) {
 	for symbol in 0 ..< stride {
 		histograms[int(into) * stride + symbol] += histograms[int(from) * stride + symbol]
 	}
 
 	parent[from] = into
-	cost[into] = histogram_cost(histograms[int(into) * stride:][:stride])
+	stats[into] = row_stats(histograms[int(into) * stride:][:stride])
+	cost[into] = stats_cost(stats[into])
 }
 
 // Repeatedly merges the pair of `members` that saves the most bits.
@@ -839,7 +922,7 @@ merge_group :: proc(
 	members: []i32,
 	cost: []f64,
 	parent: []i32,
-	merged: []u32,
+	stats: []Row_Stats,
 ) -> runtime.Allocator_Error {
 	count := len(members)
 
@@ -858,7 +941,7 @@ merge_group :: proc(
 
 		for b in a + 1 ..< count {
 			gain[a * count + b] =
-				cost[members[a]] + cost[members[b]] - merged_cost(histograms, stride, members[a], members[b], merged)
+				cost[members[a]] + cost[members[b]] - merged_cost(histograms, stride, members[a], members[b], stats)
 		}
 	}
 
@@ -883,7 +966,7 @@ merge_group :: proc(
 			return nil
 		}
 
-		merge_rows(histograms, stride, members[best_a], members[best_b], cost, parent)
+		merge_rows(histograms, stride, members[best_a], members[best_b], cost, parent, stats)
 		alive[best_b] = false
 
 		for other in 0 ..< count {
@@ -893,7 +976,7 @@ merge_group :: proc(
 
 			low, high := min(best_a, other), max(best_a, other)
 			gain[low * count + high] =
-				cost[members[low]] + cost[members[high]] - merged_cost(histograms, stride, members[low], members[high], merged)
+				cost[members[low]] + cost[members[high]] - merged_cost(histograms, stride, members[low], members[high], stats)
 		}
 	}
 }
@@ -901,7 +984,7 @@ merge_group :: proc(
 // One pass for many candidates: each joins the kept cluster it saves the most
 // bits with, or is kept itself while there is room.
 @(private)
-merge_leaders :: proc(histograms: []u32, stride: int, members: []i32, cost: []f64, parent: []i32, merged: []u32) {
+merge_leaders :: proc(histograms: []u32, stride: int, members: []i32, cost: []f64, parent: []i32, stats: []Row_Stats) {
 	kept: [CLUSTER_MAX]i32
 	count := 0
 
@@ -910,7 +993,7 @@ merge_leaders :: proc(histograms: []u32, stride: int, members: []i32, cost: []f6
 		target := -1
 
 		for index in 0 ..< count {
-			gain := cost[kept[index]] + cost[member] - merged_cost(histograms, stride, kept[index], member, merged)
+			gain := cost[kept[index]] + cost[member] - merged_cost(histograms, stride, kept[index], member, stats)
 
 			if gain > best {
 				best = gain
@@ -924,7 +1007,7 @@ merge_leaders :: proc(histograms: []u32, stride: int, members: []i32, cost: []f6
 			continue
 		}
 
-		merge_rows(histograms, stride, kept[target], member, cost, parent)
+		merge_rows(histograms, stride, kept[target], member, cost, parent, stats)
 	}
 }
 
@@ -944,6 +1027,7 @@ SPLIT_PARAMETERS := [Category]Split_Parameters {
 }
 
 SPLIT_LENGTH_MIN :: 128
+SPLIT_HISTOGRAMS_FAST :: 16
 
 // Splits `data` into blocks of similar statistics: a few sampled histograms
 // are refined by assigning every symbol to the histogram that codes it most
@@ -963,6 +1047,11 @@ split_stream :: proc(
 
 	parameters := SPLIT_PARAMETERS[category]
 	count := min(len(data) / parameters.symbols_per_histogram + 1, parameters.histograms_max)
+
+	// Below the optimal levels a coarser split keeps the cost in proportion.
+	if e.level < OPTIMAL_LEVEL_MIN {
+		count = min(count, SPLIT_HISTOGRAMS_FAST)
+	}
 
 	if !enabled || len(data) < SPLIT_LENGTH_MIN || count < 2 {
 		append(&split.types, 0) or_return
@@ -1022,7 +1111,7 @@ split_stream :: proc(
 		}
 	}
 
-	iterations := 10 if e.level >= .Optimal else 3
+	iterations := 10 if e.level >= .Optimal else 2
 
 	for _ in 0 ..< iterations {
 		find_blocks(data, alphabet, count, parameters.switch_cost, histograms, insert_cost, cost, signals, ids)
@@ -1131,16 +1220,21 @@ find_blocks :: proc(
 
 	for symbol, position in data {
 		costs := insert_cost[int(symbol) * count:][:count]
-		cheapest := max(f32)
-		choice := 0
-
+		// Separate simple loops so that each one vectorizes.
 		for index in 0 ..< count {
 			cost[index] += costs[index]
+		}
 
-			if cost[index] < cheapest {
-				cheapest = cost[index]
-				choice = index
-			}
+		cheapest := cost[0]
+
+		for index in 1 ..< count {
+			cheapest = min(cheapest, cost[index])
+		}
+
+		choice := 0
+
+		for cost[choice] != cheapest {
+			choice += 1
 		}
 
 		ids[position] = u8(choice)
@@ -1151,13 +1245,13 @@ find_blocks :: proc(
 			price *= 0.77 + 0.07 * f32(position) / 2000
 		}
 
-		for index in 0 ..< count {
-			cost[index] -= cheapest
+		row := signals[position * signal_stride:]
 
-			if cost[index] >= price {
-				cost[index] = price
-				signals[position * signal_stride + index >> 3] |= 1 << uint(index & 7)
-			}
+		for index in 0 ..< count {
+			value := cost[index] - cheapest
+			capped := value >= price
+			cost[index] = price if capped else value
+			row[index >> 3] |= u8(capped) << uint(index & 7)
 		}
 	}
 

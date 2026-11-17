@@ -148,3 +148,96 @@ brotli_decode_rejects_damaged_streams :: proc(t: ^testing.T) {
 
 	testing.expect_value(t, trailing_error, brotli.Error(brotli.E_Brotli.Trailing_Data))
 }
+
+@(test)
+brotli_stream_encoder_round_trips :: proc(t: ^testing.T) {
+	e := new(brotli.Stream_Encoder)
+	defer free(e)
+
+	sizes := [?]int{0, 1, 5, 4096, brotli.STREAM_BLOCK, brotli.STREAM_BLOCK + 1, 200_000}
+	chunks := [?]int{1, 7, 4096, 1 << 20}
+
+	for kind in 0 ..< 3 {
+		for size in sizes {
+			sample := encode_sample(kind, size)
+			defer delete(sample)
+
+			packed := make([]u8, brotli.stream_bound(size))
+			defer delete(packed)
+
+			brotli.stream_reset(e)
+			written, ok := brotli.stream_encode_into(e, sample, packed)
+			testing.expectf(t, ok, "stream encode failed: kind %d size %d", kind, size)
+
+			unpacked, err := brotli_decode(packed[:written])
+			defer delete(unpacked)
+
+			testing.expectf(t, err == nil, "stream decode failed: kind %d size %d: %v", kind, size, err)
+			testing.expectf(t, bytes.equal(unpacked, sample), "stream mismatch: kind %d size %d", kind, size)
+
+			// Any partition of input and output yields the same stream.
+			for chunk in chunks {
+				if size > 20_000 && chunk == 1 {
+					continue
+				}
+
+				pieces := make([dynamic]u8)
+				defer delete(pieces)
+
+				scratch: [97]u8
+				brotli.stream_reset(e)
+
+				for offset := 0; offset < size; {
+					offset += brotli.stream_write(e, sample[offset:min(offset + chunk, size)])
+
+					for count := brotli.stream_pull(e, scratch[:]); count > 0; count = brotli.stream_pull(e, scratch[:]) {
+						append(&pieces, ..scratch[:count])
+					}
+				}
+
+				for !brotli.stream_finish(e) {
+					count := brotli.stream_pull(e, scratch[:])
+					testing.expect(t, count > 0, "stream finish stalled")
+					append(&pieces, ..scratch[:count])
+
+					if count == 0 {
+						break
+					}
+				}
+
+				for count := brotli.stream_pull(e, scratch[:]); count > 0; count = brotli.stream_pull(e, scratch[:]) {
+					append(&pieces, ..scratch[:count])
+				}
+
+				testing.expectf(t, bytes.equal(pieces[:], packed[:written]), "partition changed the stream: size %d chunk %d", size, chunk)
+			}
+		}
+	}
+}
+
+@(test)
+brotli_stream_encoder_respects_output_limit :: proc(t: ^testing.T) {
+	e := new(brotli.Stream_Encoder)
+	defer free(e)
+
+	sample := encode_sample(2, 100_000)
+	defer delete(sample)
+
+	packed := make([]u8, brotli.stream_bound(len(sample)))
+	defer delete(packed)
+
+	brotli.stream_reset(e)
+	written, ok := brotli.stream_encode_into(e, sample, packed)
+	testing.expect(t, ok)
+
+	brotli.stream_reset(e, written)
+	_, ok = brotli.stream_encode_into(e, sample, packed)
+	testing.expect(t, ok, "exact limit must fit")
+
+	brotli.stream_reset(e, written - 1)
+	_, ok = brotli.stream_encode_into(e, sample, packed)
+	testing.expect(t, !ok, "limit below the stream size must fail")
+
+	_, ok = brotli.stream_encode_into(e, sample, packed[:written - 1])
+	testing.expect(t, !ok, "short destination must fail")
+}

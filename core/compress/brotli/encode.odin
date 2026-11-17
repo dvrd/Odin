@@ -12,9 +12,11 @@ import "core:math/bits"
 // context-clustered prefix codes, its commands under one code and its
 // distances under copy-length contexts.
 
+// Levels 0..11 follow the qualities of the reference encoder; any value in
+// that range is valid, the names mark the usual choices.
 Level :: enum u8 {
-	Fastest = 1,
-	Fast    = 3,
+	Fastest = 0,
+	Fast    = 2,
 	Default = 6,
 	Best    = 9,
 	// Iterated shortest-path parse; for data compressed once and served often.
@@ -22,13 +24,11 @@ Level :: enum u8 {
 }
 
 OPTIMAL_BLOCK :: 1 << 20
+// Levels from here on parse optimally.
+OPTIMAL_LEVEL_MIN :: Level(10)
 OPTIMAL_ITERATIONS :: 3
-OPTIMAL_CHAIN :: 512
 // Matches this long are taken whole instead of being explored byte by byte.
-OPTIMAL_LONG :: 512
-DICTIONARY_WORDS :: 13504
-DICTIONARY_HASH_BITS :: 14
-DICTIONARY_NONE :: max(u16)
+OPTIMAL_LONG :: 325
 WINDOW_BITS_MIN :: 10
 WINDOW_BITS_MAX :: 24
 META_BLOCK_MAX :: 1 << 24
@@ -54,16 +54,40 @@ Command :: struct {
 	symbol:        u16,
 	insert_code:   u8,
 	copy_code:     u8,
+	// Bytes of the copy length a dictionary transform does not produce (or,
+	// negative, adds): the copy covers copy_length - omit.
+	omit:          i8,
 }
 
 Ring :: [4]i32
 
 Parameters :: struct {
-	chain_limit: int,
-	lazy:        bool,
-	nice_length: int,
+	// log2 of the positions kept per hash bucket.
+	block_bits: uint,
+	cache_size: int,
+	lazy:       bool,
 	// Static dictionary matching and literal context modelling.
-	modelled:    bool,
+	modelled:   bool,
+	// Block splitting.
+	split:      bool,
+}
+
+// One row per level 0..11, as the qualities of the reference encoder; the
+// last two rows parse optimally and only use the modelling flags.
+@(rodata)
+PARAMETERS := [12]Parameters {
+	{0, 4, false, false, false},
+	{1, 4, false, false, false},
+	{1, 4, true, false, false},
+	{2, 4, true, false, false},
+	{3, 4, true, false, false},
+	{4, 4, true, true, false},
+	{5, 4, true, true, false},
+	{6, 10, true, true, false},
+	{7, 10, true, true, false},
+	{8, 16, true, true, true},
+	{0, 0, true, true, true},
+	{0, 0, true, true, true},
 }
 
 Bit_Writer :: struct {
@@ -79,23 +103,13 @@ Encoder :: struct {
 	window_max:    int,
 	parameters:    Parameters,
 	level:         Level,
-	head:          []u32,
-	hash_shift:    u32,
-	chain:         []u32,
 	ring:          Ring,
 	commands:      [dynamic]Command,
-	huffman:       compress.Huffman_Scratch,
+	huffman:       ^compress.Huffman_Scratch,
 	allocator:     runtime.Allocator,
-	// Static dictionary words chained by the hash of their first four bytes.
-	word_head:     [1 << DICTIONARY_HASH_BITS]u16,
-	word_next:     [DICTIONARY_WORDS]u16,
-	word_length:   [DICTIONARY_WORDS]u8,
-	word_offset:   [DICTIONARY_WORDS]u32,
-	word_base:     [DICTIONARY_WORD_MAX + 1]u32,
+	finder:        Finder,
 }
 
-HASH_BITS_MIN :: 15
-HASH_BITS_MAX :: 20
 
 // Compresses `src` into a complete Brotli stream.
 encode :: proc(src: []u8, level := Level.Default, allocator := context.allocator) -> (output: []u8, err: Error) {
@@ -103,55 +117,49 @@ encode :: proc(src: []u8, level := Level.Default, allocator := context.allocator
 	defer free(e, allocator)
 
 	e.src = src
-	e.level = level
 	e.allocator = allocator
 	e.ring = {4, 11, 15, 16}
 	e.writer.out = make([dynamic]u8, 0, len(src) / 3 + 64, allocator) or_return
 	e.commands = make([dynamic]Command, allocator) or_return
 	defer delete(e.commands)
 
-	hash_bits := clamp(bits.len_u32(u32(min(len(src), 1 << 30))), HASH_BITS_MIN, HASH_BITS_MAX)
-	e.hash_shift = u32(32 - hash_bits)
-	e.head = make([]u32, 1 << uint(hash_bits), allocator) or_return
-	defer delete(e.head, allocator)
+	// The scratch is written before it is read: skip clearing its half megabyte.
+	scratch, scratch_error := runtime.mem_alloc_non_zeroed(
+		size_of(compress.Huffman_Scratch),
+		align_of(compress.Huffman_Scratch),
+		allocator,
+	)
 
-	e.chain = make([]u32, len(src), allocator) or_return
-	defer delete(e.chain, allocator)
-
-	for &slot in e.head {
-		slot = NIL
+	if scratch_error != nil {
+		return nil, scratch_error
 	}
 
-	switch {
-	case level <= .Fastest:
-		e.parameters = {4, false, 32, false}
-	case level <= .Fast:
-		e.parameters = {8, false, 64, false}
-	case level <= .Default:
-		e.parameters = {16, true, 128, true}
-	case:
-		e.parameters = {256, true, 512, true}
-	}
+	e.huffman = (^compress.Huffman_Scratch)(raw_data(scratch))
+	defer free(e.huffman, allocator)
 
-	if e.parameters.modelled {
-		index_dictionary(e)
-	}
+	e.level = Level(min(int(level), len(PARAMETERS) - 1))
+	e.parameters = PARAMETERS[e.level]
+
+	window_bits := clamp(bits.len_u32(u32(min(len(src) + 15, 1 << 30))), WINDOW_BITS_MIN, WINDOW_BITS_MAX)
+	e.window_max = 1 << uint(window_bits) - 16
 
 	block := block_make(allocator) or_return
 	defer block_destroy(block, allocator)
 
-	block_max := META_BLOCK_MAX
 	optimal: ^Optimal
+	parsed: [dynamic]Command
 
-	if level >= .Optimal {
-		block_max = OPTIMAL_BLOCK
-		optimal = optimal_make(min(len(src), block_max), allocator) or_return
+	if e.level >= OPTIMAL_LEVEL_MIN {
+		optimal = optimal_make(e, min(len(src), OPTIMAL_BLOCK), allocator) or_return
+		parsed = make([dynamic]Command, allocator) or_return
+	} else {
+		finder_make(&e.finder, len(src), e.parameters.block_bits, e.parameters.cache_size, allocator) or_return
 	}
 
 	defer optimal_destroy(optimal, allocator)
+	defer delete(parsed)
+	defer finder_destroy(&e.finder, allocator)
 
-	window_bits := clamp(bits.len_u32(u32(min(len(src) + 15, 1 << 30))), WINDOW_BITS_MIN, WINDOW_BITS_MAX)
-	e.window_max = 1 << uint(window_bits) - 16
 	w := &e.writer
 
 	switch {
@@ -170,16 +178,26 @@ encode :: proc(src: []u8, level := Level.Default, allocator := context.allocator
 	}
 
 	for start := 0; start < len(src); {
-		end := min(start + block_max, len(src))
+		end := min(start + META_BLOCK_MAX, len(src))
 		ring := e.ring
 		clear(&e.commands)
 
 		if optimal != nil {
-			parse_optimal(e, optimal, block, start, end) or_return
+			// Parsed a block at a time, modelled and coded as one meta-block.
+			clear(&parsed)
+
+			for from := start; from < end; from += OPTIMAL_BLOCK {
+				clear(&e.commands)
+				parse_optimal(e, optimal, block, from, min(from + OPTIMAL_BLOCK, end)) or_return
+				join_commands(&parsed, e.commands[:]) or_return
+			}
+
+			e.commands, parsed = parsed, e.commands
 		} else {
 			parse_range(e, start, end) or_return
-			gather(e, block, start, end, level >= .Best) or_return
 		}
+
+		gather(e, block, start, end, e.parameters.split) or_return
 
 		write_meta_block(e, block, start, end, end == len(src), ring) or_return
 		start = end
@@ -355,17 +373,6 @@ hash4 :: #force_inline proc(src: []u8, position: int) -> u32 {
 }
 
 @(private)
-insert_hash :: #force_inline proc(e: ^Encoder, position: int) {
-	if position + 4 > len(e.src) {
-		return
-	}
-
-	slot := hash4(e.src, position) >> e.hash_shift
-	e.chain[position] = e.head[slot]
-	e.head[slot] = u32(position)
-}
-
-@(private)
 common_length :: #force_inline proc(src: []u8, a, b, limit: int) -> int {
 	length := 0
 
@@ -389,160 +396,40 @@ common_length :: #force_inline proc(src: []u8, a, b, limit: int) -> int {
 	return length
 }
 
-// Rough benefit of a copy in units where one literal is worth 135.
-@(private)
-match_score :: #force_inline proc(length, distance: int) -> int {
-	return 135 * length - 30 * bits.len_u32(u32(distance)) + 1920
-}
-
-@(private)
-recent_score :: #force_inline proc(length, index: int) -> int {
-	return 135 * length + 1935 - 40 * index
-}
-
-Match :: struct {
-	length:   int,
-	distance: int,
-	score:    int,
-}
-
-// Best match for `position` that ends by `end`; length 0 when none is worth it.
-@(private)
-find_match :: proc(e: ^Encoder, position, end: int) -> Match {
-	src := e.src
-	limit := end - position
-	reach := min(position, e.window_max)
-	best := Match{}
-
-	if limit < 4 {
-		return best
-	}
-
-	for recent, index in e.ring {
-		distance := int(recent)
-
-		if distance > reach {
-			continue
-		}
-
-		length := common_length(src, position - distance, position, limit)
-
-		if length >= 3 {
-			score := recent_score(length, index)
-
-			if score > best.score {
-				best = {length, distance, score}
-			}
-		}
-	}
-
-	candidate := e.head[hash4(src, position) >> e.hash_shift]
-
-	for chain := e.parameters.chain_limit; candidate != NIL && chain > 0; chain -= 1 {
-		distance := position - int(candidate)
-
-		if distance > reach {
-			break
-		}
-
-		if best.length == 0 || best.length < limit && src[int(candidate) + best.length] == src[position + best.length] {
-			length := common_length(src, int(candidate), position, limit)
-
-			if length >= 4 {
-				score := match_score(length, distance)
-
-				if score > best.score {
-					best = {length, distance, score}
-
-					if length >= e.parameters.nice_length {
-						break
-					}
-				}
-			}
-		}
-
-		candidate = e.chain[candidate]
-	}
-
-	if e.parameters.modelled {
-		words: [8]Match
-
-		for word in words[:dictionary_matches(e, position, limit, words[:])] {
-			distance := reach + word.distance
-			score := match_score(word.length, distance)
-
-			if score > best.score {
-				best = {word.length, distance, score}
-			}
-		}
-	}
-
-	return best
-}
-
-// ---------------------------------------------------------- static dictionary
-
-@(private)
-index_dictionary :: proc(e: ^Encoder) {
-	for &slot in e.word_head {
-		slot = DICTIONARY_NONE
-	}
-
-	offset := 0
-	word := 0
-
-	for length in DICTIONARY_WORD_MIN ..= DICTIONARY_WORD_MAX {
-		e.word_base[length] = u32(offset)
-
-		for _ in 0 ..< 1 << DICTIONARY_SIZE_BITS[length] {
-			slot := hash4(DICTIONARY, offset) >> (32 - DICTIONARY_HASH_BITS)
-			e.word_next[word] = e.word_head[slot]
-			e.word_head[slot] = u16(word)
-			e.word_length[word] = u8(length)
-			e.word_offset[word] = u32(offset)
-			offset += length
-			word += 1
-		}
-	}
-}
-
-// Dictionary words that src[position:] starts with. Each match carries the
-// word length and its distance beyond the reachable window.
-@(private)
-dictionary_matches :: proc(e: ^Encoder, position, limit: int, matches: []Match) -> int {
-	if limit < DICTIONARY_WORD_MIN {
-		return 0
-	}
-
-	count := 0
-	word := e.word_head[hash4(e.src, position) >> (32 - DICTIONARY_HASH_BITS)]
-
-	for steps := 0; word != DICTIONARY_NONE && steps < 64 && count < len(matches); steps += 1 {
-		length := int(e.word_length[word])
-		offset := int(e.word_offset[word])
-
-		if length <= limit && string(e.src[position:][:length]) == string(DICTIONARY[offset:][:length]) {
-			matches[count] = {
-				length   = length,
-				distance = (offset - int(e.word_base[length])) / length + 1,
-			}
-			count += 1
-		}
-
-		word = e.word_next[word]
-	}
-
-	return count
-}
-
 // -------------------------------------------------------------------- parsing
 
+// Appends `commands`; literals left over at the end of `list` move into the
+// insert of the first one, since only a meta-block's last command may lack a
+// copy.
 @(private)
-push_command :: proc(e: ^Encoder, position, insert_length, copy_length, distance: int) -> runtime.Allocator_Error {
+join_commands :: proc(list: ^[dynamic]Command, commands: []Command) -> runtime.Allocator_Error {
+	carried := 0
+
+	if len(list) > 0 && list[len(list) - 1].copy_length == 0 {
+		carried = int(pop(list).insert_length)
+	}
+
+	first := len(list)
+	append(list, ..commands) or_return
+
+	if carried > 0 && len(commands) > 0 {
+		command := &list[first]
+		command.insert_length += u32(carried)
+		insert := insert_code(int(command.insert_length))
+		command.insert_code = u8(insert)
+		command.symbol = u16(command_symbol(insert, int(command.copy_code), command.copy_length == 0 || command.code == 0))
+	}
+
+	return nil
+}
+
+@(private)
+push_command :: proc(e: ^Encoder, position, insert_length, copy_length, distance, omit: int) -> runtime.Allocator_Error {
 	command := Command {
 		insert_length = u32(insert_length),
 		copy_length   = u32(copy_length),
 		distance      = u32(distance),
+		omit          = i8(omit),
 	}
 
 	if copy_length > 0 {
@@ -563,72 +450,6 @@ push_command :: proc(e: ^Encoder, position, insert_length, copy_length, distance
 	_, append_error := append(&e.commands, command)
 
 	return append_error
-}
-
-// Greedy or lazy parse of src[start:end] into e.commands.
-@(private)
-parse_range :: proc(e: ^Encoder, start, end: int) -> runtime.Allocator_Error {
-	position := start
-	literal_start := start
-
-	for position < end {
-		match := find_match(e, position, end)
-
-		if match.length == 0 {
-			insert_hash(e, position)
-			position += 1
-			continue
-		}
-
-		if e.parameters.lazy {
-			// Give up to four literals when a later start scores clearly better.
-			for _ in 0 ..< 4 {
-				if position + 1 >= end {
-					break
-				}
-
-				insert_hash(e, position)
-				next := find_match(e, position + 1, end)
-
-				if next.score < match.score + 175 {
-					break
-				}
-
-				position += 1
-				match = next
-			}
-		}
-
-		push_command(e, position, position - literal_start, match.length, match.distance) or_return
-
-		// The first position may already be indexed by the lazy step; a
-		// duplicate entry only shortens the useful part of its chain.
-		stride := 1 if match.length <= 4096 else 8
-
-		for covered := 0; covered < match.length; covered += stride {
-			if e.head[hash4_safe(e, position + covered)] != u32(position + covered) {
-				insert_hash(e, position + covered)
-			}
-		}
-
-		position += match.length
-		literal_start = position
-	}
-
-	if literal_start < end {
-		push_command(e, end, end - literal_start, 0, 0) or_return
-	}
-
-	return nil
-}
-
-@(private)
-hash4_safe :: #force_inline proc(e: ^Encoder, position: int) -> u32 {
-	if position + 4 > len(e.src) {
-		return 0
-	}
-
-	return hash4(e.src, position) >> e.hash_shift
 }
 
 // --------------------------------------------------------------- prefix codes
@@ -781,7 +602,7 @@ build_and_write_code :: proc(e: ^Encoder, histogram: []u32, lengths: []u8, codes
 		return
 	}
 
-	compress.huffman_lengths(&e.huffman, histogram, CODE_LENGTH_MAX, lengths)
+	compress.huffman_lengths(e.huffman, histogram, CODE_LENGTH_MAX, lengths)
 	compress.huffman_codes(lengths, codes)
 
 	if used_count <= 4 {
@@ -894,7 +715,7 @@ write_complex_code :: proc(e: ^Encoder, lengths: []u8) {
 			}
 		}
 	} else {
-		compress.huffman_lengths(&e.huffman, histogram[:], 5, meta_lengths[:])
+		compress.huffman_lengths(e.huffman, histogram[:], 5, meta_lengths[:])
 		compress.huffman_codes(meta_lengths[:], meta_codes[:])
 	}
 

@@ -11,6 +11,7 @@ package all
 @(require) import "core:c/libc"
 
 @(require) import "core:compress"
+@(require) import "core:compress/brotli"
 @(require) import "core:compress/shoco"
 @(require) import "core:compress/gzip"
 @(require) import "core:compress/zlib"

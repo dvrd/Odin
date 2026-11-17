@@ -98,7 +98,7 @@ Command_Entry :: struct {
 	copy_extra:   u8,
 }
 
-Decoder :: struct {
+Load_Decoder :: struct {
 	// Set when a read ran past the end of the input.
 	short:         bool,
 	literal:       Block_State,
@@ -110,6 +110,15 @@ Decoder :: struct {
 	distance_map:  [256 * 4]u8,
 	commands:      [COMMAND_ALPHABET]Command_Entry,
 	tables:        [dynamic]Entry,
+}
+
+// Insert and copy parameters of command alphabet symbol `symbol`.
+command_entry :: proc(symbol: int) -> Command_Entry {
+	cell   := symbol >> 6
+	insert := int(COMMAND_INSERT_CELL[cell]) + symbol >> 3 & 7
+	copy   := int(COMMAND_COPY_CELL[cell]) + symbol & 7
+
+	return {u16(INSERT_BASE[insert]), u16(COPY_BASE[copy]), INSERT_EXTRA[insert], COPY_EXTRA[copy]}
 }
 
 load :: proc{load_from_bytes, load_from_file, load_from_context}
@@ -152,17 +161,14 @@ load_from_context :: proc(z: ^$C, buf: ^bytes.Buffer, expected_output_size := -1
 		reserve(&buf.buf, expected_output_size) or_return
 	}
 
-	d := new(Decoder) or_return
+	d := new(Load_Decoder) or_return
 	defer free(d)
 	defer delete(d.tables)
 
 	d.tables = make([dynamic]Entry) or_return
 
 	for &entry, symbol in d.commands {
-		cell   := symbol >> 6
-		insert := int(COMMAND_INSERT_CELL[cell]) + symbol >> 3 & 7
-		copy   := int(COMMAND_COPY_CELL[cell]) + symbol & 7
-		entry = {u16(INSERT_BASE[insert]), u16(COPY_BASE[copy]), INSERT_EXTRA[insert], COPY_EXTRA[copy]}
+		entry = command_entry(symbol)
 	}
 
 	stream_err := decode_stream(z, d)
@@ -207,7 +213,7 @@ refill_lsb :: proc(z: ^Context_Memory_Input, width := i8(48)) {
 }
 
 @(private)
-read_bits :: #force_inline proc(z: ^$C, d: ^Decoder, width: u8) -> u32 {
+read_bits :: #force_inline proc(z: ^$C, d: ^Load_Decoder, width: u8) -> u32 {
 	if z.num_bits < u64(width) {
 		refill_lsb(z)
 
@@ -226,7 +232,7 @@ read_bits :: #force_inline proc(z: ^$C, d: ^Decoder, width: u8) -> u32 {
 
 // Discards the bits up to the next byte boundary; false if any was set.
 @(private)
-align_to_byte :: proc(z: ^$C, d: ^Decoder) -> bool {
+align_to_byte :: proc(z: ^$C, d: ^Load_Decoder) -> bool {
 	return read_bits(z, d, u8(z.num_bits & 7)) == 0
 }
 
@@ -349,7 +355,7 @@ fill_table :: proc(table: []Entry, symbol: int) {
 }
 
 @(private)
-read_symbol :: #force_inline proc(z: ^$C, d: ^Decoder, table: []Entry) -> u32 #no_bounds_check {
+read_symbol :: #force_inline proc(z: ^$C, d: ^Load_Decoder, table: []Entry) -> u32 #no_bounds_check {
 	if z.num_bits < CODE_LENGTH_MAX {
 		refill_lsb(z)
 	}
@@ -375,7 +381,7 @@ read_symbol :: #force_inline proc(z: ^$C, d: ^Decoder, table: []Entry) -> u32 #n
 }
 
 @(private)
-read_prefix_code :: proc(z: ^$C, d: ^Decoder, table: []Entry, alphabet: int) -> Error {
+read_prefix_code :: proc(z: ^$C, d: ^Load_Decoder, table: []Entry, alphabet: int) -> Error {
 	lengths: [ALPHABET_MAX]u8
 	skip := int(read_bits(z, d, 2))
 
@@ -507,7 +513,7 @@ read_prefix_code :: proc(z: ^$C, d: ^Decoder, table: []Entry, alphabet: int) -> 
 }
 
 @(private)
-read_simple_code :: proc(z: ^$C, d: ^Decoder, table: []Entry, alphabet: int, lengths: []u8) -> Error {
+read_simple_code :: proc(z: ^$C, d: ^Load_Decoder, table: []Entry, alphabet: int, lengths: []u8) -> Error {
 	count := int(read_bits(z, d, 2)) + 1
 	width := u8(bits.len_u32(u32(alphabet - 1)))
 	symbols: [4]int
@@ -560,7 +566,7 @@ read_simple_code :: proc(z: ^$C, d: ^Decoder, table: []Entry, alphabet: int, len
 // ---------------------------------------------------------------- block types
 
 @(private)
-read_variable_byte :: proc(z: ^$C, d: ^Decoder) -> int {
+read_variable_byte :: proc(z: ^$C, d: ^Load_Decoder) -> int {
 	if read_bits(z, d, 1) == 0 {
 		return 0
 	}
@@ -575,14 +581,14 @@ read_variable_byte :: proc(z: ^$C, d: ^Decoder) -> int {
 }
 
 @(private)
-read_block_count :: proc(z: ^$C, d: ^Decoder, table: []Entry) -> int {
+read_block_count :: proc(z: ^$C, d: ^Load_Decoder, table: []Entry) -> int {
 	symbol := read_symbol(z, d, table)
 
 	return int(BLOCK_COUNT_BASE[symbol] + read_bits(z, d, BLOCK_COUNT_EXTRA[symbol]))
 }
 
 @(private)
-read_block_state :: proc(z: ^$C, d: ^Decoder, state: ^Block_State) -> Error {
+read_block_state :: proc(z: ^$C, d: ^Load_Decoder, state: ^Block_State) -> Error {
 	state.type_count = read_variable_byte(z, d) + 1
 	state.current = 0
 	state.previous = 1
@@ -600,7 +606,7 @@ read_block_state :: proc(z: ^$C, d: ^Decoder, state: ^Block_State) -> Error {
 }
 
 @(private)
-switch_block :: proc(z: ^$C, d: ^Decoder, state: ^Block_State) {
+switch_block :: proc(z: ^$C, d: ^Load_Decoder, state: ^Block_State) {
 	if state.type_count < 2 {
 		state.remaining = 1 << 28
 		return
@@ -628,7 +634,7 @@ switch_block :: proc(z: ^$C, d: ^Decoder, state: ^Block_State) {
 }
 
 @(private)
-read_context_map :: proc(z: ^$C, d: ^Decoder, values: []u8) -> (trees: int, err: Error) {
+read_context_map :: proc(z: ^$C, d: ^Load_Decoder, values: []u8) -> (trees: int, err: Error) {
 	trees = read_variable_byte(z, d) + 1
 
 	for &value in values {
@@ -698,7 +704,7 @@ read_context_map :: proc(z: ^$C, d: ^Decoder, values: []u8) -> (trees: int, err:
 // --------------------------------------------------------------------- stream
 
 @(private)
-decode_stream :: proc(z: ^$C, d: ^Decoder) -> Error {
+decode_stream :: proc(z: ^$C, d: ^Load_Decoder) -> Error {
 	window_bits := 16
 
 	if read_bits(z, d, 1) == 1 {
@@ -800,7 +806,7 @@ input_remaining :: proc(z: ^$C) -> int {
 
 // Metadata meta-block: its bytes carry no output.
 @(private)
-skip_metadata :: proc(z: ^$C, d: ^Decoder) -> Error {
+skip_metadata :: proc(z: ^$C, d: ^Load_Decoder) -> Error {
 	if read_bits(z, d, 1) != 0 {
 		return E_Brotli.Invalid_Meta_Block
 	}
@@ -836,7 +842,7 @@ skip_metadata :: proc(z: ^$C, d: ^Decoder) -> Error {
 }
 
 @(private)
-copy_stored :: proc(z: ^$C, d: ^Decoder, length: int) -> Error {
+copy_stored :: proc(z: ^$C, d: ^Load_Decoder, length: int) -> Error {
 	if !align_to_byte(z, d) {
 		return E_Brotli.Invalid_Meta_Block
 	}
@@ -862,7 +868,7 @@ copy_stored :: proc(z: ^$C, d: ^Decoder, length: int) -> Error {
 @(private)
 decode_meta_block :: proc(
 	z: ^$C,
-	d: ^Decoder,
+	d: ^Load_Decoder,
 	length, window_max: int,
 	distances: ^[4]int,
 	dictionary_offsets: []int,
