@@ -291,9 +291,10 @@ parse_range :: proc(e: ^Encoder, start, end: int) -> runtime.Allocator_Error {
 // Misses before the step between probed positions grows by one, log2.
 FAST_PATIENCE :: 5
 
-// Level 0: one candidate per hash bucket and the last distance, and
-// ever longer steps while nothing matches. The table is not cleared: a stale
-// or random slot is rejected by comparing the bytes it points at.
+// Levels 0 and 1: the last distance and one or four hash slots, positions
+// inside copies mostly left out of the table, and ever longer steps while
+// nothing matches. The table is not cleared: a stale or random slot is
+// rejected by comparing the bytes it points at.
 parse_fast :: proc(e: ^Encoder, start, end: int) -> runtime.Allocator_Error #no_bounds_check {
 	f := &e.finder
 	src := e.src
@@ -303,10 +304,18 @@ parse_fast :: proc(e: ^Encoder, start, end: int) -> runtime.Allocator_Error #no_
 	last := end - 4
 	misses := 0
 
+	shift := f.bucket_shift - u32(f.block_bits)
+	mask := u32(len(table) - 1)
+	sweep := u32(1) << f.block_bits
+	// Level 0 looks no further once anything matches and gives up on
+	// unmatched data sooner; level 1 probes four slots.
+	patient := e.level > Level(0)
+	patience: uint = FAST_PATIENCE + 1 if patient else FAST_PATIENCE
+	good := 16 if patient else 4
+	tail := 8 if patient else 2
+
 	for position <= last {
-		key := hash4(src, position) >> f.bucket_shift
-		candidate := int(table[key])
-		table[key] = u32(position)
+		key := hash4(src, position) >> shift
 		reach := min(position, e.window_max)
 		head := intrinsics.unaligned_load((^u32)(&src[position]))
 		distance := int(e.ring[0])
@@ -314,15 +323,37 @@ parse_fast :: proc(e: ^Encoder, start, end: int) -> runtime.Allocator_Error #no_
 
 		if distance <= reach && intrinsics.unaligned_load((^u32)(&src[position - distance])) == head {
 			length = common_length(src, position - distance, position, end - position)
-		} else if candidate < position && position - candidate <= reach {
-			if intrinsics.unaligned_load((^u32)(&src[candidate])) == head {
-				distance = position - candidate
-				length = common_length(src, candidate, position, end - position)
-			}
 		}
 
+		if length < good {
+			best := length
+
+			for slot in 0 ..< sweep {
+				candidate := int(table[(key + slot) & mask])
+
+				if candidate >= position || position - candidate > reach {
+					continue
+				}
+
+				if intrinsics.unaligned_load((^u32)(&src[candidate])) != head {
+					continue
+				}
+
+				found := common_length(src, candidate, position, end - position)
+
+				if found > best + (1 if best >= 4 else 0) {
+					best = found
+					distance = position - candidate
+				}
+			}
+
+			length = best
+		}
+
+		table[(key + u32(position >> 3) & (sweep - 1)) & mask] = u32(position)
+
 		if length < 4 {
-			position += 1 + misses >> FAST_PATIENCE
+			position += 1 + misses >> patience
 			misses += 1
 			continue
 		}
@@ -354,8 +385,10 @@ parse_fast :: proc(e: ^Encoder, start, end: int) -> runtime.Allocator_Error #no_
 		literal_start = position
 
 		if position <= last {
-			table[hash4(src, position - 2) >> f.bucket_shift] = u32(position - 2)
-			table[hash4(src, position - 1) >> f.bucket_shift] = u32(position - 1)
+			for back in 1 ..= min(tail, length - 1) {
+				at := position - back
+				table[(hash4(src, at) >> shift + u32(at >> 3) & (sweep - 1)) & mask] = u32(at)
+			}
 		}
 	}
 

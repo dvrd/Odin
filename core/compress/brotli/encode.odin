@@ -25,7 +25,7 @@ Level :: enum u8 {
 
 OPTIMAL_BLOCK :: 1 << 20
 // Levels up to here parse with a single probe per position.
-FAST_LEVEL_MAX :: Level(0)
+FAST_LEVEL_MAX :: Level(1)
 // Levels from here on parse optimally.
 OPTIMAL_LEVEL_MIN :: Level(10)
 OPTIMAL_ITERATIONS :: 3
@@ -79,7 +79,7 @@ Parameters :: struct {
 @(rodata)
 PARAMETERS := [12]Parameters {
 	{0, 4, false, false, false},
-	{1, 1, false, false, false},
+	{2, 4, false, false, false},
 	{1, 2, true, false, false},
 	{2, 4, true, false, false},
 	{3, 4, true, false, false},
@@ -251,17 +251,13 @@ write_bits :: #force_inline proc(w: ^Bit_Writer, value: u64, count: uint) {
 	}
 }
 
-// Writes a run of literals under one prefix code. Room for the whole run is
-// made once, so the loop stores words without checking.
-write_literals :: proc(
-	w: ^Bit_Writer,
-	literals: []u8,
-	codes: ^[LITERAL_ALPHABET]u16,
-	lengths: ^[LITERAL_ALPHABET]u8,
-) -> runtime.Allocator_Error #no_bounds_check {
+// Writes a run of literals under one prefix code; `table` holds each code
+// with its length above bit 16. Room for the whole run is made once, and the
+// loop stores whole words, keeping the bytes that are complete.
+write_literals :: proc(w: ^Bit_Writer, literals: []u8, table: ^[LITERAL_ALPHABET]u32) -> runtime.Allocator_Error #no_bounds_check {
 	raw := (^runtime.Raw_Dynamic_Array)(&w.out)
-	// Codes are at most 15 bits; a word of slack for the pending bits.
-	needed := raw.len + 2 * len(literals) + 8
+	// Codes are at most 15 bits; slack for the pending bits and a word store.
+	needed := raw.len + 2 * len(literals) + 16
 
 	if needed > raw.cap {
 		reserve(&w.out, max(raw.cap * 2, needed)) or_return
@@ -271,17 +267,30 @@ write_literals :: proc(
 	count := w.count
 	out := uintptr(raw.data) + uintptr(raw.len)
 	start := out
+	index := 0
 
-	for value in literals {
-		accumulator |= u64(codes[value]) << count
-		count += uint(lengths[value])
+	// 31 pending bits and two codes fit the accumulator.
+	for ; index + 2 <= len(literals); index += 2 {
+		first := table[literals[index]]
+		second := table[literals[index + 1]]
+		accumulator |= u64(first & 0xffff) << count
+		count += uint(first >> 16)
+		accumulator |= u64(second & 0xffff) << count
+		count += uint(second >> 16)
+		intrinsics.unaligned_store((^u64le)(rawptr(out)), u64le(accumulator))
+		out += uintptr(count >> 3)
+		accumulator >>= count & ~uint(7)
+		count &= 7
+	}
 
-		if count >= 32 {
-			intrinsics.unaligned_store((^u32le)(rawptr(out)), u32le(accumulator))
-			out += 4
-			accumulator >>= 32
-			count -= 32
-		}
+	if index < len(literals) {
+		entry := table[literals[index]]
+		accumulator |= u64(entry & 0xffff) << count
+		count += uint(entry >> 16)
+		intrinsics.unaligned_store((^u64le)(rawptr(out)), u64le(accumulator))
+		out += uintptr(count >> 3)
+		accumulator >>= count & ~uint(7)
+		count &= 7
 	}
 
 	raw.len += int(out - start)
@@ -942,6 +951,12 @@ write_plain_meta_block :: proc(e: ^Encoder, start, end: int, last: bool, ring: R
 	build_and_write_code(e, literal_histogram[:], literal_lengths[:], literal_codes[:])
 	build_and_write_code(e, command_histogram[:], command_lengths[:], command_codes[:])
 	build_and_write_code(e, distance_histogram[:], distance_lengths[:], distance_codes[:])
+	literal_table: [LITERAL_ALPHABET]u32
+
+	for &entry, value in literal_table {
+		entry = u32(literal_codes[value]) | u32(literal_lengths[value]) << 16
+	}
+
 	position = start
 
 	for command in e.commands {
@@ -951,7 +966,7 @@ write_plain_meta_block :: proc(e: ^Encoder, start, end: int, last: bool, ring: R
 		write_bits(w, u64(command.insert_length - INSERT_BASE[insert]), uint(INSERT_EXTRA[insert]))
 		write_bits(w, u64(max(command.copy_length, 2) - COPY_BASE[copy]), uint(COPY_EXTRA[copy]))
 
-		write_literals(w, src[position:][:command.insert_length], &literal_codes, &literal_lengths) or_return
+		write_literals(w, src[position:][:command.insert_length], &literal_table) or_return
 
 		if command.copy_length > 0 && !distance_is_implicit(command.symbol) {
 			prefix := command.code & 0xffff
