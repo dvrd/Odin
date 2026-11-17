@@ -69,13 +69,11 @@ stream_reset :: proc(e: ^Stream_Encoder, max_output := 0) {
 }
 
 // A fixed-capacity dynamic array over `backing`; it must never grow.
-@(private = "file")
 stream_buffer :: proc(backing: []$T, length: int) -> [dynamic]T {
 	return transmute([dynamic]T)runtime.Raw_Dynamic_Array{raw_data(backing), length, len(backing), runtime.panic_allocator()}
 }
 
 // Drops the history that fell out of the window to make room for a block.
-@(private = "file")
 stream_slide :: proc(e: ^Stream_Encoder) {
 	shift := e.block_start - STREAM_WINDOW
 
@@ -93,7 +91,6 @@ stream_slide :: proc(e: ^Stream_Encoder) {
 }
 
 // Greedy parse of the pending block into x.commands.
-@(private = "file")
 stream_parse :: proc(e: ^Stream_Encoder, x: ^Encoder, start, end: int) #no_bounds_check {
 	src := x.src
 	literal_start := start
@@ -137,7 +134,6 @@ stream_parse :: proc(e: ^Stream_Encoder, x: ^Encoder, start, end: int) #no_bound
 }
 
 // Codes the pending block into e.out, which must be empty.
-@(private = "file")
 stream_emit :: proc(e: ^Stream_Encoder) {
 	start := e.block_start
 	end := e.filled
@@ -170,7 +166,6 @@ stream_emit :: proc(e: ^Stream_Encoder) {
 	e.block_start = end
 }
 
-@(private = "file")
 stream_account :: proc(e: ^Stream_Encoder, out_len: int) {
 	e.produced += out_len - e.out_len
 	e.out_len = out_len
@@ -182,7 +177,6 @@ stream_account :: proc(e: ^Stream_Encoder, out_len: int) {
 
 // Writes x.commands as a meta-block with one prefix code per alphabet, or
 // the block as stored bytes when that is smaller.
-@(private = "file")
 stream_code :: proc(e: ^Stream_Encoder, x: ^Encoder, start, end: int) #no_bounds_check {
 	w := &x.writer
 	src := x.src

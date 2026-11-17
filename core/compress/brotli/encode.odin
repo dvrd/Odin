@@ -24,6 +24,8 @@ Level :: enum u8 {
 }
 
 OPTIMAL_BLOCK :: 1 << 20
+// Levels up to here parse with a single probe per position.
+FAST_LEVEL_MAX :: Level(0)
 // Levels from here on parse optimally.
 OPTIMAL_LEVEL_MIN :: Level(10)
 OPTIMAL_ITERATIONS :: 3
@@ -113,6 +115,22 @@ Encoder :: struct {
 
 // Compresses `src` into a complete Brotli stream.
 encode :: proc(src: []u8, level := Level.Default, allocator := context.allocator) -> (output: []u8, err: Error) {
+	return encode_meta_blocks(src, level, META_BLOCK_MAX, allocator)
+}
+
+// `encode` with at most `meta_block_max` input bytes per meta-block; smaller
+// meta-blocks adapt their prefix codes sooner and cost more headers.
+encode_meta_blocks :: proc(
+	src: []u8,
+	level: Level,
+	meta_block_max: int,
+	allocator := context.allocator,
+) -> (
+	output: []u8,
+	err: Error,
+) {
+	assert(meta_block_max > 0 && meta_block_max <= META_BLOCK_MAX)
+
 	e := new(Encoder, allocator) or_return
 	defer free(e, allocator)
 
@@ -178,7 +196,7 @@ encode :: proc(src: []u8, level := Level.Default, allocator := context.allocator
 	}
 
 	for start := 0; start < len(src); {
-		end := min(start + META_BLOCK_MAX, len(src))
+		end := min(start + meta_block_max, len(src))
 		ring := e.ring
 		clear(&e.commands)
 
@@ -193,6 +211,8 @@ encode :: proc(src: []u8, level := Level.Default, allocator := context.allocator
 			}
 
 			e.commands, parsed = parsed, e.commands
+		} else if e.level <= FAST_LEVEL_MAX {
+			parse_fast(e, start, end) or_return
 		} else {
 			parse_range(e, start, end) or_return
 		}
@@ -217,7 +237,6 @@ encode :: proc(src: []u8, level := Level.Default, allocator := context.allocator
 
 // ----------------------------------------------------------------- bit output
 
-@(private)
 write_bits :: #force_inline proc(w: ^Bit_Writer, value: u64, count: uint) {
 	w.accumulator |= value << w.count
 	w.count += count
@@ -228,7 +247,6 @@ write_bits :: #force_inline proc(w: ^Bit_Writer, value: u64, count: uint) {
 }
 
 // Moves the low 32 bits of the accumulator to the output.
-@(private)
 flush_word :: proc(w: ^Bit_Writer) {
 	raw := (^runtime.Raw_Dynamic_Array)(&w.out)
 
@@ -249,7 +267,6 @@ flush_word :: proc(w: ^Bit_Writer) {
 	w.count -= 32
 }
 
-@(private)
 flush_bits :: proc(w: ^Bit_Writer) {
 	for w.count > 0 {
 		_, append_error := append(&w.out, u8(w.accumulator))
@@ -265,32 +282,47 @@ flush_bits :: proc(w: ^Bit_Writer) {
 
 // --------------------------------------------------------------- symbol codes
 
-@(private)
 insert_code :: #force_inline proc(length: int) -> int {
-	for code := 23; code > 0; code -= 1 {
-		if u32(length) >= INSERT_BASE[code] {
-			return code
-		}
+	value := u32(length)
+
+	switch {
+	case value < 6:
+		return length
+	case value < 130:
+		width := u32(bits.len_u32(value - 2)) - 2
+
+		return int(width << 1 + (value - 2) >> width + 2)
+	case value < 2114:
+		return bits.len_u32(value - 66) + 9
+	case value < 6210:
+		return 21
+	case value < 22594:
+		return 22
 	}
 
-	return 0
+	return 23
 }
 
-@(private)
 copy_code :: #force_inline proc(length: int) -> int {
-	for code := 23; code > 0; code -= 1 {
-		if u32(length) >= COPY_BASE[code] {
-			return code
-		}
+	value := u32(length)
+
+	switch {
+	case value < 10:
+		return length - 2
+	case value < 134:
+		width := u32(bits.len_u32(value - 6)) - 2
+
+		return int(width << 1 + (value - 6) >> width + 4)
+	case value < 2118:
+		return bits.len_u32(value - 70) + 11
 	}
 
-	return 0
+	return 23
 }
 
 COMMAND_CELLS := [3][3]int{{2, 3, 6}, {4, 5, 8}, {7, 9, 10}}
 
 // Symbol of the 704-symbol command alphabet for an insert and a copy code.
-@(private)
 command_symbol :: proc(insert, copy: int, implicit_distance: bool) -> int {
 	cell := COMMAND_CELLS[insert >> 3][copy >> 3]
 
@@ -303,7 +335,6 @@ command_symbol :: proc(insert, copy: int, implicit_distance: bool) -> int {
 
 // Distance code for `distance` given the recent-distance ring: the two most
 // recent distances, then those within three of either, then the older two.
-@(private)
 distance_code :: proc(ring: ^Ring, distance: int) -> u32 {
 	if distance == int(ring[0]) {
 		return 0
@@ -335,7 +366,6 @@ distance_code :: proc(ring: ^Ring, distance: int) -> u32 {
 }
 
 // Symbol and extra bits of a distance code under NPOSTFIX and NDIRECT.
-@(private)
 distance_prefix :: #force_inline proc(code: u32, postfix, direct: uint) -> (symbol: u16, extra_bits: u8, extra: u32) {
 	if code < 16 + u32(direct) {
 		return u16(code), 0, 0
@@ -351,7 +381,6 @@ distance_prefix :: #force_inline proc(code: u32, postfix, direct: uint) -> (symb
 	return u16(16 + u32(direct) + (2 * (u32(width) - 1) + half) << postfix + low), u8(width), (value - offset) >> postfix
 }
 
-@(private)
 ring_push :: #force_inline proc(ring: ^Ring, distance: int) {
 	ring[3] = ring[2]
 	ring[2] = ring[1]
@@ -361,7 +390,6 @@ ring_push :: #force_inline proc(ring: ^Ring, distance: int) {
 
 // --------------------------------------------------------------- match finder
 
-@(private)
 hash4 :: #force_inline proc(src: []u8, position: int) -> u32 {
 	value := intrinsics.unaligned_load((^u32)(&src[position]))
 
@@ -372,7 +400,6 @@ hash4 :: #force_inline proc(src: []u8, position: int) -> u32 {
 	return value * 0x1e35a7bd
 }
 
-@(private)
 common_length :: #force_inline proc(src: []u8, a, b, limit: int) -> int {
 	length := 0
 
@@ -401,7 +428,6 @@ common_length :: #force_inline proc(src: []u8, a, b, limit: int) -> int {
 // Appends `commands`; literals left over at the end of `list` move into the
 // insert of the first one, since only a meta-block's last command may lack a
 // copy.
-@(private)
 join_commands :: proc(list: ^[dynamic]Command, commands: []Command) -> runtime.Allocator_Error {
 	carried := 0
 
@@ -423,7 +449,6 @@ join_commands :: proc(list: ^[dynamic]Command, commands: []Command) -> runtime.A
 	return nil
 }
 
-@(private)
 push_command :: proc(e: ^Encoder, position, insert_length, copy_length, distance, omit: int) -> runtime.Allocator_Error {
 	command := Command {
 		insert_length = u32(insert_length),
@@ -454,7 +479,6 @@ push_command :: proc(e: ^Encoder, position, insert_length, copy_length, distance
 
 // --------------------------------------------------------------- prefix codes
 
-@(private)
 write_variable_byte :: proc(w: ^Bit_Writer, value: int) {
 	if value == 0 {
 		write_bits(w, 0, 1)
@@ -468,7 +492,6 @@ write_variable_byte :: proc(w: ^Bit_Writer, value: int) {
 }
 
 // Context map as move-to-front indices with runs of zeros coded by length.
-@(private)
 write_context_map :: proc(e: ^Encoder, mapping: []u8, trees: int) {
 	w := &e.writer
 	write_variable_byte(w, trees - 1)
@@ -571,7 +594,6 @@ write_context_map :: proc(e: ^Encoder, mapping: []u8, trees: int) {
 
 // Builds the length-limited code for `histogram`, writes its description and
 // leaves `lengths`/`codes` ready for writing symbols.
-@(private)
 build_and_write_code :: proc(e: ^Encoder, histogram: []u32, lengths: []u8, codes: []u16) {
 	w := &e.writer
 	alphabet := len(histogram)
@@ -591,9 +613,14 @@ build_and_write_code :: proc(e: ^Encoder, histogram: []u32, lengths: []u8, codes
 	width := uint(bits.len_u32(u32(alphabet - 1)))
 
 	if used_count <= 1 {
-		// A lone symbol costs zero bits per occurrence.
+		// A lone symbol costs zero bits per occurrence. The codes are cleared
+		// as well: a stale one would still be or-ed into the output.
 		for &length in lengths {
 			length = 0
+		}
+
+		for &code in codes {
+			code = 0
 		}
 
 		write_bits(w, 1, 4)
@@ -636,7 +663,6 @@ build_and_write_code :: proc(e: ^Encoder, histogram: []u32, lengths: []u8, codes
 	write_complex_code(e, lengths)
 }
 
-@(private)
 write_complex_code :: proc(e: ^Encoder, lengths: []u8) {
 	w := &e.writer
 	size := len(lengths)
@@ -767,7 +793,6 @@ write_complex_code :: proc(e: ^Encoder, lengths: []u8) {
 
 // Appends `symbol` repeated so that the decoder accumulates exactly `run`:
 // each further occurrence multiplies the count so far by 2^width.
-@(private)
 push_repeat :: proc(symbols, extras: []u8, total: int, symbol: u8, run: int, width: uint) -> int {
 	digits: [16]u8
 	count := 0

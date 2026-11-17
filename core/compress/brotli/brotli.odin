@@ -212,7 +212,6 @@ refill_lsb :: proc(z: ^Context_Memory_Input, width := i8(48)) {
 	}
 }
 
-@(private)
 read_bits :: #force_inline proc(z: ^$C, d: ^Load_Decoder, width: u8) -> u32 {
 	if z.num_bits < u64(width) {
 		refill_lsb(z)
@@ -231,13 +230,11 @@ read_bits :: #force_inline proc(z: ^$C, d: ^Load_Decoder, width: u8) -> u32 {
 }
 
 // Discards the bits up to the next byte boundary; false if any was set.
-@(private)
 align_to_byte :: proc(z: ^$C, d: ^Load_Decoder) -> bool {
 	return read_bits(z, d, u8(z.num_bits & 7)) == 0
 }
 
 // Grows the output so that `extra` more bytes fit.
-@(private)
 reserve_output :: proc(z: ^$C, extra: int) -> Error {
 	need := int(z.bytes_written) + extra
 
@@ -258,7 +255,6 @@ reserve_output :: proc(z: ^$C, extra: int) -> Error {
 
 // Builds the two-level decoding table for the complete canonical code
 // `lengths`; false if `table` is too small for it.
-@(private)
 build_table :: proc(table: []Entry, lengths: []u8) -> bool {
 	counts: [CODE_LENGTH_MAX + 1]int
 	offsets: [CODE_LENGTH_MAX + 2]int
@@ -347,14 +343,12 @@ build_table :: proc(table: []Entry, lengths: []u8) -> bool {
 }
 
 // A code with one symbol takes no bits.
-@(private)
 fill_table :: proc(table: []Entry, symbol: int) {
 	for &entry in table[:1 << ROOT_BITS] {
 		entry = {0, u16(symbol)}
 	}
 }
 
-@(private)
 read_symbol :: #force_inline proc(z: ^$C, d: ^Load_Decoder, table: []Entry) -> u32 #no_bounds_check {
 	if z.num_bits < CODE_LENGTH_MAX {
 		refill_lsb(z)
@@ -380,7 +374,6 @@ read_symbol :: #force_inline proc(z: ^$C, d: ^Load_Decoder, table: []Entry) -> u
 	return u32(entry.value)
 }
 
-@(private)
 read_prefix_code :: proc(z: ^$C, d: ^Load_Decoder, table: []Entry, alphabet: int) -> Error {
 	lengths: [ALPHABET_MAX]u8
 	skip := int(read_bits(z, d, 2))
@@ -512,7 +505,6 @@ read_prefix_code :: proc(z: ^$C, d: ^Load_Decoder, table: []Entry, alphabet: int
 	return nil
 }
 
-@(private)
 read_simple_code :: proc(z: ^$C, d: ^Load_Decoder, table: []Entry, alphabet: int, lengths: []u8) -> Error {
 	count := int(read_bits(z, d, 2)) + 1
 	width := u8(bits.len_u32(u32(alphabet - 1)))
@@ -565,7 +557,6 @@ read_simple_code :: proc(z: ^$C, d: ^Load_Decoder, table: []Entry, alphabet: int
 
 // ---------------------------------------------------------------- block types
 
-@(private)
 read_variable_byte :: proc(z: ^$C, d: ^Load_Decoder) -> int {
 	if read_bits(z, d, 1) == 0 {
 		return 0
@@ -580,14 +571,12 @@ read_variable_byte :: proc(z: ^$C, d: ^Load_Decoder) -> int {
 	return 1 << width + int(read_bits(z, d, width))
 }
 
-@(private)
 read_block_count :: proc(z: ^$C, d: ^Load_Decoder, table: []Entry) -> int {
 	symbol := read_symbol(z, d, table)
 
 	return int(BLOCK_COUNT_BASE[symbol] + read_bits(z, d, BLOCK_COUNT_EXTRA[symbol]))
 }
 
-@(private)
 read_block_state :: proc(z: ^$C, d: ^Load_Decoder, state: ^Block_State) -> Error {
 	state.type_count = read_variable_byte(z, d) + 1
 	state.current = 0
@@ -605,7 +594,6 @@ read_block_state :: proc(z: ^$C, d: ^Load_Decoder, state: ^Block_State) -> Error
 	return nil
 }
 
-@(private)
 switch_block :: proc(z: ^$C, d: ^Load_Decoder, state: ^Block_State) {
 	if state.type_count < 2 {
 		state.remaining = 1 << 28
@@ -633,7 +621,6 @@ switch_block :: proc(z: ^$C, d: ^Load_Decoder, state: ^Block_State) {
 	state.remaining = read_block_count(z, d, state.count_table[:])
 }
 
-@(private)
 read_context_map :: proc(z: ^$C, d: ^Load_Decoder, values: []u8) -> (trees: int, err: Error) {
 	trees = read_variable_byte(z, d) + 1
 
@@ -703,7 +690,6 @@ read_context_map :: proc(z: ^$C, d: ^Load_Decoder, values: []u8) -> (trees: int,
 
 // --------------------------------------------------------------------- stream
 
-@(private)
 decode_stream :: proc(z: ^$C, d: ^Load_Decoder) -> Error {
 	window_bits := 16
 
@@ -795,7 +781,6 @@ decode_stream :: proc(z: ^$C, d: ^Load_Decoder) -> Error {
 }
 
 // Bytes of input known to remain; unbounded for streams.
-@(private)
 input_remaining :: proc(z: ^$C) -> int {
 	when C == Context_Memory_Input {
 		return int(z.num_bits / 8) + len(z.input_data)
@@ -805,7 +790,6 @@ input_remaining :: proc(z: ^$C) -> int {
 }
 
 // Metadata meta-block: its bytes carry no output.
-@(private)
 skip_metadata :: proc(z: ^$C, d: ^Load_Decoder) -> Error {
 	if read_bits(z, d, 1) != 0 {
 		return E_Brotli.Invalid_Meta_Block
@@ -841,7 +825,6 @@ skip_metadata :: proc(z: ^$C, d: ^Load_Decoder) -> Error {
 	return nil
 }
 
-@(private)
 copy_stored :: proc(z: ^$C, d: ^Load_Decoder, length: int) -> Error {
 	if !align_to_byte(z, d) {
 		return E_Brotli.Invalid_Meta_Block
@@ -865,7 +848,6 @@ copy_stored :: proc(z: ^$C, d: ^Load_Decoder, length: int) -> Error {
 	return nil
 }
 
-@(private)
 decode_meta_block :: proc(
 	z: ^$C,
 	d: ^Load_Decoder,
@@ -1094,7 +1076,6 @@ decode_meta_block :: proc(
 TRANSFORMED_WORD_MAX :: DICTIONARY_WORD_MAX + 16
 
 // Writes `transform` applied to `word` into `out`; returns its length.
-@(private)
 transform_word :: proc(out: []u8, word: []u8, transform: Transform) -> int {
 	size := copy(out, transform.prefix)
 	body := word
@@ -1126,7 +1107,6 @@ transform_word :: proc(out: []u8, word: []u8, transform: Transform) -> int {
 }
 
 // RFC 7932 "uppercase": flips one UTF-8 scalar and reports its byte length.
-@(private)
 uppercase :: proc(text: []u8) -> int {
 	if len(text) == 0 {
 		return 1

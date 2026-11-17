@@ -35,10 +35,12 @@ Start :: struct {
 }
 
 Model :: struct {
-	command:  [COMMAND_ALPHABET]f32,
-	distance: [DISTANCE_CONTEXTS][DISTANCE_ALPHABET]f32,
-	postfix:  uint,
-	direct:   uint,
+	command:     [COMMAND_ALPHABET]f32,
+	// Cheapest command symbol.
+	command_min: f32,
+	distance:    [DISTANCE_CONTEXTS][DISTANCE_ALPHABET]f32,
+	postfix:     uint,
+	direct:      uint,
 }
 
 Word_Class :: enum u8 {
@@ -94,7 +96,6 @@ Optimal :: struct {
 	group_count:  int,
 }
 
-@(private)
 optimal_make :: proc(e: ^Encoder, block_max: int, allocator: runtime.Allocator) -> (o: ^Optimal, err: runtime.Allocator_Error) {
 	o = new(Optimal, allocator) or_return
 
@@ -128,7 +129,6 @@ optimal_make :: proc(e: ^Encoder, block_max: int, allocator: runtime.Allocator) 
 	return o, nil
 }
 
-@(private)
 optimal_destroy :: proc(o: ^Optimal, allocator: runtime.Allocator) {
 	if o == nil {
 		return
@@ -146,7 +146,6 @@ optimal_destroy :: proc(o: ^Optimal, allocator: runtime.Allocator) {
 }
 
 // Groups the transforms that keep a whole word by prefix and letter case.
-@(private)
 group_transforms :: proc(o: ^Optimal) {
 	grouped: [TRANSFORM_COUNT]bool
 	members := 0
@@ -176,7 +175,6 @@ group_transforms :: proc(o: ^Optimal) {
 	}
 }
 
-@(private)
 word_class :: proc(kind: u8) -> (class: Word_Class, whole: bool) {
 	switch Transform_Kind(kind) {
 	case .Identity:
@@ -192,7 +190,6 @@ word_class :: proc(kind: u8) -> (class: Word_Class, whole: bool) {
 }
 
 // Parses src[start:end] into e.commands.
-@(private)
 parse_optimal :: proc(e: ^Encoder, o: ^Optimal, block: ^Meta_Block, start, end: int) -> runtime.Allocator_Error {
 	ring := e.ring
 	collect_matches(e, o, start, end) or_return
@@ -220,23 +217,19 @@ parse_optimal :: proc(e: ^Encoder, o: ^Optimal, block: ^Meta_Block, start, end: 
 
 // ------------------------------------------------------------- match finding
 
-@(private)
 is_upper :: #force_inline proc(value: u8) -> bool {
 	return value >= 'A' && value <= 'Z'
 }
 
-@(private)
 is_lower :: #force_inline proc(value: u8) -> bool {
 	return value >= 'a' && value <= 'z'
 }
 
-@(private)
 to_lower :: #force_inline proc(value: u8) -> u8 {
 	return value | 0x20 if is_upper(value) else value
 }
 
 // Byte `index` of a dictionary word as text of the given case shows it.
-@(private)
 cased :: #force_inline proc(value: u8, index: int, class: Word_Class) -> u8 {
 	if is_lower(value) && (class == .Upper || class == .Capital && index == 0) {
 		return value ~ 0x20
@@ -245,7 +238,6 @@ cased :: #force_inline proc(value: u8, index: int, class: Word_Class) -> u8 {
 	return value
 }
 
-@(private)
 starts_with :: #force_inline proc(src: []u8, position, limit: int, text: string) -> bool #no_bounds_check {
 	if len(text) > limit {
 		return false
@@ -260,7 +252,6 @@ starts_with :: #force_inline proc(src: []u8, position, limit: int, text: string)
 	return true
 }
 
-@(private)
 offer_word :: #force_inline proc(found: ^[DICTIONARY_COVER_MAX + 1]Cached_Match, covered, size, distance: int) {
 	slot := &found[covered]
 
@@ -271,7 +262,6 @@ offer_word :: #force_inline proc(found: ^[DICTIONARY_COVER_MAX + 1]Cached_Match,
 
 // Every way a static dictionary word, transformed or not, spells the text at
 // `position`: the cheapest reference for each covered length.
-@(private)
 dictionary_matches :: proc(o: ^Optimal, src: []u8, position, limit, reach: int, found: ^[DICTIONARY_COVER_MAX + 1]Cached_Match) #no_bounds_check {
 	for group in o.groups[:o.group_count] {
 		lead := len(group.prefix)
@@ -344,7 +334,6 @@ dictionary_matches :: proc(o: ^Optimal, src: []u8, position, limit, reach: int, 
 
 // Stores `position` in its tree and, when `collect`, appends the matches
 // longer than `best` met on the way down, nearest first per length.
-@(private)
 tree_search :: proc(e: ^Encoder, o: ^Optimal, position, limit, best: int, collect: bool) -> (longest: int, err: runtime.Allocator_Error) #no_bounds_check {
 	src := e.src
 	longest = best
@@ -420,7 +409,6 @@ tree_search :: proc(e: ^Encoder, o: ^Optimal, position, limit, best: int, collec
 
 // Caches, per position, its matches by increasing length: the nearest two and
 // three byte ones, the tree's, then static dictionary words longer than those.
-@(private)
 collect_matches :: proc(e: ^Encoder, o: ^Optimal, start, end: int) -> runtime.Allocator_Error #no_bounds_check {
 	src := e.src
 	clear(&o.matches)
@@ -493,7 +481,6 @@ collect_matches :: proc(e: ^Encoder, o: ^Optimal, start, end: int) -> runtime.Al
 
 // ---------------------------------------------------------------- cost model
 
-@(private)
 symbol_costs :: proc(histogram: []u32, costs: []f32, fallback: f32) {
 	total: u64
 
@@ -517,7 +504,6 @@ symbol_costs :: proc(histogram: []u32, costs: []f32, fallback: f32) {
 	}
 }
 
-@(private)
 set_model :: proc(e: ^Encoder, o: ^Optimal, block: ^Meta_Block, start, end: int, flat: bool) {
 	src := e.src
 
@@ -539,6 +525,8 @@ set_model :: proc(e: ^Encoder, o: ^Optimal, block: ^Meta_Block, start, end: int,
 			cost = 5.5 if symbol < 128 else 7
 		}
 
+		o.model.command_min = 5.5
+
 		for &costs in o.model.distance {
 			for &cost, symbol in costs {
 				cost = 4 if symbol < 16 else 4.5
@@ -549,6 +537,11 @@ set_model :: proc(e: ^Encoder, o: ^Optimal, block: ^Meta_Block, start, end: int,
 	}
 
 	symbol_costs(block.command_histogram[:COMMAND_ALPHABET], o.model.command[:], 8)
+	o.model.command_min = math.INF_F32
+
+	for cost in o.model.command {
+		o.model.command_min = min(o.model.command_min, cost)
+	}
 
 	for &costs, slot in o.model.distance {
 		symbol_costs(block.distance_histogram[int(block.distance_map[slot]) * DISTANCE_ALPHABET:][:DISTANCE_ALPHABET], costs[:], 6)
@@ -558,7 +551,6 @@ set_model :: proc(e: ^Encoder, o: ^Optimal, block: ^Meta_Block, start, end: int,
 // ------------------------------------------------------------- shortest path
 
 // Bits of the command symbol and the copy length's extra bits.
-@(private)
 command_cost :: #force_inline proc(o: ^Optimal, insert, copy: int, implicit: bool) -> f32 #no_bounds_check {
 	cell := COMMAND_CELLS[insert >> 3][copy >> 3]
 
@@ -569,13 +561,11 @@ command_cost :: #force_inline proc(o: ^Optimal, insert, copy: int, implicit: boo
 	return o.model.command[cell << 6 | (insert & 7) << 3 | copy & 7] + f32(COPY_EXTRA[copy])
 }
 
-@(private)
 copy_code_of :: #force_inline proc(o: ^Optimal, length: int) -> int #no_bounds_check {
 	return int(o.copy_codes[length]) if length < COPY_CODE_TABLE else 23
 }
 
 // Keeps the STARTS_MAX cheapest starts, cheapest first.
-@(private)
 push_start :: proc(starts: ^[STARTS_MAX]Start, count: ^int, start: Start) {
 	// A new start always enters; when full it replaces the dearest one.
 	slot := min(count^, STARTS_MAX - 1)
@@ -590,7 +580,6 @@ push_start :: proc(starts: ^[STARTS_MAX]Start, count: ^int, start: Start) {
 }
 
 // Offers, from every start, the copies that begin at node `at`.
-@(private)
 relax :: proc(e: ^Encoder, o: ^Optimal, starts: []Start, at, position, limit: int, cached: []Cached_Match) #no_bounds_check {
 	src := e.src
 	reach := min(position, e.window_max)
@@ -599,8 +588,27 @@ relax :: proc(e: ^Encoder, o: ^Optimal, starts: []Start, at, position, limit: in
 	for start, rank in starts[:min(len(starts), STARTS_RECENT)] {
 		run := at - start.position
 		insert := insert_code(run)
-		base := start.relative + o.literal_sum[at] + f64(INSERT_EXTRA[insert])
-		best := 1
+		arrival := start.relative + o.literal_sum[at]
+		base := arrival + f64(INSERT_EXTRA[insert])
+
+		// Shortest copy that could still beat what already reaches the nodes
+		// ahead: the cheapest command, one more bit per length-code bucket.
+		floor := arrival + f64(o.model.command_min)
+		shortest := 2
+		bucket := 4
+		bucket_end := 10
+
+		for shortest <= limit && nodes[at + shortest].cost <= floor {
+			shortest += 1
+
+			if shortest == bucket_end {
+				floor += 1
+				bucket_end += bucket
+				bucket *= 2
+			}
+		}
+
+		best := shortest - 1
 
 		for index in 0 ..< 16 {
 			if best >= limit {
@@ -653,7 +661,7 @@ relax :: proc(e: ^Encoder, o: ^Optimal, starts: []Start, at, position, limit: in
 			continue
 		}
 
-		size := 2
+		size := shortest
 
 		for match in cached {
 			distance := int(match.distance)
@@ -687,7 +695,6 @@ relax :: proc(e: ^Encoder, o: ^Optimal, starts: []Start, at, position, limit: in
 	}
 }
 
-@(private)
 shortest_path :: proc(e: ^Encoder, o: ^Optimal, start, end: int) -> runtime.Allocator_Error #no_bounds_check {
 	count := end - start
 	nodes := o.nodes[:count + 1]

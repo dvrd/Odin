@@ -245,7 +245,6 @@ decoder_destroy :: proc(d: ^Decoder) {
 	d^ = {}
 }
 
-@(private = "file")
 pull_byte :: proc(d: ^Decoder, input: []u8, r: ^compress.Decode_Result) -> bool {
 	if r.consumed == len(input) {
 		return false
@@ -264,7 +263,6 @@ pull_byte :: proc(d: ^Decoder, input: []u8, r: ^compress.Decode_Result) -> bool 
 	return true
 }
 
-@(private = "file")
 take_bits :: proc(d: ^Decoder, input: []u8, r: ^compress.Decode_Result, width: u8) -> (u32, bool) {
 	for d.bit_count < width {
 		if !pull_byte(d, input, r) {
@@ -281,7 +279,6 @@ take_bits :: proc(d: ^Decoder, input: []u8, r: ^compress.Decode_Result, width: u
 
 // A code is decoded from the bits already held; one more byte is pulled only
 // when the entry found with zero-extended bits is longer than what is held.
-@(private = "file")
 take_symbol :: proc(d: ^Decoder, input: []u8, r: ^compress.Decode_Result, table: []Entry) -> (u32, bool) {
 	for {
 		entry := table[d.bits & (1 << ROOT_BITS - 1)]
@@ -307,7 +304,6 @@ take_symbol :: proc(d: ^Decoder, input: []u8, r: ^compress.Decode_Result, table:
 }
 
 // Decoded bytes of the stream, oldest first, fall out of the ring at `len(window)`.
-@(private = "file")
 window_push :: proc(d: ^Decoder, value: u8) {
 	d.window[d.window_at] = value
 	d.window_at += 1
@@ -317,7 +313,6 @@ window_push :: proc(d: ^Decoder, value: u8) {
 	}
 }
 
-@(private = "file")
 window_back :: proc(d: ^Decoder, back: int) -> u8 {
 	at := d.window_at - back
 
@@ -328,7 +323,6 @@ window_back :: proc(d: ^Decoder, back: int) -> u8 {
 	return d.window[at]
 }
 
-@(private = "file")
 emit :: proc(d: ^Decoder, output: []u8, r: ^compress.Decode_Result, value: u8) {
 	output[r.produced] = value
 	r.produced += 1
@@ -338,7 +332,6 @@ emit :: proc(d: ^Decoder, output: []u8, r: ^compress.Decode_Result, value: u8) {
 
 // Bytes that may be emitted now; 0 with r.err set at the decoded limit, or
 // with Need_Output when only the destination is full.
-@(private = "file")
 output_room :: proc(d: ^Decoder, output: []u8, r: ^compress.Decode_Result) -> int {
 	if d.decoded_bytes == d.max_decoded_bytes {
 		r.err = .Decoded_Limit
@@ -355,7 +348,6 @@ output_room :: proc(d: ^Decoder, output: []u8, r: ^compress.Decode_Result) -> in
 	return int(min(u64(room), d.max_decoded_bytes - d.decoded_bytes))
 }
 
-@(private = "file")
 start_code :: proc(d: ^Decoder, target: Code_Target, alphabet: int, after: Decoder_Phase, offset := 0, size := 0) {
 	d.code_target = target
 	d.code_alphabet = alphabet
@@ -366,7 +358,6 @@ start_code :: proc(d: ^Decoder, target: Code_Target, alphabet: int, after: Decod
 	d.phase = .Code_Kind
 }
 
-@(private = "file")
 code_table :: proc(d: ^Decoder) -> []Entry {
 	switch d.code_target {
 	case .Block_Type:
@@ -382,7 +373,6 @@ code_table :: proc(d: ^Decoder) -> []Entry {
 	return nil
 }
 
-@(private = "file")
 build_simple :: proc(d: ^Decoder) -> bool {
 	table := code_table(d)
 	symbols := d.simple_symbols
@@ -416,7 +406,6 @@ build_simple :: proc(d: ^Decoder) -> bool {
 }
 
 // Length and width of the code-length code symbol that starts `peek`.
-@(private = "file")
 meta_code :: proc(peek: u64) -> (length, width: u8) {
 	switch {
 	case peek & 3 == 0:
@@ -435,7 +424,6 @@ meta_code :: proc(peek: u64) -> (length, width: u8) {
 }
 
 // Starts a switch of block type of `category`; one block type never switches.
-@(private = "file")
 start_switch :: proc(d: ^Decoder, category: int, after: Decoder_Phase) {
 	state := &d.blocks[category]
 
@@ -449,7 +437,6 @@ start_switch :: proc(d: ^Decoder, category: int, after: Decoder_Phase) {
 	d.phase = .Switch_Type
 }
 
-@(private = "file")
 map_values :: proc(d: ^Decoder) -> []u8 {
 	if d.map_distance {
 		return d.distance_map[:d.map_length]
@@ -458,7 +445,6 @@ map_values :: proc(d: ^Decoder) -> []u8 {
 	return d.literal_map[:d.map_length]
 }
 
-@(private = "file")
 dictionary_offset :: proc(length: int) -> int {
 	offset := 0
 
@@ -470,7 +456,6 @@ dictionary_offset :: proc(length: int) -> int {
 }
 
 // Applies distance code `code`; true when extra bits must still be read.
-@(private = "file")
 apply_distance_code :: proc(d: ^Decoder, code: int) -> bool {
 	d.push = true
 
@@ -502,7 +487,6 @@ apply_distance_code :: proc(d: ^Decoder, code: int) -> bool {
 }
 
 // Static dictionary reference: prepares the transformed word. False if invalid.
-@(private = "file")
 begin_dictionary :: proc(d: ^Decoder, reach: int) -> bool {
 	if d.copy_length < DICTIONARY_WORD_MIN || d.copy_length > DICTIONARY_WORD_MAX {
 		return false
@@ -524,7 +508,6 @@ begin_dictionary :: proc(d: ^Decoder, reach: int) -> bool {
 	return d.word_length <= d.mb_remaining
 }
 
-@(private = "file")
 finish_stream :: proc(d: ^Decoder, input: []u8, final_input: bool, r: ^compress.Decode_Result) {
 	if r.consumed < len(input) {
 		r.err = .Trailing_Data

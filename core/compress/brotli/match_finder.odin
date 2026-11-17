@@ -1,5 +1,6 @@
 package compress_brotli
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:math/bits"
 
@@ -45,7 +46,6 @@ CACHE_INDEX := [16]u8{0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1}
 @(rodata)
 CACHE_OFFSET := [16]i8{0, 0, 0, 0, -1, 1, -2, 2, -3, 3, -1, 1, -2, 2, -3, 3}
 
-@(private)
 finder_make :: proc(f: ^Finder, size: int, block_bits: uint, cache_size: int, allocator: runtime.Allocator) -> runtime.Allocator_Error {
 	bucket_bits := clamp(bits.len_u32(u32(min(size, 1 << 30))) - 1, BUCKET_BITS_MIN, BUCKET_BITS_MAX)
 	f.bucket_shift = u32(32 - bucket_bits)
@@ -65,13 +65,11 @@ finder_make :: proc(f: ^Finder, size: int, block_bits: uint, cache_size: int, al
 	return nil
 }
 
-@(private)
 finder_destroy :: proc(f: ^Finder, allocator: runtime.Allocator) {
 	delete(f.counts, allocator)
 	delete(f.buckets, allocator)
 }
 
-@(private)
 finder_store :: #force_inline proc(f: ^Finder, src: []u8, position: int) #no_bounds_check {
 	key := hash4(src, position) >> f.bucket_shift
 	slot := u32(f.counts[key]) & (1 << f.block_bits - 1)
@@ -79,14 +77,12 @@ finder_store :: #force_inline proc(f: ^Finder, src: []u8, position: int) #no_bou
 	f.counts[key] += 1
 }
 
-@(private)
 match_score :: #force_inline proc(length, distance: int) -> int {
 	return 1920 + 135 * length - 30 * (bits.len_u32(u32(distance)) - 1)
 }
 
 // Best copy for `position` that ends by `end`, which must leave at least four
 // bytes; score SCORE_MIN when nothing is worth it. Indexes `position`.
-@(private)
 find_match :: proc(e: ^Encoder, position, end: int) -> Match #no_bounds_check {
 	f := &e.finder
 	src := e.src
@@ -182,7 +178,6 @@ DICTIONARY_FIRST := [DICTIONARY_WORD_MAX + 1]u16 {
 
 // Best static dictionary word, whole or with up to nine trailing bytes
 // dropped, that src[position:] starts with.
-@(private)
 dictionary_match :: proc(src: []u8, position, limit, reach: int) -> Match #no_bounds_check {
 	best := Match{score = SCORE_MIN}
 	word := WORD_HEAD[hash4(src, position) >> (32 - DICTIONARY_HASH_BITS)]
@@ -218,7 +213,6 @@ dictionary_match :: proc(src: []u8, position, limit, reach: int) -> Match #no_bo
 // -------------------------------------------------------------------- parsing
 
 // Lazy parse of src[start:end] into e.commands.
-@(private)
 parse_range :: proc(e: ^Encoder, start, end: int) -> runtime.Allocator_Error {
 	f := &e.finder
 	src := e.src
@@ -285,6 +279,63 @@ parse_range :: proc(e: ^Encoder, start, end: int) -> runtime.Allocator_Error {
 		sparse_after = position + 2 * match.length + spree
 		position += match.length
 		literal_start = position
+	}
+
+	if literal_start < end {
+		push_command(e, end, end - literal_start, 0, 0, 0) or_return
+	}
+
+	return nil
+}
+
+// Misses before the step between probed positions grows by one, log2.
+FAST_PATIENCE :: 5
+
+// Level 0: one candidate per hash bucket and the last distance, and
+// ever longer steps while nothing matches. The table is not cleared: a stale
+// or random slot is rejected by comparing the bytes it points at.
+parse_fast :: proc(e: ^Encoder, start, end: int) -> runtime.Allocator_Error #no_bounds_check {
+	f := &e.finder
+	src := e.src
+	table := f.buckets
+	position := start
+	literal_start := start
+	last := end - 4
+	misses := 0
+
+	for position <= last {
+		key := hash4(src, position) >> f.bucket_shift
+		candidate := int(table[key])
+		table[key] = u32(position)
+		reach := min(position, e.window_max)
+		head := intrinsics.unaligned_load((^u32)(&src[position]))
+		distance := int(e.ring[0])
+		length := 0
+
+		if distance <= reach && intrinsics.unaligned_load((^u32)(&src[position - distance])) == head {
+			length = common_length(src, position - distance, position, end - position)
+		} else if candidate < position && position - candidate <= reach {
+			if intrinsics.unaligned_load((^u32)(&src[candidate])) == head {
+				distance = position - candidate
+				length = common_length(src, candidate, position, end - position)
+			}
+		}
+
+		if length < 4 {
+			position += 1 + misses >> FAST_PATIENCE
+			misses += 1
+			continue
+		}
+
+		misses = 0
+		push_command(e, position, position - literal_start, length, distance, 0) or_return
+		position += length
+		literal_start = position
+
+		if position <= last {
+			table[hash4(src, position - 2) >> f.bucket_shift] = u32(position - 2)
+			table[hash4(src, position - 1) >> f.bucket_shift] = u32(position - 1)
+		}
 	}
 
 	if literal_start < end {

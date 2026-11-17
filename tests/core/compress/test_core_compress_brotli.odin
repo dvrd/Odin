@@ -241,3 +241,25 @@ brotli_stream_encoder_respects_output_limit :: proc(t: ^testing.T) {
 	_, ok = brotli.stream_encode_into(e, sample, packed[:written - 1])
 	testing.expect(t, !ok, "short destination must fail")
 }
+
+@(test)
+brotli_round_trips_across_meta_blocks :: proc(t: ^testing.T) {
+	// Every meta-block has its own prefix codes; nothing may leak from one
+	// to the next.
+	sample := #load("../../../core/unicode/tables.odin")
+
+	for level in 0 ..= 11 {
+		for meta_block_max in ([?]int{1 << 12, 1 << 16, 1 << 18}) {
+			packed, encode_error := brotli.encode_meta_blocks(sample, brotli.Level(level), meta_block_max)
+			defer delete(packed)
+
+			testing.expectf(t, encode_error == nil, "encode failed: level %d block %d: %v", level, meta_block_max, encode_error)
+
+			unpacked, err := brotli_decode(packed)
+			defer delete(unpacked)
+
+			testing.expectf(t, err == nil, "decode failed: level %d block %d: %v", level, meta_block_max, err)
+			testing.expectf(t, bytes.equal(unpacked, sample), "mismatch: level %d block %d", level, meta_block_max)
+		}
+	}
+}

@@ -57,7 +57,6 @@ Meta_Block :: struct {
 	count_codes:        [Category][BLOCK_COUNT_ALPHABET]u16,
 }
 
-@(private)
 block_make :: proc(allocator: runtime.Allocator) -> (block: ^Meta_Block, err: runtime.Allocator_Error) {
 	block = new(Meta_Block, allocator) or_return
 
@@ -85,7 +84,6 @@ block_make :: proc(allocator: runtime.Allocator) -> (block: ^Meta_Block, err: ru
 	return block, nil
 }
 
-@(private)
 block_destroy :: proc(block: ^Meta_Block, allocator: runtime.Allocator) {
 	if block == nil {
 		return
@@ -114,7 +112,6 @@ block_destroy :: proc(block: ^Meta_Block, allocator: runtime.Allocator) {
 	free(block, allocator)
 }
 
-@(private)
 literal_context :: #force_inline proc(src: []u8, position, mode: int) -> int {
 	p1 := int(src[position - 1]) if position > 0 else 0
 	p2 := int(src[position - 2]) if position > 1 else 0
@@ -123,7 +120,6 @@ literal_context :: #force_inline proc(src: []u8, position, mode: int) -> int {
 }
 
 // Whether at least three quarters of `data` is well-formed UTF-8.
-@(private)
 mostly_utf8 :: proc(data: []u8) -> bool {
 	valid := 0
 
@@ -161,24 +157,20 @@ mostly_utf8 :: proc(data: []u8) -> bool {
 	return valid * 4 >= len(data) * 3
 }
 
-@(private)
 distance_context :: #force_inline proc(copy_length: u32) -> int {
 	return 3 if copy_length > 4 else int(copy_length) - 2
 }
 
 // True when the command's distance is carried by the command symbol itself.
-@(private)
 distance_is_implicit :: #force_inline proc(symbol: u16) -> bool {
 	return symbol < 128
 }
 
-@(private)
 cursor_start :: proc(split: ^Split) -> Cursor {
 	return {type = int(split.types[0]), remaining = split.lengths[0], second = 1}
 }
 
 // Consumes one symbol; true when it is the first of a new block.
-@(private)
 cursor_step :: #force_inline proc(split: ^Split, cursor: ^Cursor) -> bool {
 	switched := false
 
@@ -196,7 +188,6 @@ cursor_step :: #force_inline proc(split: ^Split, cursor: ^Cursor) -> bool {
 
 // Fills the histograms of e.commands over src[start:end], splitting each
 // category into block types when `split` is set, and clusters them into trees.
-@(private)
 gather :: proc(e: ^Encoder, block: ^Meta_Block, start, end: int, split: bool) -> runtime.Allocator_Error {
 	src := e.src
 	block.mode = CONTEXT_MODE_UTF8
@@ -315,7 +306,6 @@ SWITCH_BITS :: 14
 
 // Literal histograms per (block type, context) for the current literal split,
 // clustered into trees. Returns the estimated bits of all literals and trees.
-@(private)
 gather_literals :: proc(e: ^Encoder, block: ^Meta_Block, start: int) -> (cost: f64, err: runtime.Allocator_Error) {
 	src := e.src
 	rows := block.splits[.Literal].count * LITERAL_CONTEXTS
@@ -353,7 +343,6 @@ gather_literals :: proc(e: ^Encoder, block: ^Meta_Block, start: int) -> (cost: f
 }
 
 // Resizes `array` to `size` zeroed elements.
-@(private)
 reset :: proc(array: ^[dynamic]$T, size: int) -> runtime.Allocator_Error {
 	clear(array)
 
@@ -362,7 +351,6 @@ reset :: proc(array: ^[dynamic]$T, size: int) -> runtime.Allocator_Error {
 
 // Picks the NPOSTFIX and NDIRECT that code the explicit distances of
 // e.commands in the fewest bits.
-@(private)
 choose_distance_parameters :: proc(e: ^Encoder, block: ^Meta_Block) {
 	histogram: [DISTANCE_ALPHABET]u32
 	best := max(f64)
@@ -403,7 +391,6 @@ choose_distance_parameters :: proc(e: ^Encoder, block: ^Meta_Block) {
 
 // --------------------------------------------------------------------- output
 
-@(private)
 block_count_symbol :: #force_inline proc(length: u32) -> int {
 	for symbol := BLOCK_COUNT_ALPHABET - 1; symbol > 0; symbol -= 1 {
 		if length >= BLOCK_COUNT_BASE[symbol] {
@@ -415,7 +402,6 @@ block_count_symbol :: #force_inline proc(length: u32) -> int {
 }
 
 // Block type code relative to the two previous types of the category.
-@(private)
 block_type_symbol :: #force_inline proc(cursor: ^Cursor) -> int {
 	symbol := cursor.type + 2
 
@@ -431,7 +417,6 @@ block_type_symbol :: #force_inline proc(cursor: ^Cursor) -> int {
 	return symbol
 }
 
-@(private)
 write_block_count :: proc(e: ^Encoder, block: ^Meta_Block, category: Category, length: u32) {
 	symbol := block_count_symbol(length)
 	write_bits(&e.writer, u64(block.count_codes[category][symbol]), uint(block.count_lengths[category][symbol]))
@@ -440,7 +425,6 @@ write_block_count :: proc(e: ^Encoder, block: ^Meta_Block, category: Category, l
 
 // Block type count of a category, then the codes for its switch commands and
 // the length of its first block.
-@(private)
 write_split :: proc(e: ^Encoder, block: ^Meta_Block, category: Category) {
 	split := &block.splits[category]
 	write_variable_byte(&e.writer, split.count - 1)
@@ -468,7 +452,6 @@ write_split :: proc(e: ^Encoder, block: ^Meta_Block, category: Category) {
 	write_block_count(e, block, category, split.lengths[0])
 }
 
-@(private)
 write_switch :: #force_inline proc(e: ^Encoder, block: ^Meta_Block, category: Category, cursor: ^Cursor) {
 	if cursor_step(&block.splits[category], cursor) {
 		symbol := block_type_symbol(cursor)
@@ -477,13 +460,11 @@ write_switch :: #force_inline proc(e: ^Encoder, block: ^Meta_Block, category: Ca
 	}
 }
 
-// Builds and writes one prefix code per histogram row.
 SMOOTH_LEVEL_MIN :: Level(4)
 
 // Evens out neighbouring counts so that the code lengths built from them
 // form runs, which the code-length code stores cheaply. Follows the
 // reference encoder; arithmetic on averages is in 24.8 fixed point.
-@(private)
 smooth_for_rle :: proc(counts: []u32) {
 	STREAK_LIMIT :: 1240
 	length := len(counts)
@@ -595,7 +576,7 @@ smooth_for_rle :: proc(counts: []u32) {
 	}
 }
 
-@(private)
+// Builds and writes one prefix code per histogram row.
 write_codes :: proc(
 	e: ^Encoder,
 	histograms: []u32,
@@ -624,7 +605,6 @@ write_codes :: proc(
 
 // Writes src[start:end] as one meta-block, stored when coding does not pay.
 // `ring` is the recent-distance state from before the block was parsed.
-@(private)
 write_meta_block :: proc(
 	e: ^Encoder,
 	block: ^Meta_Block,
@@ -700,6 +680,8 @@ write_meta_block :: proc(
 	commands := cursor_start(&block.splits[.Command])
 	distances := cursor_start(&block.splits[.Distance])
 	position := start
+	// One literal code for the whole meta-block: no switches, no contexts.
+	plain_literals := block.splits[.Literal].count == 1 && block.literal_trees == 1
 
 	for command in e.commands {
 		write_switch(e, block, .Command, &commands)
@@ -711,7 +693,15 @@ write_meta_block :: proc(
 		write_bits(w, u64(command.insert_length - INSERT_BASE[insert]), uint(INSERT_EXTRA[insert]))
 		write_bits(w, u64(max(command.copy_length, 2) - COPY_BASE[copy]), uint(COPY_EXTRA[copy]))
 
-		for _ in 0 ..< command.insert_length {
+		if plain_literals {
+			for value in src[position:][:command.insert_length] {
+				write_bits(w, u64(block.literal_codes[value]), uint(block.literal_lengths[value]))
+			}
+
+			position += int(command.insert_length)
+		}
+
+		for _ in 0 ..< (0 if plain_literals else command.insert_length) {
 			write_switch(e, block, .Literal, &literals)
 
 			row := literals.type * LITERAL_CONTEXTS + literal_context(src, position, block.mode)
@@ -761,7 +751,6 @@ write_meta_block :: proc(
 
 // ------------------------------------------------------------ histogram costs
 
-@(private)
 entropy_bits :: proc(histogram: []u32) -> (total: u64, used: int, data_bits: f64) {
 	weighted: f64
 
@@ -781,7 +770,6 @@ entropy_bits :: proc(histogram: []u32) -> (total: u64, used: int, data_bits: f64
 }
 
 // Estimated bits to store a histogram's prefix code and all of its symbols.
-@(private)
 histogram_cost :: proc(histogram: []u32) -> f64 {
 	total, used, data_bits := entropy_bits(histogram)
 
@@ -835,7 +823,6 @@ CLUSTER_MAX :: 256
 // Merges `rows` histograms of `stride` counters while that saves bits; row `r`
 // then uses cluster `mapping[r]`, and the first `clusters` rows hold the merged
 // histograms. Without `modelled` all rows share one cluster.
-@(private)
 cluster :: proc(
 	e: ^Encoder,
 	histograms: []u32,
@@ -958,19 +945,17 @@ LOG2_TABLE_SIZE :: 4096
 
 LOG2_TABLE: [LOG2_TABLE_SIZE]f32
 
-@(init, private)
+@(init)
 fill_log2_table :: proc "contextless" () {
 	for index in 1 ..< LOG2_TABLE_SIZE {
 		LOG2_TABLE[index] = f32(math.log2(f64(index)))
 	}
 }
 
-@(private)
 fast_log2 :: #force_inline proc(value: u64) -> f64 {
 	return f64(LOG2_TABLE[value]) if value < LOG2_TABLE_SIZE else math.log2(f64(value))
 }
 
-@(private)
 row_stats :: proc(histogram: []u32) -> (stats: Row_Stats) {
 	for frequency in histogram {
 		if frequency != 0 {
@@ -984,7 +969,6 @@ row_stats :: proc(histogram: []u32) -> (stats: Row_Stats) {
 }
 
 // Cheap estimate of a histogram's coded size for clustering decisions.
-@(private)
 stats_cost :: #force_inline proc(stats: Row_Stats) -> f64 {
 	if stats.used == 0 {
 		return 0
@@ -999,7 +983,6 @@ stats_cost :: #force_inline proc(stats: Row_Stats) -> f64 {
 
 // Cost of rows `a` and `b` as one histogram; only symbols both rows use need
 // their logarithms recomputed.
-@(private)
 merged_cost :: proc(histograms: []u32, stride: int, a, b: i32, stats: []Row_Stats) -> f64 #no_bounds_check {
 	combined := Row_Stats {
 		total    = stats[a].total + stats[b].total,
@@ -1023,7 +1006,6 @@ merged_cost :: proc(histograms: []u32, stride: int, a, b: i32, stats: []Row_Stat
 	return stats_cost(combined)
 }
 
-@(private)
 merge_rows :: proc(histograms: []u32, stride: int, into, from: i32, cost: []f64, parent: []i32, stats: []Row_Stats) {
 	for symbol in 0 ..< stride {
 		histograms[int(into) * stride + symbol] += histograms[int(from) * stride + symbol]
@@ -1035,7 +1017,6 @@ merge_rows :: proc(histograms: []u32, stride: int, into, from: i32, cost: []f64,
 }
 
 // Repeatedly merges the pair of `members` that saves the most bits.
-@(private)
 merge_group :: proc(
 	e: ^Encoder,
 	histograms: []u32,
@@ -1104,7 +1085,6 @@ merge_group :: proc(
 
 // One pass for many candidates: each joins the kept cluster it saves the most
 // bits with, or is kept itself while there is room.
-@(private)
 merge_leaders :: proc(histograms: []u32, stride: int, members: []i32, cost: []f64, parent: []i32, stats: []Row_Stats) {
 	kept: [CLUSTER_MAX]i32
 	count := 0
@@ -1153,7 +1133,6 @@ SPLIT_HISTOGRAMS_FAST :: 16
 // Splits `data` into blocks of similar statistics: a few sampled histograms
 // are refined by assigning every symbol to the histogram that codes it most
 // cheaply, with a price on switching, then similar histograms are merged.
-@(private)
 split_stream :: proc(
 	e: ^Encoder,
 	data: []u16,
@@ -1300,7 +1279,6 @@ split_stream :: proc(
 
 // Assigns each symbol of `data` to one of `count` histograms: the cheapest
 // path where changing histogram costs `switch_cost` bits.
-@(private)
 find_blocks :: proc(
 	data: []u16,
 	alphabet, count: int,
