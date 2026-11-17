@@ -33,10 +33,12 @@ DICTIONARY_NONE :: max(u16)
 WINDOW_BITS_MIN :: 10
 WINDOW_BITS_MAX :: 24
 META_BLOCK_MAX :: 1 << 24
-DISTANCE_ALPHABET :: 64
+// 16 + NDIRECT + (48 << NPOSTFIX) at its largest.
+DISTANCE_ALPHABET :: 520
 LITERAL_CONTEXTS :: 64
 DISTANCE_CONTEXTS :: 4
 CONTEXT_MODE_UTF8 :: 2
+CONTEXT_MODE_SIGNED :: 3
 NIL :: max(u32)
 
 Command :: struct {
@@ -46,11 +48,9 @@ Command :: struct {
 	// Value the decoder reconstructs: a backward distance, or past the window
 	// for a static dictionary word.
 	distance:      u32,
-	// Distance symbol and its extra bits, fixed when the command is created
-	// because they depend on the recent-distance ring at that point.
-	symbol:        u16,
-	extra_bits:    u8,
-	extra:         u32,
+	// 0..15 for a recent-distance code, else distance + 15. Fixed when the
+	// command is created because it depends on the ring at that point.
+	code:          u32,
 }
 
 Ring :: [4]i32
@@ -280,39 +280,54 @@ command_symbol :: proc(insert, copy: int, implicit_distance: bool) -> int {
 	return cell << 6 | (insert & 7) << 3 | copy & 7
 }
 
-// Distance symbol for `distance` given the recent-distance ring, with
-// NPOSTFIX = 0 and NDIRECT = 0.
+// Distance code for `distance` given the recent-distance ring: the two most
+// recent distances, then those within three of either, then the older two.
 @(private)
-distance_symbol :: proc(ring: ^Ring, distance: int) -> (symbol: u16, extra_bits: u8, extra: u32) {
+distance_code :: proc(ring: ^Ring, distance: int) -> u32 {
 	if distance == int(ring[0]) {
-		return 0, 0, 0
+		return 0
 	}
 
-	for index in 1 ..< 4 {
-		if distance == int(ring[index]) {
-			return u16(index), 0, 0
+	if distance == int(ring[1]) {
+		return 1
+	}
+
+	for base in 0 ..< 2 {
+		offset := distance - int(ring[base])
+
+		if offset >= -3 && offset <= 3 {
+			step := abs(offset)
+
+			return u32(4 + base * 6 + (step - 1) * 2 + (1 if offset > 0 else 0))
 		}
 	}
 
-	for step in 1 ..= 3 {
-		for base in 0 ..< 2 {
-			code := 4 + base * 6 + (step - 1) * 2
-
-			if distance == int(ring[base]) - step {
-				return u16(code), 0, 0
-			}
-
-			if distance == int(ring[base]) + step {
-				return u16(code + 1), 0, 0
-			}
-		}
+	if distance == int(ring[2]) {
+		return 2
 	}
 
-	value := u32(distance + 3)
-	width := uint(bits.len_u32(value) - 2)
-	high := (value >> width) & 1
+	if distance == int(ring[3]) {
+		return 3
+	}
 
-	return u16(16 + 2 * (u32(width) - 1) + high), u8(width), value & (1 << width - 1)
+	return u32(distance) + 15
+}
+
+// Symbol and extra bits of a distance code under NPOSTFIX and NDIRECT.
+@(private)
+distance_prefix :: #force_inline proc(code: u32, postfix, direct: uint) -> (symbol: u16, extra_bits: u8, extra: u32) {
+	if code < 16 + u32(direct) {
+		return u16(code), 0, 0
+	}
+
+	value := 1 << (postfix + 2) + code - 16 - u32(direct)
+	bucket := uint(bits.len_u32(value)) - 2
+	half := (value >> bucket) & 1
+	width := bucket - postfix
+	low := value & (1 << postfix - 1)
+	offset := (2 + half) << bucket
+
+	return u16(16 + u32(direct) + (2 * (u32(width) - 1) + half) << postfix + low), u8(width), (value - offset) >> postfix
 }
 
 @(private)
@@ -528,10 +543,10 @@ push_command :: proc(e: ^Encoder, position, insert_length, copy_length, distance
 	}
 
 	if copy_length > 0 {
-		command.symbol, command.extra_bits, command.extra = distance_symbol(&e.ring, distance)
+		command.code = distance_code(&e.ring, distance)
 
 		// Dictionary references leave the recent distances alone.
-		if command.symbol != 0 && distance <= min(position, e.window_max) {
+		if command.code != 0 && distance <= min(position, e.window_max) {
 			ring_push(&e.ring, distance)
 		}
 	}
@@ -610,6 +625,10 @@ hash4_safe :: #force_inline proc(e: ^Encoder, position: int) -> u32 {
 // ---------------------------------------------------------------- meta-blocks
 
 Meta_Block :: struct {
+	// Literal context mode and distance parameters.
+	mode:               int,
+	postfix:            uint,
+	direct:             uint,
 	literal_map:        [LITERAL_CONTEXTS]u8,
 	literal_trees:      int,
 	distance_map:       [DISTANCE_CONTEXTS]u8,
@@ -626,11 +645,50 @@ Meta_Block :: struct {
 }
 
 @(private)
-literal_context :: #force_inline proc(src: []u8, position: int) -> int {
+literal_context :: #force_inline proc(src: []u8, position, mode: int) -> int {
 	p1 := int(src[position - 1]) if position > 0 else 0
 	p2 := int(src[position - 2]) if position > 1 else 0
 
-	return int(CONTEXT_LOOKUP[CONTEXT_MODE_UTF8 * 512 + p1] | CONTEXT_LOOKUP[CONTEXT_MODE_UTF8 * 512 + 256 + p2])
+	return int(CONTEXT_LOOKUP[mode * 512 + p1] | CONTEXT_LOOKUP[mode * 512 + 256 + p2])
+}
+
+// Whether at least three quarters of `data` is well-formed UTF-8.
+@(private)
+mostly_utf8 :: proc(data: []u8) -> bool {
+	valid := 0
+
+	for index := 0; index < len(data); {
+		lead := data[index]
+		size := 1
+
+		switch {
+		case lead < 0x80:
+		case lead >= 0xc2 && lead < 0xe0:
+			size = 2
+		case lead >= 0xe0 && lead < 0xf0:
+			size = 3
+		case lead >= 0xf0 && lead < 0xf5:
+			size = 4
+		case:
+			index += 1
+			continue
+		}
+
+		whole := index + size <= len(data)
+
+		for tail := 1; whole && tail < size; tail += 1 {
+			whole = data[index + tail] & 0xc0 == 0x80
+		}
+
+		if whole {
+			valid += size
+			index += size
+		} else {
+			index += 1
+		}
+	}
+
+	return valid * 4 >= len(data) * 3
 }
 
 @(private)
@@ -642,7 +700,7 @@ distance_context :: #force_inline proc(copy_length: u32) -> int {
 command_code :: proc(command: Command) -> (symbol, insert, copy: int) {
 	insert = insert_code(int(command.insert_length))
 	copy = copy_code(int(max(command.copy_length, 2)))
-	symbol = command_symbol(insert, copy, command.copy_length == 0 || command.symbol == 0)
+	symbol = command_symbol(insert, copy, command.copy_length == 0 || command.code == 0)
 
 	return
 }
@@ -659,6 +717,16 @@ distance_is_implicit :: #force_inline proc(symbol: int) -> bool {
 gather :: proc(e: ^Encoder, block: ^Meta_Block, start, end: int) {
 	src := e.src
 	block^ = {}
+	block.mode = CONTEXT_MODE_UTF8
+
+	if e.parameters.modelled && !mostly_utf8(src[start:end]) {
+		block.mode = CONTEXT_MODE_SIGNED
+	}
+
+	if e.level >= .Best {
+		choose_distance_parameters(e, block)
+	}
+
 	position := start
 
 	for command in e.commands {
@@ -666,13 +734,14 @@ gather :: proc(e: ^Encoder, block: ^Meta_Block, start, end: int) {
 		block.command_histogram[symbol] += 1
 
 		for _ in 0 ..< command.insert_length {
-			block.literal_histogram[literal_context(src, position)][src[position]] += 1
+			block.literal_histogram[literal_context(src, position, block.mode)][src[position]] += 1
 			position += 1
 		}
 
 		if command.copy_length > 0 {
 			if !distance_is_implicit(symbol) {
-				block.distance_histogram[distance_context(command.copy_length)][command.symbol] += 1
+				prefix, _, _ := distance_prefix(command.code, block.postfix, block.direct)
+				block.distance_histogram[distance_context(command.copy_length)][prefix] += 1
 			}
 
 			position += int(command.copy_length)
@@ -683,6 +752,53 @@ gather :: proc(e: ^Encoder, block: ^Meta_Block, start, end: int) {
 
 	block.literal_trees = cluster_histograms(block.literal_histogram[:], block.literal_map[:], e.parameters.modelled)
 	block.distance_trees = cluster_histograms(block.distance_histogram[:], block.distance_map[:], e.parameters.modelled)
+}
+
+// Picks the NPOSTFIX and NDIRECT that code the explicit distances of
+// e.commands in the fewest bits.
+@(private)
+choose_distance_parameters :: proc(e: ^Encoder, block: ^Meta_Block) {
+	histogram: [DISTANCE_ALPHABET]u32
+	best := max(f64)
+	direct_high: uint
+
+	for postfix in uint(0) ..= 3 {
+		for ; direct_high < 16; direct_high += 1 {
+			direct := direct_high << postfix
+			histogram = {}
+			extra: f64
+
+			for command in e.commands {
+				if command.copy_length == 0 {
+					continue
+				}
+
+				symbol, _, _ := command_code(command)
+
+				if !distance_is_implicit(symbol) {
+					prefix, extra_bits, _ := distance_prefix(command.code, postfix, direct)
+					histogram[prefix] += 1
+					extra += f64(extra_bits)
+				}
+			}
+
+			cost := histogram_cost(histogram[:]) + extra
+
+			if cost >= best {
+				break
+			}
+
+			best = cost
+			block.postfix = postfix
+			block.direct = direct
+		}
+
+		if direct_high > 0 {
+			direct_high -= 1
+		}
+
+		direct_high /= 2
+	}
 }
 
 // Writes src[start:end] as one meta-block, stored when coding does not pay.
@@ -713,9 +829,11 @@ write_meta_block :: proc(e: ^Encoder, block: ^Meta_Block, start, end: int, last:
 	// One block type for literals, commands and distances.
 	write_bits(w, 0, 3)
 
-	// NPOSTFIX = 0, NDIRECT = 0, UTF-8 literal context mode.
-	write_bits(w, 0, 6)
-	write_bits(w, CONTEXT_MODE_UTF8, 2)
+	write_bits(w, u64(block.postfix), 2)
+	write_bits(w, u64(block.direct >> block.postfix), 4)
+	write_bits(w, u64(block.mode), 2)
+
+	distance_alphabet := 16 + int(block.direct) + 48 << block.postfix
 
 	write_context_map(e, block.literal_map[:], block.literal_trees)
 	write_context_map(e, block.distance_map[:], block.distance_trees)
@@ -729,9 +847,9 @@ write_meta_block :: proc(e: ^Encoder, block: ^Meta_Block, start, end: int, last:
 	for tree in 0 ..< block.distance_trees {
 		build_and_write_code(
 			e,
-			block.distance_histogram[tree][:],
-			block.distance_lengths[tree][:],
-			block.distance_codes[tree][:],
+			block.distance_histogram[tree][:distance_alphabet],
+			block.distance_lengths[tree][:distance_alphabet],
+			block.distance_codes[tree][:distance_alphabet],
 		)
 	}
 
@@ -744,7 +862,7 @@ write_meta_block :: proc(e: ^Encoder, block: ^Meta_Block, start, end: int, last:
 		write_bits(w, u64(max(command.copy_length, 2) - COPY_BASE[copy]), uint(COPY_EXTRA[copy]))
 
 		for _ in 0 ..< command.insert_length {
-			tree := block.literal_map[literal_context(src, position)]
+			tree := block.literal_map[literal_context(src, position, block.mode)]
 			literal := src[position]
 			write_bits(w, u64(block.literal_codes[tree][literal]), uint(block.literal_lengths[tree][literal]))
 			position += 1
@@ -753,12 +871,9 @@ write_meta_block :: proc(e: ^Encoder, block: ^Meta_Block, start, end: int, last:
 		if command.copy_length > 0 {
 			if !distance_is_implicit(symbol) {
 				tree := block.distance_map[distance_context(command.copy_length)]
-				write_bits(
-					w,
-					u64(block.distance_codes[tree][command.symbol]),
-					uint(block.distance_lengths[tree][command.symbol]),
-				)
-				write_bits(w, u64(command.extra), uint(command.extra_bits))
+				prefix, extra_bits, extra := distance_prefix(command.code, block.postfix, block.direct)
+				write_bits(w, u64(block.distance_codes[tree][prefix]), uint(block.distance_lengths[tree][prefix]))
+				write_bits(w, u64(extra), uint(extra_bits))
 			}
 
 			position += int(command.copy_length)
@@ -941,6 +1056,7 @@ write_variable_byte :: proc(w: ^Bit_Writer, value: int) {
 	write_bits(w, u64(value - 1 << width), width)
 }
 
+// Context map as move-to-front indices with runs of zeros coded by length.
 @(private)
 write_context_map :: proc(e: ^Encoder, mapping: []u8, trees: int) {
 	w := &e.writer
@@ -950,24 +1066,96 @@ write_context_map :: proc(e: ^Encoder, mapping: []u8, trees: int) {
 		return
 	}
 
-	// No run-length coding and no move-to-front: one symbol per context.
-	write_bits(w, 0, 1)
+	order: [256]u8
+	moved: [256 * LITERAL_CONTEXTS]u8
 
-	histogram: [256]u32
-	lengths: [256]u8
-	codes: [256]u16
-
-	for tree in mapping {
-		histogram[tree] += 1
+	for index in 0 ..< 256 {
+		order[index] = u8(index)
 	}
 
-	build_and_write_code(e, histogram[:trees], lengths[:trees], codes[:trees])
+	longest := 0
+	run := 0
 
-	for tree in mapping {
-		write_bits(w, u64(codes[tree]), uint(lengths[tree]))
+	for tree, index in mapping {
+		at := 0
+
+		for order[at] != tree {
+			at += 1
+		}
+
+		for slot := at; slot > 0; slot -= 1 {
+			order[slot] = order[slot - 1]
+		}
+
+		order[0] = tree
+		moved[index] = u8(at)
+		run = run + 1 if at == 0 else 0
+		longest = max(longest, run)
 	}
 
-	write_bits(w, 0, 1)
+	run_max := min(bits.len_u32(u32(longest)) - 1, 6) if longest > 0 else 0
+	symbols: [256 * LITERAL_CONTEXTS]u16
+	extras: [256 * LITERAL_CONTEXTS]u16
+	total := 0
+
+	for index := 0; index < len(mapping); {
+		if moved[index] != 0 {
+			symbols[total] = u16(int(moved[index]) + run_max)
+			total += 1
+			index += 1
+			continue
+		}
+
+		zeros := 1
+
+		for index + zeros < len(mapping) && moved[index + zeros] == 0 {
+			zeros += 1
+		}
+
+		index += zeros
+
+		for zeros > 0 {
+			if zeros < 2 << uint(run_max) {
+				width := bits.len_u32(u32(zeros)) - 1
+				symbols[total] = u16(width)
+				extras[total] = u16(zeros - 1 << uint(width))
+				zeros = 0
+			} else {
+				symbols[total] = u16(run_max)
+				extras[total] = u16(1 << uint(run_max) - 1)
+				zeros -= 2 << uint(run_max) - 1
+			}
+
+			total += 1
+		}
+	}
+
+	write_bits(w, 1 if run_max > 0 else 0, 1)
+
+	if run_max > 0 {
+		write_bits(w, u64(run_max - 1), 4)
+	}
+
+	alphabet := trees + run_max
+	histogram: [256 + 16]u32
+	lengths: [256 + 16]u8
+	codes: [256 + 16]u16
+
+	for symbol in symbols[:total] {
+		histogram[symbol] += 1
+	}
+
+	build_and_write_code(e, histogram[:alphabet], lengths[:alphabet], codes[:alphabet])
+
+	for symbol, index in symbols[:total] {
+		write_bits(w, u64(codes[symbol]), uint(lengths[symbol]))
+
+		if int(symbol) > 0 && int(symbol) <= run_max {
+			write_bits(w, u64(extras[index]), uint(symbol))
+		}
+	}
+
+	write_bits(w, 1, 1)
 }
 
 // Builds the length-limited code for `histogram`, writes its description and

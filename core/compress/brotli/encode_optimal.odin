@@ -25,6 +25,8 @@ Node :: struct {
 Model :: struct {
 	command:  [COMMAND_ALPHABET]f32,
 	distance: [DISTANCE_CONTEXTS][DISTANCE_ALPHABET]f32,
+	postfix:  uint,
+	direct:   uint,
 }
 
 Optimal :: struct {
@@ -186,9 +188,12 @@ set_model :: proc(e: ^Encoder, o: ^Optimal, block: ^Meta_Block, start, end: int,
 	}
 
 	for position in start ..< end {
-		tree := block.literal_map[literal_context(src, position)]
+		tree := block.literal_map[literal_context(src, position, block.mode)]
 		o.literal_cost[position - start] = o.tree_cost[tree][src[position]]
 	}
+
+	o.model.postfix = block.postfix
+	o.model.direct = block.direct
 
 	if flat {
 		for &cost, symbol in o.model.command {
@@ -216,9 +221,10 @@ set_model :: proc(e: ^Encoder, o: ^Optimal, block: ^Meta_Block, start, end: int,
 relax :: proc(o: ^Optimal, at, low, high, distance: int, dictionary: bool) {
 	node := &o.nodes[at]
 	ring := node.ring
-	symbol, extra_bits, _ := distance_symbol(&ring, distance)
+	code := distance_code(&ring, distance)
+	symbol, extra_bits, _ := distance_prefix(code, o.model.postfix, o.model.direct)
 
-	if symbol != 0 && !dictionary {
+	if code != 0 && !dictionary {
 		ring_push(&ring, distance)
 	}
 
@@ -231,7 +237,7 @@ relax :: proc(o: ^Optimal, at, low, high, distance: int, dictionary: bool) {
 			copy += 1
 		}
 
-		implicit := symbol == 0 && insert < 8 && copy < 16
+		implicit := code == 0 && insert < 8 && copy < 16
 		cell := COMMAND_CELLS[insert >> 3][copy >> 3]
 
 		if implicit {
