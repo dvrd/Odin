@@ -79,8 +79,8 @@ Parameters :: struct {
 @(rodata)
 PARAMETERS := [12]Parameters {
 	{0, 4, false, false, false},
-	{1, 4, false, false, false},
-	{1, 4, true, false, false},
+	{1, 1, false, false, false},
+	{1, 2, true, false, false},
 	{2, 4, true, false, false},
 	{3, 4, true, false, false},
 	{4, 4, true, true, false},
@@ -138,7 +138,7 @@ encode_meta_blocks :: proc(
 	e.allocator = allocator
 	e.ring = {4, 11, 15, 16}
 	e.writer.out = make([dynamic]u8, 0, len(src) / 3 + 64, allocator) or_return
-	e.commands = make([dynamic]Command, allocator) or_return
+	e.commands = make([dynamic]Command, 0, len(src) / 16 + 16, allocator) or_return
 	defer delete(e.commands)
 
 	// The scratch is written before it is read: skip clearing its half megabyte.
@@ -196,7 +196,7 @@ encode_meta_blocks :: proc(
 	}
 
 	for start := 0; start < len(src); {
-		end := min(start + meta_block_max, len(src))
+		end := min(start + (meta_block_max if e.parameters.modelled else min(meta_block_max, PLAIN_BLOCK)), len(src))
 		ring := e.ring
 		clear(&e.commands)
 
@@ -217,9 +217,13 @@ encode_meta_blocks :: proc(
 			parse_range(e, start, end) or_return
 		}
 
-		gather(e, block, start, end, e.parameters.split) or_return
+		if e.parameters.modelled {
+			gather(e, block, start, end, e.parameters.split) or_return
+			write_meta_block(e, block, start, end, end == len(src), ring) or_return
+		} else {
+			write_plain_meta_block(e, start, end, end == len(src), ring) or_return
+		}
 
-		write_meta_block(e, block, start, end, end == len(src), ring) or_return
 		start = end
 	}
 
@@ -237,6 +241,7 @@ encode_meta_blocks :: proc(
 
 // ----------------------------------------------------------------- bit output
 
+// At most 32 bits per call: the accumulator holds up to 31 pending ones.
 write_bits :: #force_inline proc(w: ^Bit_Writer, value: u64, count: uint) {
 	w.accumulator |= value << w.count
 	w.count += count
@@ -244,6 +249,46 @@ write_bits :: #force_inline proc(w: ^Bit_Writer, value: u64, count: uint) {
 	if w.count >= 32 {
 		flush_word(w)
 	}
+}
+
+// Writes a run of literals under one prefix code. Room for the whole run is
+// made once, so the loop stores words without checking.
+write_literals :: proc(
+	w: ^Bit_Writer,
+	literals: []u8,
+	codes: ^[LITERAL_ALPHABET]u16,
+	lengths: ^[LITERAL_ALPHABET]u8,
+) -> runtime.Allocator_Error #no_bounds_check {
+	raw := (^runtime.Raw_Dynamic_Array)(&w.out)
+	// Codes are at most 15 bits; a word of slack for the pending bits.
+	needed := raw.len + 2 * len(literals) + 8
+
+	if needed > raw.cap {
+		reserve(&w.out, max(raw.cap * 2, needed)) or_return
+	}
+
+	accumulator := w.accumulator
+	count := w.count
+	out := uintptr(raw.data) + uintptr(raw.len)
+	start := out
+
+	for value in literals {
+		accumulator |= u64(codes[value]) << count
+		count += uint(lengths[value])
+
+		if count >= 32 {
+			intrinsics.unaligned_store((^u32le)(rawptr(out)), u32le(accumulator))
+			out += 4
+			accumulator >>= 32
+			count -= 32
+		}
+	}
+
+	raw.len += int(out - start)
+	w.accumulator = accumulator
+	w.count = count
+
+	return nil
 }
 
 // Moves the low 32 bits of the accumulator to the output.
@@ -819,4 +864,126 @@ push_repeat :: proc(symbols, extras: []u8, total: int, symbol: u8, run: int, wid
 	}
 
 	return next
+}
+
+// Meta-block size of the levels without modelling: small blocks keep their
+// single prefix codes close to the data.
+PLAIN_BLOCK :: 1 << 18
+
+// Distance symbols without postfix or direct codes.
+PLAIN_DISTANCE_ALPHABET :: 64
+
+// Writes e.commands for src[start:end] as a meta-block with one prefix code
+// per alphabet and no context modelling, or as stored bytes when smaller.
+// `ring` is the recent-distance state before these commands.
+write_plain_meta_block :: proc(e: ^Encoder, start, end: int, last: bool, ring: Ring) -> runtime.Allocator_Error #no_bounds_check {
+	w := &e.writer
+	src := e.src
+	length := end - start
+	nibbles := 6 if length > 1 << 20 else 5 if length > 1 << 16 else 4
+	mark_size := len(w.out)
+	mark_accumulator := w.accumulator
+	mark_count := w.count
+
+	literal_histogram: [LITERAL_ALPHABET]u32
+	command_histogram: [COMMAND_ALPHABET]u32
+	distance_histogram: [PLAIN_DISTANCE_ALPHABET]u32
+	position := start
+
+	for &command in e.commands {
+		command_histogram[command.symbol] += 1
+
+		for value in src[position:][:command.insert_length] {
+			literal_histogram[value] += 1
+		}
+
+		if command.copy_length > 0 && !distance_is_implicit(command.symbol) {
+			// From here on `code` is the distance symbol with the number of
+			// extra bits above it, and `distance` those bits: the second
+			// pass writes them without deriving them again.
+			prefix, extra_bits, extra := distance_prefix(command.code, 0, 0)
+			distance_histogram[prefix] += 1
+			command.code = u32(prefix) | u32(extra_bits) << 16
+			command.distance = extra
+		}
+
+		position += int(command.insert_length) + int(command.copy_length) - int(command.omit)
+	}
+
+	if e.level >= SMOOTH_LEVEL_MIN {
+		smooth_for_rle(literal_histogram[:])
+		smooth_for_rle(command_histogram[:])
+		smooth_for_rle(distance_histogram[:])
+	}
+
+	write_bits(w, 1 if last else 0, 1)
+
+	if last {
+		write_bits(w, 0, 1)
+	}
+
+	write_bits(w, u64(nibbles - 4), 2)
+	write_bits(w, u64(length - 1), uint(nibbles * 4))
+
+	if !last {
+		write_bits(w, 0, 1)
+	}
+
+	// One block type per category; NPOSTFIX and NDIRECT zero; a context
+	// mode; one literal and one distance tree.
+	write_bits(w, 0, 3 + 6 + 2 + 2)
+
+	literal_lengths: [LITERAL_ALPHABET]u8
+	literal_codes: [LITERAL_ALPHABET]u16
+	command_lengths: [COMMAND_ALPHABET]u8
+	command_codes: [COMMAND_ALPHABET]u16
+	distance_lengths: [PLAIN_DISTANCE_ALPHABET]u8
+	distance_codes: [PLAIN_DISTANCE_ALPHABET]u16
+	build_and_write_code(e, literal_histogram[:], literal_lengths[:], literal_codes[:])
+	build_and_write_code(e, command_histogram[:], command_lengths[:], command_codes[:])
+	build_and_write_code(e, distance_histogram[:], distance_lengths[:], distance_codes[:])
+	position = start
+
+	for command in e.commands {
+		insert := command.insert_code
+		copy := command.copy_code
+		write_bits(w, u64(command_codes[command.symbol]), uint(command_lengths[command.symbol]))
+		write_bits(w, u64(command.insert_length - INSERT_BASE[insert]), uint(INSERT_EXTRA[insert]))
+		write_bits(w, u64(max(command.copy_length, 2) - COPY_BASE[copy]), uint(COPY_EXTRA[copy]))
+
+		write_literals(w, src[position:][:command.insert_length], &literal_codes, &literal_lengths) or_return
+
+		if command.copy_length > 0 && !distance_is_implicit(command.symbol) {
+			prefix := command.code & 0xffff
+			write_bits(w, u64(distance_codes[prefix]), uint(distance_lengths[prefix]))
+			write_bits(w, u64(command.distance), uint(command.code >> 16))
+		}
+
+		position += int(command.insert_length) + int(command.copy_length) - int(command.omit)
+	}
+
+	coded := (len(w.out) - mark_size) * 8 + int(w.count) - int(mark_count)
+
+	if coded <= (length + 4) * 8 {
+		return nil
+	}
+
+	// Stored meta-block; it cannot be the last one, so an empty one follows.
+	(^runtime.Raw_Dynamic_Array)(&w.out).len = mark_size
+	w.accumulator = mark_accumulator
+	w.count = mark_count
+	e.ring = ring
+
+	write_bits(w, 0, 1)
+	write_bits(w, u64(nibbles - 4), 2)
+	write_bits(w, u64(length - 1), uint(nibbles * 4))
+	write_bits(w, 1, 1)
+	flush_bits(w)
+	append(&w.out, ..src[start:end]) or_return
+
+	if last {
+		write_bits(w, 3, 2)
+	}
+
+	return nil
 }

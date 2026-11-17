@@ -328,7 +328,28 @@ parse_fast :: proc(e: ^Encoder, start, end: int) -> runtime.Allocator_Error #no_
 		}
 
 		misses = 0
-		push_command(e, position, position - literal_start, length, distance, 0) or_return
+
+		// Only the last distance gets a short code here: the other fifteen
+		// cost more to look for than they save at this level.
+		insert := insert_code(position - literal_start)
+		copy := copy_code(length)
+		command := Command {
+			insert_length = u32(position - literal_start),
+			copy_length   = u32(length),
+			distance      = u32(distance),
+			code          = u32(distance) + 15,
+			insert_code   = u8(insert),
+			copy_code     = u8(copy),
+		}
+
+		if distance == int(e.ring[0]) {
+			command.code = 0
+		} else {
+			ring_push(&e.ring, distance)
+		}
+
+		command.symbol = u16(command_symbol(insert, copy, command.code == 0))
+		append(&e.commands, command) or_return
 		position += length
 		literal_start = position
 

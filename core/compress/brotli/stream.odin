@@ -16,7 +16,6 @@ STREAM_HASH_BITS :: 13
 STREAM_COMMANDS_MAX :: STREAM_BLOCK / 4 + 1
 // A coded block stays below 18 bits per input byte plus its prefix codes.
 STREAM_OUTPUT_MAX :: 3 * STREAM_BLOCK
-STREAM_DISTANCE_ALPHABET :: 64
 
 Stream_Encoder :: struct {
 	// History followed by the block being filled.
@@ -155,8 +154,10 @@ stream_emit :: proc(e: ^Stream_Encoder) {
 	}
 
 	if length > 0 {
+		ring := x.ring
 		stream_parse(e, &x, start, end)
-		stream_code(e, &x, start, end)
+		// Cannot fail: the output buffer holds the worst case.
+		_ = write_plain_meta_block(&x, start, end, false, ring)
 		e.ring = x.ring
 	}
 
@@ -173,95 +174,6 @@ stream_account :: proc(e: ^Stream_Encoder, out_len: int) {
 	if e.max_output > 0 && e.produced > e.max_output {
 		e.overflow = true
 	}
-}
-
-// Writes x.commands as a meta-block with one prefix code per alphabet, or
-// the block as stored bytes when that is smaller.
-stream_code :: proc(e: ^Stream_Encoder, x: ^Encoder, start, end: int) #no_bounds_check {
-	w := &x.writer
-	src := x.src
-	length := end - start
-	ring := e.ring
-	mark_size := len(w.out)
-	mark_accumulator := w.accumulator
-	mark_count := w.count
-
-	literal_histogram: [LITERAL_ALPHABET]u32
-	command_histogram: [COMMAND_ALPHABET]u32
-	distance_histogram: [STREAM_DISTANCE_ALPHABET]u32
-	position := start
-
-	for command in x.commands {
-		command_histogram[command.symbol] += 1
-
-		for _ in 0 ..< command.insert_length {
-			literal_histogram[src[position]] += 1
-			position += 1
-		}
-
-		if command.copy_length > 0 && !distance_is_implicit(command.symbol) {
-			prefix, _, _ := distance_prefix(command.code, 0, 0)
-			distance_histogram[prefix] += 1
-		}
-
-		position += int(command.copy_length)
-	}
-
-	// Not last, MLEN in four nibbles, compressed; one block type per
-	// category; NPOSTFIX and NDIRECT zero; context mode; one literal and one
-	// distance tree.
-	write_bits(w, 0, 3)
-	write_bits(w, u64(length - 1), 16)
-	write_bits(w, 0, 1 + 3 + 6 + 2 + 2)
-
-	literal_lengths: [LITERAL_ALPHABET]u8
-	literal_codes: [LITERAL_ALPHABET]u16
-	command_lengths: [COMMAND_ALPHABET]u8
-	command_codes: [COMMAND_ALPHABET]u16
-	distance_lengths: [STREAM_DISTANCE_ALPHABET]u8
-	distance_codes: [STREAM_DISTANCE_ALPHABET]u16
-	build_and_write_code(x, literal_histogram[:], literal_lengths[:], literal_codes[:])
-	build_and_write_code(x, command_histogram[:], command_lengths[:], command_codes[:])
-	build_and_write_code(x, distance_histogram[:], distance_lengths[:], distance_codes[:])
-	position = start
-
-	for command in x.commands {
-		insert := command.insert_code
-		copy := command.copy_code
-		write_bits(w, u64(command_codes[command.symbol]), uint(command_lengths[command.symbol]))
-		write_bits(w, u64(command.insert_length - INSERT_BASE[insert]), uint(INSERT_EXTRA[insert]))
-		write_bits(w, u64(max(command.copy_length, 2) - COPY_BASE[copy]), uint(COPY_EXTRA[copy]))
-
-		for _ in 0 ..< command.insert_length {
-			write_bits(w, u64(literal_codes[src[position]]), uint(literal_lengths[src[position]]))
-			position += 1
-		}
-
-		if command.copy_length > 0 && !distance_is_implicit(command.symbol) {
-			prefix, extra_bits, extra := distance_prefix(command.code, 0, 0)
-			write_bits(w, u64(distance_codes[prefix]), uint(distance_lengths[prefix]))
-			write_bits(w, u64(extra), uint(extra_bits))
-		}
-
-		position += int(command.copy_length)
-	}
-
-	coded := (len(w.out) - mark_size) * 8 + int(w.count) - int(mark_count)
-
-	if coded <= (length + 4) * 8 {
-		return
-	}
-
-	(^runtime.Raw_Dynamic_Array)(&w.out).len = mark_size
-	w.accumulator = mark_accumulator
-	w.count = mark_count
-	x.ring = ring
-
-	write_bits(w, 0, 3)
-	write_bits(w, u64(length - 1), 16)
-	write_bits(w, 1, 1)
-	flush_bits(w)
-	append(&w.out, ..src[start:end])
 }
 
 // Takes bytes of `src` into the stream and returns how many; fewer than
