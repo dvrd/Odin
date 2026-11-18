@@ -70,11 +70,15 @@ Ring :: [4]i32
 Parameters :: struct {
 	// log2 of the positions kept per hash bucket.
 	block_bits: uint,
+	// Recent distances probed before the bucket: 4, 10 or 16 from level 5 on.
 	cache_size: int,
+	// A copy is given up for a better one starting later; every parser has
+	// its own way compiled in.
 	lazy:       bool,
 	// Static dictionary matching and literal context modelling.
 	modelled:   bool,
-	// Block splitting.
+	// Block splitting: of commands and distances at level 9, of literals as
+	// well above it.
 	split:      bool,
 }
 
@@ -190,7 +194,7 @@ encode_meta_blocks :: proc(
 		lazy_finder_make(&e.finder, len(src), e.parameters.block_bits, allocator) or_return
 		records = fast_records_make(min(len(src), PLAIN_BLOCK), LAZY_MATCH_MIN, allocator) or_return
 	case:
-		finder_make(&e.finder, len(src), e.parameters.block_bits, e.parameters.cache_size, allocator) or_return
+		finder_make(&e.finder, len(src), e.parameters.block_bits, allocator) or_return
 	}
 
 	w := &e.writer
@@ -215,6 +219,12 @@ encode_meta_blocks :: proc(
 		ring := e.ring
 		clear(&e.commands)
 
+		// The levels that parse as they go end a meta-block where the data
+		// changes: its codes then fit what it holds.
+		if optimal == nil && e.parameters.modelled {
+			end = block_end(src, start, end)
+		}
+
 		if optimal != nil {
 			// Parsed a block at a time, modelled and coded as one meta-block.
 			clear(&parsed)
@@ -232,7 +242,14 @@ encode_meta_blocks :: proc(
 
 			continue
 		} else {
-			parse_range(e, start, end) or_return
+			switch e.parameters.cache_size {
+			case 4:
+				parse_deep(e, start, end, 4) or_return
+			case 10:
+				parse_deep(e, start, end, 10) or_return
+			case:
+				parse_deep(e, start, end, 16) or_return
+			}
 		}
 
 		gather(e, block, start, end, e.parameters.split) or_return
@@ -251,6 +268,78 @@ encode_meta_blocks :: proc(
 	shrink(&w.out)
 
 	return w.out[:], nil
+}
+
+// Bytes looked at together when the end of a meta-block is chosen.
+BLOCK_CHUNK :: 1 << 15
+
+// Bits per byte of a chunk that coding it together with the bytes before it
+// may cost, going by the counts of their bytes: beyond that it starts a
+// meta-block. Less cuts text that only drifts, more keeps unlike data together.
+BLOCK_LOSS_MAX :: 0.25
+
+// Counts the bytes of `data`, four at a time into tables of their own: a
+// count is not held up by the one before it.
+byte_histogram :: proc(data: []u8) -> (histogram: [256]u32) #no_bounds_check {
+	parts: [3][256]u32
+	index := 0
+
+	for ; index + 4 <= len(data); index += 4 {
+		histogram[data[index]] += 1
+		parts[0][data[index + 1]] += 1
+		parts[1][data[index + 2]] += 1
+		parts[2][data[index + 3]] += 1
+	}
+
+	for ; index < len(data); index += 1 {
+		histogram[data[index]] += 1
+	}
+
+	for &count, value in histogram {
+		count += parts[0][value] + parts[1][value] + parts[2][value]
+	}
+
+	return
+}
+
+// Where the meta-block that starts at `start` should end, `limit` at most:
+// before the first chunk whose bytes are too unlike those before it.
+block_end :: proc(src: []u8, start, limit: int) -> int {
+	if limit - start < 2 * BLOCK_CHUNK {
+		return limit
+	}
+
+	total := byte_histogram(src[start:][:BLOCK_CHUNK])
+	end := start + BLOCK_CHUNK
+
+	for end < limit {
+		next_end := end + BLOCK_CHUNK
+
+		// A short rest is not worth codes of its own.
+		if limit - next_end < BLOCK_CHUNK / 2 {
+			next_end = limit
+		}
+
+		next := byte_histogram(src[end:next_end])
+		merged := total
+
+		for count, value in next {
+			merged[value] += count
+		}
+
+		_, _, merged_bits := entropy_bits(merged[:])
+		_, _, total_bits := entropy_bits(total[:])
+		_, _, next_bits := entropy_bits(next[:])
+
+		if merged_bits - total_bits - next_bits > BLOCK_LOSS_MAX * f64(next_end - end) {
+			return end
+		}
+
+		total = merged
+		end = next_end
+	}
+
+	return limit
 }
 
 // ----------------------------------------------------------------- bit output
@@ -518,6 +607,15 @@ join_commands :: proc(list: ^[dynamic]Command, commands: []Command) -> runtime.A
 }
 
 push_command :: proc(e: ^Encoder, position, insert_length, copy_length, distance, omit: int) -> runtime.Allocator_Error {
+	_, append_error := append(&e.commands, command_make(&e.ring, insert_length, copy_length, distance, omit, distance <= min(position, e.window_max)))
+
+	return append_error
+}
+
+// Command for `insert_length` literals and a copy, none when `copy_length` is
+// zero; the distance enters `ring` when it is new and `inside` the window,
+// which a dictionary reference is not.
+command_make :: #force_inline proc(ring: ^Ring, insert_length, copy_length, distance, omit: int, inside: bool) -> Command {
 	command := Command {
 		insert_length = u32(insert_length),
 		copy_length   = u32(copy_length),
@@ -526,11 +624,10 @@ push_command :: proc(e: ^Encoder, position, insert_length, copy_length, distance
 	}
 
 	if copy_length > 0 {
-		command.code = distance_code(&e.ring, distance)
+		command.code = distance_code(ring, distance)
 
-		// Dictionary references leave the recent distances alone.
-		if command.code != 0 && distance <= min(position, e.window_max) {
-			ring_push(&e.ring, distance)
+		if command.code != 0 && inside {
+			ring_push(ring, distance)
 		}
 	}
 
@@ -540,9 +637,7 @@ push_command :: proc(e: ^Encoder, position, insert_length, copy_length, distance
 	command.copy_code = u8(copy)
 	command.symbol = u16(command_symbol(insert, copy, copy_length == 0 || command.code == 0))
 
-	_, append_error := append(&e.commands, command)
-
-	return append_error
+	return command
 }
 
 // --------------------------------------------------------------- prefix codes

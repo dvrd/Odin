@@ -1,5 +1,6 @@
 package compress_brotli
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:math"
 
@@ -47,6 +48,8 @@ Meta_Block :: struct {
 	distance_trees:     int,
 	literal_lengths:    [dynamic]u8,
 	literal_codes:      [dynamic]u16,
+	// Code and length of every literal of every tree, for the writer.
+	literal_table:      [dynamic]u32,
 	command_lengths:    [dynamic]u8,
 	command_codes:      [dynamic]u16,
 	distance_lengths:   [dynamic]u8,
@@ -76,6 +79,7 @@ block_make :: proc(allocator: runtime.Allocator) -> (block: ^Meta_Block, err: ru
 	block.distance_map = make([dynamic]u8, allocator) or_return
 	block.literal_lengths = make([dynamic]u8, allocator) or_return
 	block.literal_codes = make([dynamic]u16, allocator) or_return
+	block.literal_table = make([dynamic]u32, allocator) or_return
 	block.command_lengths = make([dynamic]u8, allocator) or_return
 	block.command_codes = make([dynamic]u16, allocator) or_return
 	block.distance_lengths = make([dynamic]u8, allocator) or_return
@@ -105,6 +109,7 @@ block_destroy :: proc(block: ^Meta_Block, allocator: runtime.Allocator) {
 	delete(block.distance_map)
 	delete(block.literal_lengths)
 	delete(block.literal_codes)
+	delete(block.literal_table)
 	delete(block.command_lengths)
 	delete(block.command_codes)
 	delete(block.distance_lengths)
@@ -124,6 +129,22 @@ mostly_utf8 :: proc(data: []u8) -> bool {
 	valid := 0
 
 	for index := 0; index < len(data); {
+		// The rest cannot change the answer any more.
+		if valid * 4 >= len(data) * 3 {
+			return true
+		}
+
+		if (index - valid) * 4 > len(data) {
+			return false
+		}
+
+		// Plain text goes by eight bytes at a time.
+		if index + 8 <= len(data) && intrinsics.unaligned_load((^u64)(&data[index])) & 0x8080808080808080 == 0 {
+			valid += 8
+			index += 8
+			continue
+		}
+
 		lead := data[index]
 		size := 1
 
@@ -186,6 +207,11 @@ cursor_step :: #force_inline proc(split: ^Split, cursor: ^Cursor) -> bool {
 	return switched
 }
 
+// Bytes that tell the literal context mode of a meta-block below the optimal
+// levels, and commands that tell its distance parameters.
+MODE_SAMPLE :: 1 << 13
+DISTANCE_SAMPLE :: 1 << 10
+
 // Fills the histograms of e.commands over src[start:end], splitting each
 // category into block types when `split` is set, and clusters them into trees.
 gather :: proc(e: ^Encoder, block: ^Meta_Block, start, end: int, split: bool) -> runtime.Allocator_Error {
@@ -194,43 +220,40 @@ gather :: proc(e: ^Encoder, block: ^Meta_Block, start, end: int, split: bool) ->
 	block.postfix = 0
 	block.direct = 0
 
-	if e.parameters.modelled && !mostly_utf8(src[start:end]) {
+	sample := src[start:end]
+
+	// Below the optimal levels the middle of the block answers for all of it:
+	// a meta-block ends where the data changes.
+	if e.level < OPTIMAL_LEVEL_MIN && len(sample) > MODE_SAMPLE {
+		sample = sample[(len(sample) - MODE_SAMPLE) / 2:][:MODE_SAMPLE]
+	}
+
+	if e.parameters.modelled && !mostly_utf8(sample) {
 		block.mode = CONTEXT_MODE_SIGNED
 	}
 
-	if e.parameters.split {
+	// Text seldom gains from them: below level 9 only other data is tried.
+	if e.level >= .Best || block.mode == CONTEXT_MODE_SIGNED {
 		choose_distance_parameters(e, block)
 	}
 
-	for &stream in block.streams {
-		clear(&stream)
-	}
+	if split {
+		gather_splits(e, block, start, end) or_return
+	} else {
+		// One block per category: only the number of its symbols matters.
+		totals := [Category]int{.Literal = 0, .Command = len(e.commands), .Distance = 0}
 
-	position := start
+		for command in e.commands {
+			totals[.Literal] += int(command.insert_length)
 
-	for command in e.commands {
-		append(&block.streams[.Command], command.symbol) or_return
-
-		for _ in 0 ..< command.insert_length {
-			append(&block.streams[.Literal], u16(src[position])) or_return
-			position += 1
+			if command.copy_length > 0 && !distance_is_implicit(command.symbol) {
+				totals[.Distance] += 1
+			}
 		}
 
-		if command.copy_length > 0 && !distance_is_implicit(command.symbol) {
-			prefix, _, _ := distance_prefix(command.code, block.postfix, block.direct)
-			append(&block.streams[.Distance], prefix) or_return
+		for category in Category {
+			split_whole(&block.splits[category], totals[category]) or_return
 		}
-
-		position += int(command.copy_length) - int(command.omit)
-	}
-
-	assert(position == end)
-
-	distance_alphabet := 16 + int(block.direct) + 48 << block.postfix
-	alphabets := [Category]int{.Literal = LITERAL_ALPHABET, .Command = COMMAND_ALPHABET, .Distance = distance_alphabet}
-
-	for category in Category {
-		split_stream(e, block.streams[category][:], alphabets[category], category, &block.splits[category], split) or_return
 	}
 
 	distance_rows := block.splits[.Distance].count * DISTANCE_CONTEXTS
@@ -274,13 +297,12 @@ gather :: proc(e: ^Encoder, block: ^Meta_Block, start, end: int, split: bool) ->
 		kept_histogram := block.literal_histogram
 		kept_map := block.literal_map
 		kept_trees := block.literal_trees
-		flat := Split{count = 1}
+		flat: Split
 		flat.types = make([dynamic]u8, e.allocator) or_return
 		flat.lengths = make([dynamic]u32, e.allocator) or_return
 		block.literal_histogram = make([dynamic]u32, e.allocator) or_return
 		block.literal_map = make([dynamic]u8, e.allocator) or_return
-		append(&flat.types, 0) or_return
-		append(&flat.lengths, u32(len(block.streams[.Literal]))) or_return
+		split_whole(&flat, len(block.streams[.Literal])) or_return
 		block.splits[.Literal] = flat
 
 		flat_cost := gather_literals(e, block, start) or_return
@@ -301,6 +323,69 @@ gather :: proc(e: ^Encoder, block: ^Meta_Block, start, end: int, split: bool) ->
 	return nil
 }
 
+// Splits the symbols of e.commands over src[start:end] into block types, each
+// category by itself. Below the optimal levels the literals stay whole: their
+// contexts and the ends of the meta-blocks do for them what a split would,
+// and they are most of the symbols to go through.
+gather_splits :: proc(e: ^Encoder, block: ^Meta_Block, start, end: int) -> runtime.Allocator_Error {
+	src := e.src
+	split_literals := e.level >= OPTIMAL_LEVEL_MIN
+	literals := 0
+
+	for &stream in block.streams {
+		clear(&stream)
+	}
+
+	position := start
+
+	for command in e.commands {
+		append(&block.streams[.Command], command.symbol) or_return
+		literals += int(command.insert_length)
+
+		for _ in 0 ..< (command.insert_length if split_literals else 0) {
+			append(&block.streams[.Literal], u16(src[position])) or_return
+			position += 1
+		}
+
+		if !split_literals {
+			position += int(command.insert_length)
+		}
+
+		if command.copy_length > 0 && !distance_is_implicit(command.symbol) {
+			prefix, _, _ := distance_prefix(command.code, block.postfix, block.direct)
+			append(&block.streams[.Distance], prefix) or_return
+		}
+
+		position += int(command.copy_length) - int(command.omit)
+	}
+
+	assert(position == end)
+
+	distance_alphabet := 16 + int(block.direct) + 48 << block.postfix
+	alphabets := [Category]int{.Literal = LITERAL_ALPHABET, .Command = COMMAND_ALPHABET, .Distance = distance_alphabet}
+
+	for category in Category {
+		if category == .Literal && !split_literals {
+			split_whole(&block.splits[category], literals) or_return
+		} else {
+			split_stream(e, block.streams[category][:], alphabets[category], category, &block.splits[category]) or_return
+		}
+	}
+
+	return nil
+}
+
+// A split that is none: `length` symbols in one block.
+split_whole :: proc(split: ^Split, length: int) -> runtime.Allocator_Error {
+	clear(&split.types)
+	clear(&split.lengths)
+	split.count = 1
+	append(&split.types, 0) or_return
+	append(&split.lengths, u32(length)) or_return
+
+	return nil
+}
+
 // Rough price of one block switch: a type code and a count code with extra bits.
 SWITCH_BITS :: 14
 
@@ -315,15 +400,19 @@ gather_literals :: proc(e: ^Encoder, block: ^Meta_Block, start: int) -> (cost: f
 	literals := cursor_start(&block.splits[.Literal])
 	position := start
 
-	for command in e.commands {
-		for _ in 0 ..< command.insert_length {
-			cursor_step(&block.splits[.Literal], &literals)
-			row := literals.type * LITERAL_CONTEXTS + literal_context(src, position, block.mode)
-			block.literal_histogram[row * LITERAL_ALPHABET + int(src[position])] += 1
-			position += 1
-		}
+	if block.splits[.Literal].count == 1 {
+		count_literals(e, block, start)
+	} else {
+		for command in e.commands {
+			for _ in 0 ..< command.insert_length {
+				cursor_step(&block.splits[.Literal], &literals)
+				row := literals.type * LITERAL_CONTEXTS + literal_context(src, position, block.mode)
+				block.literal_histogram[row * LITERAL_ALPHABET + int(src[position])] += 1
+				position += 1
+			}
 
-		position += int(command.copy_length) - int(command.omit)
+			position += int(command.copy_length) - int(command.omit)
+		}
 	}
 
 	block.literal_trees = cluster(
@@ -342,6 +431,35 @@ gather_literals :: proc(e: ^Encoder, block: ^Meta_Block, start: int) -> (cost: f
 	return cost, nil
 }
 
+// The two bytes before `position`, nearest first; zero before the start.
+literal_previous :: #force_inline proc(src: []u8, position: int) -> (p1, p2: int) {
+	p1 = int(src[position - 1]) if position > 0 else 0
+	p2 = int(src[position - 2]) if position > 1 else 0
+
+	return
+}
+
+// Counts the literals of e.commands per context into the histograms of a
+// single block type.
+count_literals :: proc(e: ^Encoder, block: ^Meta_Block, start: int) #no_bounds_check {
+	src := e.src
+	lookup := CONTEXT_LOOKUP[block.mode * 512:]
+	histogram := raw_data(block.literal_histogram)
+	position := start
+
+	for command in e.commands {
+		p1, p2 := literal_previous(src, position)
+
+		for value in src[position:][:command.insert_length] {
+			histogram[int(lookup[p1] | lookup[256 + p2]) * LITERAL_ALPHABET + int(value)] += 1
+			p2 = p1
+			p1 = int(value)
+		}
+
+		position += int(command.insert_length) + int(command.copy_length) - int(command.omit)
+	}
+}
+
 // Resizes `array` to `size` zeroed elements.
 reset :: proc(array: ^[dynamic]$T, size: int) -> runtime.Allocator_Error {
 	clear(array)
@@ -355,6 +473,8 @@ choose_distance_parameters :: proc(e: ^Encoder, block: ^Meta_Block) {
 	histogram: [DISTANCE_ALPHABET]u32
 	best := max(f64)
 	direct_high: uint
+	// Below the optimal levels some of the commands answer for all of them.
+	step := 1 if e.level >= OPTIMAL_LEVEL_MIN else max(1, len(e.commands) / DISTANCE_SAMPLE)
 
 	for postfix in uint(0) ..= 3 {
 		for ; direct_high < 16; direct_high += 1 {
@@ -362,7 +482,9 @@ choose_distance_parameters :: proc(e: ^Encoder, block: ^Meta_Block) {
 			histogram = {}
 			extra: f64
 
-			for command in e.commands {
+			for index := 0; index < len(e.commands); index += step {
+				command := e.commands[index]
+
 				if command.copy_length > 0 && !distance_is_implicit(command.symbol) {
 					prefix, extra_bits, _ := distance_prefix(command.code, postfix, direct)
 					histogram[prefix] += 1
@@ -597,6 +719,7 @@ write_codes :: proc(
 			histograms[row * stride:][:alphabet],
 			lengths[row * stride:][:alphabet],
 			codes[row * stride:][:alphabet],
+			e.level < OPTIMAL_LEVEL_MIN,
 		)
 	}
 
@@ -676,51 +799,10 @@ write_meta_block :: proc(
 		&block.distance_codes,
 	) or_return
 
-	literals := cursor_start(&block.splits[.Literal])
-	commands := cursor_start(&block.splits[.Command])
-	distances := cursor_start(&block.splits[.Distance])
-	position := start
-	// One literal code for the whole meta-block: no switches, no contexts.
-	plain_literals := block.splits[.Literal].count == 1 && block.literal_trees == 1
-
-	for command in e.commands {
-		write_switch(e, block, .Command, &commands)
-
-		slot := commands.type * COMMAND_ALPHABET + int(command.symbol)
-		insert := command.insert_code
-		copy := command.copy_code
-		write_bits(w, u64(block.command_codes[slot]), uint(block.command_lengths[slot]))
-		write_bits(w, u64(command.insert_length - INSERT_BASE[insert]), uint(INSERT_EXTRA[insert]))
-		write_bits(w, u64(max(command.copy_length, 2) - COPY_BASE[copy]), uint(COPY_EXTRA[copy]))
-
-		if plain_literals {
-			for value in src[position:][:command.insert_length] {
-				write_bits(w, u64(block.literal_codes[value]), uint(block.literal_lengths[value]))
-			}
-
-			position += int(command.insert_length)
-		}
-
-		for _ in 0 ..< (0 if plain_literals else command.insert_length) {
-			write_switch(e, block, .Literal, &literals)
-
-			row := literals.type * LITERAL_CONTEXTS + literal_context(src, position, block.mode)
-			slot = int(block.literal_map[row]) * LITERAL_ALPHABET + int(src[position])
-			write_bits(w, u64(block.literal_codes[slot]), uint(block.literal_lengths[slot]))
-			position += 1
-		}
-
-		if command.copy_length > 0 && !distance_is_implicit(command.symbol) {
-			write_switch(e, block, .Distance, &distances)
-
-			prefix, extra_bits, extra := distance_prefix(command.code, block.postfix, block.direct)
-			row := distances.type * DISTANCE_CONTEXTS + distance_context(command.copy_length)
-			slot = int(block.distance_map[row]) * DISTANCE_ALPHABET + int(prefix)
-			write_bits(w, u64(block.distance_codes[slot]), uint(block.distance_lengths[slot]))
-			write_bits(w, u64(extra), uint(extra_bits))
-		}
-
-		position += int(command.copy_length) - int(command.omit)
+	if block.splits[.Literal].count == 1 && block.splits[.Command].count == 1 && block.splits[.Distance].count == 1 {
+		write_unsplit_commands(e, block, start) or_return
+	} else {
+		write_split_commands(e, block, start) or_return
 	}
 
 	coded := (len(w.out) - mark_size) * 8 + int(w.count) - int(mark_count)
@@ -745,6 +827,188 @@ write_meta_block :: proc(
 	if last {
 		write_bits(w, 3, 2)
 	}
+
+	return nil
+}
+
+// Writes e.commands for the bytes from `start` on under the codes of
+// `block`, none of whose categories is split: no block switches, and the
+// bits go out through a word of their own with room made once per command.
+write_unsplit_commands :: proc(e: ^Encoder, block: ^Meta_Block, start: int) -> runtime.Allocator_Error #no_bounds_check {
+	w := &e.writer
+	src := e.src
+	raw := (^runtime.Raw_Dynamic_Array)(&w.out)
+	lookup := CONTEXT_LOOKUP[block.mode * 512:]
+	mapping := raw_data(block.literal_map)
+	resize(&block.literal_table, block.literal_trees * LITERAL_ALPHABET) or_return
+	literal_table := raw_data(block.literal_table)
+	command_table: [COMMAND_ALPHABET]u32
+
+	// Each code with its length above bit 16.
+	for &entry, slot in block.literal_table {
+		entry = u32(block.literal_codes[slot]) | u32(block.literal_lengths[slot]) << 16
+	}
+
+	for &entry, symbol in command_table {
+		entry = u32(block.command_codes[symbol]) | u32(block.command_lengths[symbol]) << 16
+	}
+
+	b := Fast_Bits{w.accumulator, w.count, 0}
+	position := start
+
+	for command in e.commands {
+		// A code and two lengths, a literal in two bytes at most, a distance,
+		// the pending bits and a word store.
+		needed := raw.len + 2 * int(command.insert_length) + 40
+
+		if needed > raw.cap {
+			reserve(&w.out, max(raw.cap * 2, needed)) or_return
+		}
+
+		b.out = uintptr(raw.data) + uintptr(raw.len)
+		fast_flush(&b)
+
+		insert := command.insert_code
+		copy := command.copy_code
+		entry := command_table[command.symbol]
+		fast_put(&b, u64(entry & 0xffff), uint(entry >> 16))
+		fast_put(&b, u64(command.insert_length - INSERT_BASE[insert]), uint(INSERT_EXTRA[insert]))
+		fast_flush(&b)
+		fast_put(&b, u64(max(command.copy_length, 2) - COPY_BASE[copy]), uint(COPY_EXTRA[copy]))
+		fast_flush(&b)
+
+		if command.insert_length > 0 {
+			p1, p2 := literal_previous(src, position)
+
+			for value in src[position:][:command.insert_length] {
+				entry = literal_table[int(mapping[lookup[p1] | lookup[256 + p2]]) * LITERAL_ALPHABET + int(value)]
+				fast_put(&b, u64(entry & 0xffff), uint(entry >> 16))
+				fast_flush(&b)
+				p2 = p1
+				p1 = int(value)
+			}
+		}
+
+		if command.copy_length > 0 && !distance_is_implicit(command.symbol) {
+			prefix, extra_bits, extra := distance_prefix(command.code, block.postfix, block.direct)
+			slot := int(block.distance_map[distance_context(command.copy_length)]) * DISTANCE_ALPHABET + int(prefix)
+			fast_put(&b, u64(block.distance_codes[slot]), uint(block.distance_lengths[slot]))
+			fast_put(&b, u64(extra), uint(extra_bits))
+			fast_flush(&b)
+		}
+
+		raw.len = int(b.out - uintptr(raw.data))
+		position += int(command.insert_length) + int(command.copy_length) - int(command.omit)
+	}
+
+	w.accumulator = b.accumulator
+	w.count = b.count
+
+	return nil
+}
+
+// Writes e.commands for the bytes from `start` on under the codes of
+// `block`, with the block switches of its categories.
+write_split_commands :: proc(e: ^Encoder, block: ^Meta_Block, start: int) -> runtime.Allocator_Error {
+	w := &e.writer
+	src := e.src
+	literals := cursor_start(&block.splits[.Literal])
+	commands := cursor_start(&block.splits[.Command])
+	distances := cursor_start(&block.splits[.Distance])
+	position := start
+	// One literal block type for the whole meta-block: no switches, and the
+	// codes of all trees in one table, each with its length above bit 16.
+	unsplit_literals := block.splits[.Literal].count == 1
+
+	if unsplit_literals {
+		resize(&block.literal_table, block.literal_trees * LITERAL_ALPHABET) or_return
+
+		for &entry, slot in block.literal_table {
+			entry = u32(block.literal_codes[slot]) | u32(block.literal_lengths[slot]) << 16
+		}
+	}
+
+	for command in e.commands {
+		write_switch(e, block, .Command, &commands)
+
+		slot := commands.type * COMMAND_ALPHABET + int(command.symbol)
+		insert := command.insert_code
+		copy := command.copy_code
+		write_bits(w, u64(block.command_codes[slot]), uint(block.command_lengths[slot]))
+		write_bits(w, u64(command.insert_length - INSERT_BASE[insert]), uint(INSERT_EXTRA[insert]))
+		write_bits(w, u64(max(command.copy_length, 2) - COPY_BASE[copy]), uint(COPY_EXTRA[copy]))
+
+		if unsplit_literals {
+			write_modelled_literals(w, src, position, int(command.insert_length), block) or_return
+			position += int(command.insert_length)
+		}
+
+		for _ in 0 ..< (0 if unsplit_literals else command.insert_length) {
+			write_switch(e, block, .Literal, &literals)
+
+			row := literals.type * LITERAL_CONTEXTS + literal_context(src, position, block.mode)
+			slot = int(block.literal_map[row]) * LITERAL_ALPHABET + int(src[position])
+			write_bits(w, u64(block.literal_codes[slot]), uint(block.literal_lengths[slot]))
+			position += 1
+		}
+
+		if command.copy_length > 0 && !distance_is_implicit(command.symbol) {
+			write_switch(e, block, .Distance, &distances)
+
+			prefix, extra_bits, extra := distance_prefix(command.code, block.postfix, block.direct)
+			row := distances.type * DISTANCE_CONTEXTS + distance_context(command.copy_length)
+			slot = int(block.distance_map[row]) * DISTANCE_ALPHABET + int(prefix)
+			write_bits(w, u64(block.distance_codes[slot]), uint(block.distance_lengths[slot]))
+			write_bits(w, u64(extra), uint(extra_bits))
+		}
+
+		position += int(command.copy_length) - int(command.omit)
+	}
+
+	return nil
+}
+
+// Writes the `count` literals at `position` under the trees of their
+// contexts, from the table of a meta-block with one literal block type. Room
+// for the whole run is made once, and the loop stores whole words, keeping
+// the bytes that are complete.
+write_modelled_literals :: proc(w: ^Bit_Writer, src: []u8, position, count: int, block: ^Meta_Block) -> runtime.Allocator_Error #no_bounds_check {
+	raw := (^runtime.Raw_Dynamic_Array)(&w.out)
+	// Codes are at most 15 bits; slack for the pending bits and a word store.
+	needed := raw.len + 2 * count + 16
+
+	if needed > raw.cap {
+		reserve(&w.out, max(raw.cap * 2, needed)) or_return
+	}
+
+	if count == 0 {
+		return nil
+	}
+
+	lookup := CONTEXT_LOOKUP[block.mode * 512:]
+	mapping := raw_data(block.literal_map)
+	table := raw_data(block.literal_table)
+	accumulator := w.accumulator
+	pending := w.count
+	out := uintptr(raw.data) + uintptr(raw.len)
+	first := out
+	p1, p2 := literal_previous(src, position)
+
+	for value in src[position:][:count] {
+		entry := table[int(mapping[lookup[p1] | lookup[256 + p2]]) * LITERAL_ALPHABET + int(value)]
+		accumulator |= u64(entry & 0xffff) << pending
+		pending += uint(entry >> 16)
+		intrinsics.unaligned_store((^u64le)(rawptr(out)), u64le(accumulator))
+		out += uintptr(pending >> 3)
+		accumulator >>= pending & ~uint(7)
+		pending &= 7
+		p2 = p1
+		p1 = int(value)
+	}
+
+	raw.len += int(out - first)
+	w.accumulator = accumulator
+	w.count = pending
 
 	return nil
 }
@@ -872,25 +1136,30 @@ cluster :: proc(
 		parent[row] = i32(row)
 	}
 
-	members: [CLUSTER_BATCH]i32
-
-	for first := 0; first < rows; first += CLUSTER_BATCH {
-		count := 0
-
-		for row in first ..< min(first + CLUSTER_BATCH, rows) {
+	if e.level < OPTIMAL_LEVEL_MIN {
+		// One pass in which a row joins the cluster it fits best: a tenth
+		// of the comparisons that trying every pair of rows takes, for
+		// trees a few bytes larger. The clusters left are few enough for
+		// every pair of them to be tried below.
+		for row in 0 ..< rows {
 			if cost[row] != 0 {
-				members[count] = i32(row)
-				count += 1
+				append(&survivors, i32(row)) or_return
 			}
 		}
 
-		merge_group(e, histograms, stride, members[:count], cost, parent, stats) or_return
+		merge_leaders(histograms, stride, survivors[:], cost, parent, stats)
+		kept := 0
 
-		for member in members[:count] {
+		for member in survivors {
 			if parent[member] == member {
-				append(&survivors, member) or_return
+				survivors[kept] = member
+				kept += 1
 			}
 		}
+
+		resize(&survivors, kept) or_return
+	} else {
+		cluster_batches(e, histograms, stride, rows, cost, parent, stats, &survivors) or_return
 	}
 
 	if len(survivors) <= CLUSTER_PAIRWISE_MAX {
@@ -933,12 +1202,50 @@ cluster :: proc(
 	return clusters, nil
 }
 
+// Merges the rows of each batch of CLUSTER_BATCH by trying every pair of
+// them, and appends the rows that are left to `survivors`.
+cluster_batches :: proc(
+	e: ^Encoder,
+	histograms: []u32,
+	stride, rows: int,
+	cost: []f64,
+	parent: []i32,
+	stats: []Row_Stats,
+	survivors: ^[dynamic]i32,
+) -> runtime.Allocator_Error {
+	members: [CLUSTER_BATCH]i32
+
+	for first := 0; first < rows; first += CLUSTER_BATCH {
+		count := 0
+
+		for row in first ..< min(first + CLUSTER_BATCH, rows) {
+			if cost[row] != 0 {
+				members[count] = i32(row)
+				count += 1
+			}
+		}
+
+		merge_group(e, histograms, stride, members[:count], cost, parent, stats) or_return
+
+		for member in members[:count] {
+			if parent[member] == member {
+				append(survivors, member) or_return
+			}
+		}
+	}
+
+	return nil
+}
+
 // What clustering needs of a histogram: symbol total, distinct symbols and
 // the sum of n*log2(n) over its counters.
 Row_Stats :: struct {
 	total:    u64,
 	used:     int,
 	weighted: f64,
+	// The symbols that occur, a bit each: two rows are compared only where
+	// both have one.
+	present:  [(ALPHABET_MAX + 63) / 64]u64,
 }
 
 LOG2_TABLE_SIZE :: 4096
@@ -957,11 +1264,12 @@ fast_log2 :: #force_inline proc(value: u64) -> f64 {
 }
 
 row_stats :: proc(histogram: []u32) -> (stats: Row_Stats) {
-	for frequency in histogram {
+	for frequency, symbol in histogram {
 		if frequency != 0 {
 			stats.total += u64(frequency)
 			stats.used += 1
 			stats.weighted += f64(frequency) * fast_log2(u64(frequency))
+			stats.present[symbol >> 6] |= 1 << uint(symbol & 63)
 		}
 	}
 
@@ -993,11 +1301,11 @@ merged_cost :: proc(histograms: []u32, stride: int, a, b: i32, stats: []Row_Stat
 	first := histograms[int(a) * stride:][:stride]
 	second := histograms[int(b) * stride:][:stride]
 
-	for symbol in 0 ..< stride {
-		x := u64(first[symbol])
-		y := u64(second[symbol])
-
-		if x != 0 && y != 0 {
+	for index in 0 ..< (stride + 63) >> 6 {
+		for shared := stats[a].present[index] & stats[b].present[index]; shared != 0; shared &= shared - 1 {
+			symbol := index << 6 + int(intrinsics.count_trailing_zeros(shared))
+			x := u64(first[symbol])
+			y := u64(second[symbol])
 			combined.used -= 1
 			combined.weighted += f64(x + y) * fast_log2(x + y) - f64(x) * fast_log2(x) - f64(y) * fast_log2(y)
 		}
@@ -1128,7 +1436,7 @@ SPLIT_PARAMETERS := [Category]Split_Parameters {
 }
 
 SPLIT_LENGTH_MIN :: 128
-SPLIT_HISTOGRAMS_FAST :: 16
+SPLIT_HISTOGRAMS_FAST :: 8
 
 // Splits `data` into blocks of similar statistics: a few sampled histograms
 // are refined by assigning every symbol to the histogram that codes it most
@@ -1139,12 +1447,7 @@ split_stream :: proc(
 	alphabet: int,
 	category: Category,
 	split: ^Split,
-	enabled: bool,
 ) -> runtime.Allocator_Error {
-	clear(&split.types)
-	clear(&split.lengths)
-	split.count = 1
-
 	parameters := SPLIT_PARAMETERS[category]
 	count := min(len(data) / parameters.symbols_per_histogram + 1, parameters.histograms_max)
 
@@ -1153,12 +1456,12 @@ split_stream :: proc(
 		count = min(count, SPLIT_HISTOGRAMS_FAST)
 	}
 
-	if !enabled || len(data) < SPLIT_LENGTH_MIN || count < 2 {
-		append(&split.types, 0) or_return
-		append(&split.lengths, u32(len(data))) or_return
-
-		return nil
+	if len(data) < SPLIT_LENGTH_MIN || count < 2 {
+		return split_whole(split, len(data))
 	}
+
+	clear(&split.types)
+	clear(&split.lengths)
 
 	size := len(data)
 	histograms := make([]u32, count * alphabet, e.allocator) or_return
@@ -1211,7 +1514,7 @@ split_stream :: proc(
 		}
 	}
 
-	iterations := 10 if e.level >= .Optimal else 2
+	iterations := 10 if e.level >= .Optimal else 2 if e.level >= OPTIMAL_LEVEL_MIN else 1
 
 	for _ in 0 ..< iterations {
 		find_blocks(data, alphabet, count, parameters.switch_cost, histograms, insert_cost, cost, signals, ids)
@@ -1313,10 +1616,6 @@ find_blocks :: proc(
 		cost[index] = 0
 	}
 
-	for &signal in signals[:len(data) * signal_stride] {
-		signal = 0
-	}
-
 	for symbol, position in data {
 		costs := insert_cost[int(symbol) * count:][:count]
 		// Separate simple loops so that each one vectorizes.
@@ -1346,11 +1645,19 @@ find_blocks :: proc(
 
 		row := signals[position * signal_stride:]
 
-		for index in 0 ..< count {
-			value := cost[index] - cheapest
-			capped := value >= price
-			cost[index] = price if capped else value
-			row[index >> 3] |= u8(capped) << uint(index & 7)
+		// A byte of signals at a time, gathered before it is stored: the
+		// costs are not held up by what the row holds.
+		for base := 0; base < count; base += 8 {
+			capped_set := u8(0)
+
+			for index in base ..< min(base + 8, count) {
+				value := cost[index] - cheapest
+				capped := value >= price
+				cost[index] = price if capped else value
+				capped_set |= u8(capped) << uint(index - base)
+			}
+
+			row[base >> 3] = capped_set
 		}
 	}
 

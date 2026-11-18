@@ -6,16 +6,18 @@ import "core:math/bits"
 
 
 // Match finders and parsers for levels 0..9. Levels 5..9: every hash bucket
-// keeps its newest positions in a small ring, searched newest first after the
-// recent distances. The levels below have tables of their own further down.
+// keeps its newest positions in a ring, searched newest first after the
+// recent distances; their finder and parser come last. The levels below have
+// tables of their own.
 
 Finder :: struct {
+	// Positions ever entered per bucket of the levels 5..9.
 	counts:       []u16,
+	// Newest position per hash of four bytes, levels 5..9.
+	short:        []u32,
 	buckets:      []u32,
 	bucket_shift: u32,
 	block_bits:   uint,
-	// Recent distances probed before the bucket: 4, 10 or 16.
-	cache_size:   int,
 	// Static dictionary probes and hits; the dictionary is dropped when it
 	// stops paying.
 	lookups:      int,
@@ -48,15 +50,17 @@ CACHE_INDEX := [16]u8{0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1}
 @(rodata)
 CACHE_OFFSET := [16]i8{0, 0, 0, 0, -1, 1, -2, 2, -3, 3, -1, 1, -2, 2, -3, 3}
 
-finder_make :: proc(f: ^Finder, size: int, block_bits: uint, cache_size: int, allocator: runtime.Allocator) -> runtime.Allocator_Error {
-	bucket_bits := clamp(bits.len_u32(u32(min(size, 1 << 30))) - 1, BUCKET_BITS_MIN, BUCKET_BITS_MAX)
+// Tables of the levels 5..9: 2^block_bits positions per bucket in a ring and
+// the number of positions ever entered beside it, and the newest position
+// per four bytes. Slots are only read up to their bucket's count: no need to
+// clear them.
+finder_make :: proc(f: ^Finder, size: int, block_bits: uint, allocator: runtime.Allocator) -> runtime.Allocator_Error {
+	bucket_bits := clamp(bits.len_u32(u32(min(size, 1 << 30))) - 1, BUCKET_BITS_MIN, DEEP_BUCKET_BITS_MAX)
 	f.bucket_shift = u32(32 - bucket_bits)
 	f.block_bits = block_bits
-	f.cache_size = cache_size
 	f.counts = make([]u16, 1 << uint(bucket_bits), allocator) or_return
-
-	// Slots are only read up to their bucket's count: no need to clear them.
-	slots, slots_error := runtime.mem_alloc_non_zeroed((4 << uint(bucket_bits)) << block_bits, align_of(u32), allocator)
+	f.short = make([]u32, 1 << SHORT_BITS, allocator) or_return
+	slots, slots_error := runtime.mem_alloc_non_zeroed((4 << uint(bucket_bits)) << block_bits, 64, allocator)
 
 	if slots_error != nil {
 		return slots_error
@@ -69,97 +73,12 @@ finder_make :: proc(f: ^Finder, size: int, block_bits: uint, cache_size: int, al
 
 finder_destroy :: proc(f: ^Finder, allocator: runtime.Allocator) {
 	delete(f.counts, allocator)
+	delete(f.short, allocator)
 	delete(f.buckets, allocator)
-}
-
-finder_store :: #force_inline proc(f: ^Finder, src: []u8, position: int) #no_bounds_check {
-	key := hash4(src, position) >> f.bucket_shift
-	slot := u32(f.counts[key]) & (1 << f.block_bits - 1)
-	f.buckets[key << f.block_bits + slot] = u32(position)
-	f.counts[key] += 1
 }
 
 match_score :: #force_inline proc(length, distance: int) -> int {
 	return 1920 + 135 * length - 30 * (bits.len_u32(u32(distance)) - 1)
-}
-
-// Best copy for `position` that ends by `end`, which must leave at least four
-// bytes; score SCORE_MIN when nothing is worth it. Indexes `position`.
-find_match :: proc(e: ^Encoder, position, end: int) -> Match #no_bounds_check {
-	f := &e.finder
-	src := e.src
-	limit := end - position
-	reach := min(position, e.window_max)
-	best := Match{score = SCORE_MIN}
-
-	for index in 0 ..< f.cache_size {
-		distance := int(e.ring[CACHE_INDEX[index]]) + int(CACHE_OFFSET[index])
-
-		if distance <= 0 || distance > reach {
-			continue
-		}
-
-		if best.length < limit && src[position + best.length] != src[position - distance + best.length] {
-			continue
-		}
-
-		length := common_length(src, position - distance, position, limit)
-
-		if length >= 3 || length == 2 && index < 2 {
-			score := 135 * length + 1935
-
-			if index != 0 {
-				score -= 39 + (0x1ca10 >> uint(index & 0xe)) & 0xe
-			}
-
-			if score > best.score {
-				best = {length, distance, score, 0}
-			}
-		}
-	}
-
-	key := hash4(src, position) >> f.bucket_shift
-	count := f.counts[key]
-	mask := u16(1) << f.block_bits - 1
-	bucket := f.buckets[key << f.block_bits:]
-
-	for back in 1 ..= min(int(count), 1 << f.block_bits) {
-		candidate := int(bucket[(count - u16(back)) & mask])
-		distance := position - candidate
-
-		if distance > reach {
-			break
-		}
-
-		if best.length >= limit || src[candidate + best.length] != src[position + best.length] {
-			continue
-		}
-
-		length := common_length(src, candidate, position, limit)
-
-		if length >= 4 {
-			score := match_score(length, distance)
-
-			if score > best.score {
-				best = {length, distance, score, 0}
-			}
-		}
-	}
-
-	bucket[count & mask] = u32(position)
-	f.counts[key] = count + 1
-
-	if e.parameters.modelled && best.score == SCORE_MIN && f.hits >= f.lookups >> 7 {
-		f.lookups += 1
-		word := dictionary_match(src, position, limit, reach)
-
-		if word.score > best.score {
-			best = word
-			f.hits += 1
-		}
-	}
-
-	return best
 }
 
 // ---------------------------------------------------------- static dictionary
@@ -178,11 +97,38 @@ DICTIONARY_FIRST := [DICTIONARY_WORD_MAX + 1]u16 {
 	13184, 13312, 13376, 13440, 13472,
 }
 
+// Bits of the hash of four bytes that tell whether a word may start with
+// them: most bytes start none, and the table that says so is small enough to
+// stay at hand, which the words and their chains are not.
+DICTIONARY_FILTER_BITS :: 16
+
+DICTIONARY_FILTER: [1 << DICTIONARY_FILTER_BITS / 64]u64
+
+@(init)
+fill_dictionary_filter :: proc "contextless" () #no_bounds_check {
+	for size in DICTIONARY_WORD_MIN ..= DICTIONARY_WORD_MAX {
+		for index in 0 ..< 1 << DICTIONARY_SIZE_BITS[size] {
+			start := DICTIONARY[int(DICTIONARY_OFFSET[size]) + index * size:]
+			value := u32(start[0]) | u32(start[1]) << 8 | u32(start[2]) << 16 | u32(start[3]) << 24
+			// As hash4 has it.
+			filter := value * 0x1e35a7bd >> (32 - DICTIONARY_FILTER_BITS)
+			DICTIONARY_FILTER[filter >> 6] |= 1 << (filter & 63)
+		}
+	}
+}
+
 // Best static dictionary word, whole or with up to nine trailing bytes
 // dropped, that src[position:] starts with.
 dictionary_match :: proc(src: []u8, position, limit, reach: int) -> Match #no_bounds_check {
 	best := Match{score = SCORE_MIN}
-	word := WORD_HEAD[hash4(src, position) >> (32 - DICTIONARY_HASH_BITS)]
+	hash := hash4(src, position)
+	filter := hash >> (32 - DICTIONARY_FILTER_BITS)
+
+	if DICTIONARY_FILTER[filter >> 6] & (1 << (filter & 63)) == 0 {
+		return best
+	}
+
+	word := WORD_HEAD[hash >> (32 - DICTIONARY_HASH_BITS)]
 
 	for steps := 0; word != DICTIONARY_NONE && steps < 64; steps += 1 {
 		size := int(WORD_LENGTH[word])
@@ -213,82 +159,6 @@ dictionary_match :: proc(src: []u8, position, limit, reach: int) -> Match #no_bo
 }
 
 // -------------------------------------------------------------------- parsing
-
-// Lazy parse of src[start:end] into e.commands.
-parse_range :: proc(e: ^Encoder, start, end: int) -> runtime.Allocator_Error {
-	f := &e.finder
-	src := e.src
-	position := start
-	literal_start := start
-	// Hashing needs four bytes.
-	last := end - 4
-	spree := 512 if e.level >= .Best else 64
-	sparse_after := position + spree
-
-	for position <= last {
-		match := find_match(e, position, end)
-
-		if match.score == SCORE_MIN {
-			position += 1
-
-			// After a long run without matches the data is probably
-			// incompressible: look at fewer positions.
-			if position > sparse_after {
-				step := 4 if position > sparse_after + 4 * spree else 2
-				stop := min(position + 4 * step, last)
-
-				for ; position < stop; position += step {
-					finder_store(f, src, position)
-				}
-			}
-
-			continue
-		}
-
-		if e.parameters.lazy {
-			// Give up to four literals when a later start scores clearly better.
-			for _ in 0 ..< 4 {
-				if position + 1 > last {
-					break
-				}
-
-				next := find_match(e, position + 1, end)
-
-				if next.score < match.score + 175 {
-					break
-				}
-
-				position += 1
-				match = next
-			}
-		}
-
-		push_command(e, position, position - literal_start, match.length + match.omit, match.distance, match.omit) or_return
-
-		// Index the copied bytes; of a short-period repeat only the tail, so
-		// that its buckets do not fill with one pattern.
-		first := position + 2
-		stop := min(position + match.length, last + 1)
-
-		if match.distance < match.length >> 2 {
-			first = max(first, position + match.length - match.distance << 2)
-		}
-
-		for covered in first ..< stop {
-			finder_store(f, src, covered)
-		}
-
-		sparse_after = position + 2 * match.length + spree
-		position += match.length
-		literal_start = position
-	}
-
-	if literal_start < end {
-		push_command(e, end, end - literal_start, 0, 0, 0) or_return
-	}
-
-	return nil
-}
 
 // Misses before the step between probed positions grows by one, log2.
 FAST_PATIENCE :: 5
@@ -812,6 +682,309 @@ parse_lazy :: proc(
 	e.ring = ring
 
 	return total, end - literal_start
+}
+
+// ---------------------------------------------------------------- deep levels
+
+// Bytes the hash of the deep levels covers, as that of the lazy levels.
+DEEP_HASH_BYTES :: LAZY_HASH_BYTES
+
+// Most buckets of the deep levels, log2: with fewer of them the positions
+// they hold are told apart by reading their bytes, which takes longer than a
+// larger table does.
+DEEP_BUCKET_BITS_MAX :: 16
+
+// Slots of the table of four bytes, log2: it tells of the short copies the
+// buckets cannot see, and of them only the nearest is cheap enough to take.
+SHORT_BITS :: 16
+
+// A copy found by its first four bytes has to come from within this.
+SHORT_REACH :: 1 << 10
+
+// Lookups the static dictionary is given before it has to pay, and the
+// lookups a hit pays for, log2: walking its chains costs several times what
+// a bucket does.
+DICTIONARY_TRIAL :: 512
+DICTIONARY_HIT_BITS :: 5
+
+// A word has to beat the literals by this much: its distance is costlier
+// than its score tells.
+DICTIONARY_MARGIN :: 135
+
+// The tables of a Finder as the parser of the deep levels keeps them at hand.
+Deep_Table :: struct {
+	counts:     [^]u16,
+	short:      [^]u32,
+	buckets:    [^]u32,
+	shift:      u32,
+	block_bits: uint,
+}
+
+deep_table :: proc(f: ^Finder) -> Deep_Table {
+	return {raw_data(f.counts), raw_data(f.short), raw_data(f.buckets), f.bucket_shift, f.block_bits}
+}
+
+deep_key :: #force_inline proc(word: u64, shift: u32) -> int {
+	return int((word << (64 - 8 * DEEP_HASH_BYTES)) * 0x1e35a7bd1e35a7bd >> (32 + shift))
+}
+
+short_key :: #force_inline proc(word: u64) -> u32 {
+	return u32(word) * 0x1e35a7bd >> (32 - SHORT_BITS)
+}
+
+// Enters `position` in the bucket of `word`, where it takes the place of the
+// oldest position, and as the newest position of its first four bytes.
+deep_enter :: #force_inline proc(t: Deep_Table, word: u64, position: int) #no_bounds_check {
+	key := deep_key(word, t.shift)
+	count := t.counts[key]
+	t.buckets[key << t.block_bits + int(count & (1 << t.block_bits - 1))] = u32(position)
+	t.counts[key] = count + 1
+	t.short[short_key(word)] = u32(position)
+}
+
+// Starts reading the newest positions of the bucket of `word`: the cache
+// line of the newest one and, in a bucket of more than one, the line before.
+deep_prefetch :: #force_inline proc(t: Deep_Table, word: u64) #no_bounds_check {
+	LINE :: 64 / size_of(u32)
+
+	key := deep_key(word, t.shift)
+	newest := t.counts[key] - 1
+	mask := u16(1) << t.block_bits - 1
+	intrinsics.prefetch_read_data(&t.buckets[key << t.block_bits + int(newest & mask)], 3)
+	intrinsics.prefetch_read_data(&t.buckets[key << t.block_bits + int((newest - LINE) & mask)], 3)
+}
+
+// Best copy for `position` that ends by `end` among the CACHE recent
+// distances, the bucket, the nearest position with the same four bytes and,
+// when nothing else is found, the static dictionary; score SCORE_MIN when
+// nothing is worth it. A word is read at `position`, which is entered.
+// `floor`, less than the bytes left, spares most candidates that are no
+// longer than that their comparison.
+deep_find :: #force_inline proc(
+	f: ^Finder,
+	t: Deep_Table,
+	src: []u8,
+	ring: ^Ring,
+	position, end, window: int,
+	floor: int,
+	$CACHE: int,
+) -> (
+	best: Match,
+) #no_bounds_check {
+	#assert(CACHE <= len(CACHE_INDEX))
+
+	limit := end - position
+	reach := min(position, window)
+	word := fast_word(src, position)
+	best = {length = floor, score = SCORE_MIN}
+
+	for index in 0 ..< CACHE {
+		distance := int(ring[CACHE_INDEX[index]]) + int(CACHE_OFFSET[index])
+		// Two bytes are enough at the last two distances, three at the others.
+		shortest := 2 if index < 2 else 3
+
+		if uint(distance - 1) >= uint(reach) || (fast_word(src, position - distance) ~ word) << uint(64 - 8 * shortest) != 0 {
+			continue
+		}
+
+		if best.length >= limit || src[position + best.length] != src[position - distance + best.length] {
+			continue
+		}
+
+		length := common_length(src, position - distance, position, limit)
+		score := 135 * length + 1935
+
+		if index != 0 {
+			score -= 39 + (0x1ca10 >> uint(index & 0xe)) & 0xe
+		}
+
+		if score > best.score {
+			best = {length, distance, score, 0}
+		}
+	}
+
+	key := deep_key(word, t.shift)
+	count := t.counts[key]
+	mask := u16(1) << t.block_bits - 1
+	bucket := t.buckets[key << t.block_bits:]
+	deep_prefetch(t, word >> 8)
+
+	// Nothing is longer than a copy to the end.
+	held := min(int(count), 1 << t.block_bits) if best.length < limit else 0
+
+	for back in 1 ..= held {
+		candidate := int(bucket[(count - u16(back)) & mask])
+		distance := position - candidate
+
+		// The older positions are further away still.
+		if distance > reach {
+			break
+		}
+
+		// Most candidates are told by one byte: where a longer copy has to
+		// go on. Whether the bytes of the hash match is seen with the rest.
+		if src[candidate + best.length] != src[position + best.length] {
+			continue
+		}
+
+		length := common_length(src, candidate, position, limit)
+
+		if length < DEEP_HASH_BYTES || length == DEEP_HASH_BYTES && distance >> LAZY_SHORT_REACH_BITS != 0 {
+			continue
+		}
+
+		score := match_score(length, distance)
+
+		if score > best.score {
+			best = {length, distance, score, 0}
+
+			// There is no byte after the end to tell a longer copy by.
+			if length == limit {
+				break
+			}
+		}
+	}
+
+	bucket[count & mask] = u32(position)
+	t.counts[key] = count + 1
+	near := &t.short[short_key(word)]
+
+	if best.length < size_of(u32) {
+		candidate := int(near^)
+		distance := position - candidate
+
+		// An empty slot holds position zero, which is as good a candidate as
+		// any other.
+		if uint(distance - 1) < uint(min(reach, SHORT_REACH)) && u32(fast_word(src, candidate)) == u32(word) {
+			length := common_length(src, candidate, position, limit)
+			score := match_score(length, distance)
+
+			if score > best.score {
+				best = {length, distance, score, 0}
+			}
+		}
+	}
+
+	near^ = u32(position)
+
+	if best.score == SCORE_MIN && f.hits << DICTIONARY_HIT_BITS + DICTIONARY_TRIAL >= f.lookups {
+		f.lookups += 1
+		entry := dictionary_match(src, position, limit, reach)
+
+		if entry.score > best.score + DICTIONARY_MARGIN {
+			best = entry
+			f.hits += 1
+		}
+	}
+
+	return best
+}
+
+// Parses src[start:end] into e.commands. Levels 5 to 9: the CACHE recent
+// distances, a bucket of positions and the static dictionary, a copy given up
+// for a clearly better one starting later, every position of a copy entered.
+parse_deep :: proc(e: ^Encoder, start, end: int, $CACHE: int) -> runtime.Allocator_Error #no_bounds_check {
+	f := &e.finder
+	t := deep_table(f)
+	src := e.src
+	window := e.window_max
+	ring := e.ring
+	// A word is read at every position looked at.
+	last := min(end - DEEP_HASH_BYTES, len(src) - size_of(u64))
+	position := start
+	literal_start := start
+	spree := 512 if e.level >= .Best else LAZY_SPREE
+	sparse_after := position + spree
+
+	for position <= last {
+		match := deep_find(f, t, src, &ring, position, end, window, 0, CACHE)
+
+		if match.score == SCORE_MIN {
+			position += 1
+
+			// After a long run without matches the data is probably
+			// incompressible: look at fewer positions.
+			if position > sparse_after {
+				step := 4 if position > sparse_after + 4 * spree else 2
+				stop := min(position + 4 * step, last)
+
+				for ; position < stop; position += step {
+					deep_enter(t, fast_word(src, position), position)
+				}
+			}
+
+			continue
+		}
+
+		// Give up to four literals when a later start scores clearly better.
+		// That takes a copy about as long as this one: shorter candidates
+		// are not compared in full.
+		for _ in 0 ..< 4 {
+			if position + 1 > last || position + match.length >= end {
+				break
+			}
+
+			next := deep_find(f, t, src, &ring, position + 1, end, window, match.length - 1, CACHE)
+
+			if next.score < match.score + LAZY_GAIN {
+				break
+			}
+
+			position += 1
+			match = next
+		}
+
+		// Entered so far: the positions up to the one last looked at.
+		first := position + 2
+		// A dictionary word lies past the window.
+		inside := match.distance <= min(position, window)
+
+		// The copy may have begun among the literals before it, where the
+		// table no longer or not yet had its source.
+		for inside && position > literal_start && match.distance < position && src[position - 1] == src[position - 1 - match.distance] {
+			position -= 1
+			match.length += 1
+		}
+
+		next := position + match.length
+
+		if next <= last {
+			deep_prefetch(t, fast_word(src, next))
+		}
+
+		// Index the copied bytes; of a short-period repeat only the tail, so
+		// that its buckets do not fill with one pattern.
+		stop := min(next, last + 1)
+
+		if match.distance < match.length >> 2 {
+			first = max(first, next - match.distance << 2)
+		}
+
+		for covered in first ..< stop {
+			deep_enter(t, fast_word(src, covered), covered)
+		}
+
+		if len(e.commands) == cap(e.commands) {
+			reserve(&e.commands, 2 * cap(e.commands) + 16) or_return
+		}
+
+		// Room is there: the command goes in without a call.
+		commands := (^runtime.Raw_Dynamic_Array)(&e.commands)
+		([^]Command)(commands.data)[commands.len] = command_make(&ring, position - literal_start, match.length + match.omit, match.distance, match.omit, inside)
+		commands.len += 1
+
+		sparse_after = position + 2 * match.length + spree
+		position = next
+		literal_start = next
+	}
+
+	if literal_start < end {
+		append(&e.commands, command_make(&ring, end - literal_start, 0, 0, 0, false)) or_return
+	}
+
+	e.ring = ring
+
+	return nil
 }
 
 // Pending output bits of the fast writer, which knows the size of what it
