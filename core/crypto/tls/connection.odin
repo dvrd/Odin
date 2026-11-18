@@ -43,10 +43,12 @@ Config :: struct {
 	// The first flight and the answers accepted for it. The zero value keeps
 	// the TLS_AES_128_GCM_SHA256/X25519 offer with the TLS 1.2 fallback.
 	offer: Client_Offer,
+	// Internal, for this package's tests and harnesses: Cipher_Suite and
+	// Named_Group are private to the package, as upstream declares them.
 	// Upstream offer only: restrict it to these suites (in this order) or to
 	// these groups, each sent with its key share. Nil keeps upstream's lists.
-	cipher_suites: []Cipher_Suite,
-	groups: []Named_Group,
+	_cipher_suites: []Cipher_Suite,
+	_groups: []Named_Group,
 	// Debugging options that destroy security, as upstream's client_handshake
 	// takes them: the certificate chain is parsed but not verified (the
 	// CertificateVerify signature still is), and the traffic secrets are

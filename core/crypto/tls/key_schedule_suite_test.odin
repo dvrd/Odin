@@ -254,7 +254,7 @@ schedule_retry_binds_the_transcript_to_the_retry_suite :: proc(t: ^testing.T) {
 	defer free(conn)
 	defer handshake_keys_clear(conn)
 	conn.phase = .Handshake_Pending
-	conn.config = {server_name = "example.com", offer = .Upstream, cipher_suites = suites[:], groups = groups[:]}
+	conn.config = {server_name = "example.com", offer = .Upstream, _cipher_suites = suites[:], _groups = groups[:]}
 	testing.expect_value(t, client_hello_prepare(conn).kind, Client_Hello_Send_Error_Kind.None)
 	conn.phase = .Awaiting_Server_Hello
 

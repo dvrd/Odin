@@ -12,8 +12,8 @@ import "core:strconv"
 
 // tls keeps upstream's wire enumerations package-private: their types are
 // taken from the Config fields and their values written as implicit selectors.
-Suite :: type_of(tls.Config{}.cipher_suites[0])
-Group :: type_of(tls.Config{}.groups[0])
+Suite :: type_of(tls.Config{}._cipher_suites[0])
+Group :: type_of(tls.Config{}._groups[0])
 
 suite_named :: proc(name: string) -> (Suite, bool) {
 	switch name {
@@ -81,8 +81,8 @@ main :: proc() {
 		server_name   = os.args[4],
 		root_cas      = roots.roots[:roots.count],
 		offer         = .Upstream,
-		cipher_suites = suites[:],
-		groups        = groups[:],
+		_cipher_suites = suites[:],
+		_groups        = groups[:],
 	}
 
 	conn := new(tls.Conn)

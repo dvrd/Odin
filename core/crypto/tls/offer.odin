@@ -157,15 +157,15 @@ server_offer_cipher_suites :: proc(offer: Server_Offer) -> []Cipher_Suite {
 
 // The suites conn offers: the offer's list, or the configured restriction.
 config_cipher_suites :: proc(config: ^Config) -> []Cipher_Suite {
-	if config.offer == .Upstream && len(config.cipher_suites) > 0 {
-		return config.cipher_suites
+	if config.offer == .Upstream && len(config._cipher_suites) > 0 {
+		return config._cipher_suites
 	}
 	return client_offer_cipher_suites(config.offer)
 }
 
 config_groups :: proc(config: ^Config) -> []Named_Group {
-	if config.offer == .Upstream && len(config.groups) > 0 {
-		return config.groups
+	if config.offer == .Upstream && len(config._groups) > 0 {
+		return config._groups
 	}
 	return client_offer_groups(config.offer)
 }
@@ -174,17 +174,17 @@ config_groups :: proc(config: ^Config) -> []Named_Group {
 // to the Upstream offer: the Compatible first flight is fixed.
 config_offer_valid :: proc(config: Config) -> bool {
 	if config.offer != .Upstream {
-		return len(config.cipher_suites) == 0 && len(config.groups) == 0
+		return len(config._cipher_suites) == 0 && len(config._groups) == 0
 	}
 
-	for suite, i in config.cipher_suites {
-		if !cipher_suite_offered(CIPHER_SUITES, suite) || cipher_suite_offered(config.cipher_suites[:i], suite) {
+	for suite, i in config._cipher_suites {
+		if !cipher_suite_offered(CIPHER_SUITES, suite) || cipher_suite_offered(config._cipher_suites[:i], suite) {
 			return false
 		}
 	}
 
-	for group, i in config.groups {
-		if !named_group_offered(SUPPORTED_GROUPS, group) || named_group_offered(config.groups[:i], group) {
+	for group, i in config._groups {
+		if !named_group_offered(SUPPORTED_GROUPS, group) || named_group_offered(config._groups[:i], group) {
 			return false
 		}
 	}

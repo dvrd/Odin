@@ -109,8 +109,8 @@ matrix_connection :: proc(t: ^testing.T, entry: Matrix_Case, loc := #caller_loca
 		config.server_name = "synthetic.invalid"
 	}
 	if !entry.unrestricted {
-		config.cipher_suites = suites[:]
-		config.groups = groups[:]
+		config._cipher_suites = suites[:]
+		config._groups = groups[:]
 	}
 
 	conn := new(Conn)
@@ -309,8 +309,8 @@ matrix_async_connection :: proc(t: ^testing.T, suite: Cipher_Suite, group: Named
 		server_name   = "localhost",
 		root_cas      = roots.roots[:roots.count],
 		offer         = .Upstream,
-		cipher_suites = suites[:],
-		groups        = groups[:],
+		_cipher_suites = suites[:],
+		_groups        = groups[:],
 	}
 
 	conn := new(Async_Conn)
