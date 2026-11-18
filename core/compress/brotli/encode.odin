@@ -27,6 +27,9 @@ Level :: enum u8 {
 OPTIMAL_BLOCK :: 1 << 20
 // Levels up to here parse with a single probe per position.
 FAST_LEVEL_MAX :: Level(1)
+// Levels up to here write meta-blocks without context modelling, from
+// records their parser makes.
+PLAIN_LEVEL_MAX :: Level(4)
 // Levels from here on parse optimally.
 OPTIMAL_LEVEL_MIN :: Level(10)
 OPTIMAL_ITERATIONS :: 3
@@ -76,15 +79,16 @@ Parameters :: struct {
 }
 
 // One row per level 0..11, as the qualities of the reference encoder; the
-// first two rows only size their table with block_bits, the last two parse
-// optimally and only use the modelling flags.
+// rows up to PLAIN_LEVEL_MAX only size their table with block_bits, the rest
+// being compiled into their parsers, the last two parse optimally and only
+// use the modelling flags.
 @(rodata)
 PARAMETERS := [12]Parameters {
 	{0, 4, false, false, false},
 	{2, 4, false, false, false},
-	{1, 2, true, false, false},
-	{2, 4, true, false, false},
-	{3, 4, true, false, false},
+	{1, 1, true, false, false},
+	{2, 2, true, false, false},
+	{3, 2, true, false, false},
 	{4, 4, true, true, false},
 	{5, 4, true, true, false},
 	{6, 10, true, true, false},
@@ -181,7 +185,10 @@ encode_meta_blocks :: proc(
 		parsed = make([dynamic]Command, allocator) or_return
 	case e.level <= FAST_LEVEL_MAX:
 		fast_finder_make(&e.finder, len(src), e.parameters.block_bits, allocator) or_return
-		records = fast_records_make(min(len(src), PLAIN_BLOCK), allocator) or_return
+		records = fast_records_make(min(len(src), PLAIN_BLOCK), FAST_MATCH_MIN, allocator) or_return
+	case e.level <= PLAIN_LEVEL_MAX:
+		lazy_finder_make(&e.finder, len(src), e.parameters.block_bits, allocator) or_return
+		records = fast_records_make(min(len(src), PLAIN_BLOCK), LAZY_MATCH_MIN, allocator) or_return
 	case:
 		finder_make(&e.finder, len(src), e.parameters.block_bits, e.parameters.cache_size, allocator) or_return
 	}
@@ -219,7 +226,7 @@ encode_meta_blocks :: proc(
 			}
 
 			e.commands, parsed = parsed, e.commands
-		} else if e.level <= FAST_LEVEL_MAX {
+		} else if e.level <= PLAIN_LEVEL_MAX {
 			write_fast_meta_block(e, records, start, end, end == len(src)) or_return
 			start = end
 
@@ -228,12 +235,8 @@ encode_meta_blocks :: proc(
 			parse_range(e, start, end) or_return
 		}
 
-		if e.parameters.modelled {
-			gather(e, block, start, end, e.parameters.split) or_return
-			write_meta_block(e, block, start, end, end == len(src), ring) or_return
-		} else {
-			write_plain_meta_block(e, start, end, end == len(src), ring) or_return
-		}
+		gather(e, block, start, end, e.parameters.split) or_return
+		write_meta_block(e, block, start, end, end == len(src), ring) or_return
 
 		start = end
 	}

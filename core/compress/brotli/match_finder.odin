@@ -5,8 +5,9 @@ import "base:runtime"
 import "core:math/bits"
 
 
-// Match finder and parser for levels 0..9: every hash bucket keeps its newest
-// positions in a small ring, searched newest first after the recent distances.
+// Match finders and parsers for levels 0..9. Levels 5..9: every hash bucket
+// keeps its newest positions in a small ring, searched newest first after the
+// recent distances. The levels below have tables of their own further down.
 
 Finder :: struct {
 	counts:       []u16,
@@ -302,8 +303,8 @@ FAST_MATCH_MIN :: 6
 // Most hash slots a fast level looks at per position.
 FAST_SLOTS_MAX :: 2
 
-// A command of the fast levels with its symbols worked out: the parser has
-// time for that while it waits on memory, the writer has not.
+// A command of the levels without modelling with its symbols worked out: the
+// parser has time for that while it waits on memory, the writer has not.
 Fast_Record :: struct {
 	insert_length:   u32,
 	copy_length:     u32,
@@ -340,10 +341,10 @@ fast_finder_make :: proc(f: ^Finder, size: int, extra_bits: uint, allocator: run
 	return nil
 }
 
-// Room for the records of one block of `length` bytes; they are written
-// before they are read.
-fast_records_make :: proc(length: int, allocator: runtime.Allocator) -> ([]Fast_Record, runtime.Allocator_Error) {
-	count := length / FAST_MATCH_MIN + 1
+// Room for the records of one block of `length` bytes whose copies are at
+// least `shortest` long; they are written before they are read.
+fast_records_make :: proc(length, shortest: int, allocator: runtime.Allocator) -> ([]Fast_Record, runtime.Allocator_Error) {
+	count := length / shortest + 1
 	memory, memory_error := runtime.mem_alloc_non_zeroed(count * size_of(Fast_Record), align_of(Fast_Record), allocator)
 
 	if memory_error != nil {
@@ -520,6 +521,299 @@ parse_fast :: proc(
 	return total, end - literal_start
 }
 
+// ---------------------------------------------------------------- lazy levels
+
+// Bytes the hash of the lazy levels covers, and so their shortest copy at a
+// new distance: a copy of four bytes costs about what it saves on text and
+// more than that on digits, and a longer hash keeps the buckets apart.
+LAZY_HASH_BYTES :: 5
+
+// The word of the next position is the word of this one shifted by a byte.
+#assert(LAZY_HASH_BYTES < size_of(u64))
+
+// Shortest copy of the lazy levels: two bytes at one of the last two
+// distances.
+LAZY_MATCH_MIN :: 2
+
+// Most buckets of the lazy levels, log2.
+LAZY_BUCKET_BITS_MAX :: 16
+
+// A copy of LAZY_HASH_BYTES has to come from within 2^LAZY_SHORT_REACH_BITS:
+// from further away its distance costs more than the literals would.
+LAZY_SHORT_REACH_BITS :: 16
+
+// Positions without a copy before the lazy levels look at fewer of them.
+LAZY_SPREE :: 64
+
+// A later start has to score this much more to be taken instead.
+LAZY_GAIN :: 175
+
+// Table of the lazy levels: 2^slot_bits positions per bucket, newest first,
+// in 64-bit words so that a bucket is read and shifted along two positions at
+// a time, and on cache lines of its own. Zeroed, so that every slot points
+// into the data from the start.
+lazy_finder_make :: proc(f: ^Finder, size: int, slot_bits: uint, allocator: runtime.Allocator) -> runtime.Allocator_Error {
+	assert(slot_bits >= 1)
+
+	bucket_bits := clamp(bits.len_u32(u32(min(size, 1 << 30))) - 1, BUCKET_BITS_MIN, LAZY_BUCKET_BITS_MAX)
+	f.bucket_shift = u32(32 - bucket_bits)
+	slots, slots_error := runtime.mem_alloc((4 << uint(bucket_bits)) << slot_bits, 64, allocator)
+
+	if slots_error != nil {
+		return slots_error
+	}
+
+	f.buckets = ([^]u32)(raw_data(slots))[:(1 << uint(bucket_bits)) << slot_bits]
+
+	return nil
+}
+
+// Index of the first word of the bucket of `word` in a table of SLOTS
+// positions per bucket.
+lazy_bucket :: #force_inline proc(word: u64, shift: u32, $SLOTS: int) -> int {
+	return int((word << (64 - 8 * LAZY_HASH_BYTES)) * 0x1e35a7bd1e35a7bd >> (32 + shift)) * (SLOTS / 2)
+}
+
+// True when the two words start with the same LAZY_HASH_BYTES bytes.
+lazy_same :: #force_inline proc(a, b: u64) -> bool {
+	return (a ~ b) << (64 - 8 * LAZY_HASH_BYTES) == 0
+}
+
+// Enters `position` at the head of the bucket of `word`, from which the
+// oldest position drops out, and returns what the bucket held, newest first.
+lazy_enter :: #force_inline proc(table: [^]u64, word: u64, position: int, shift: u32, $SLOTS: int) -> (candidates: [SLOTS]u32) #no_bounds_check {
+	bucket := table[lazy_bucket(word, shift, SLOTS):]
+	carry := u64(u32(position))
+
+	for index in 0 ..< SLOTS / 2 {
+		pair := bucket[index]
+		bucket[index] = pair << 32 | carry
+		carry = pair >> 32
+		candidates[2 * index] = u32(pair)
+		candidates[2 * index + 1] = u32(pair >> 32)
+	}
+
+	return
+}
+
+// Starts reading the bytes at the newest position the table has for `word`:
+// they are compared as soon as its position is looked at.
+lazy_prefetch :: #force_inline proc(src: []u8, table: [^]u64, word: u64, shift: u32, $SLOTS: int) #no_bounds_check {
+	intrinsics.prefetch_read_data(&src[u32(table[lazy_bucket(word, shift, SLOTS)])], 3)
+}
+
+// Best copy for `position` that ends by `end` among the CACHE last distances
+// and the bucket; score SCORE_MIN when nothing is worth it. A word is read at
+// `position`, which is entered. `floor`, less than the bytes left, spares
+// most candidates that are no longer than that their comparison.
+lazy_find :: #force_inline proc(
+	src: []u8,
+	table: [^]u64,
+	ring: ^Ring,
+	position, end, window: int,
+	shift: u32,
+	floor: int,
+	$SLOTS: int,
+	$CACHE: int,
+) -> (
+	best: Match,
+) #no_bounds_check {
+	#assert(CACHE <= len(Ring))
+
+	limit := end - position
+	reach := min(position, window)
+	word := fast_word(src, position)
+	best = {length = floor, score = SCORE_MIN}
+
+	for index in 0 ..< CACHE {
+		distance := int(ring[index])
+		// Two bytes are enough at the last two distances, three at the others.
+		shortest := 2 if index < 2 else 3
+
+		if distance > reach || (fast_word(src, position - distance) ~ word) << uint(64 - 8 * shortest) != 0 {
+			continue
+		}
+
+		if best.length >= limit || src[position + best.length] != src[position - distance + best.length] {
+			continue
+		}
+
+		length := common_length(src, position - distance, position, limit)
+		score := 135 * length + 1935
+
+		if index != 0 {
+			score -= 39 + (0x1ca10 >> uint(index & 0xe)) & 0xe
+		}
+
+		if score > best.score {
+			best = {length, distance, score, 0}
+		}
+	}
+
+	candidates := lazy_enter(table, word, position, shift, SLOTS)
+	lazy_prefetch(src, table, word >> 8, shift, SLOTS)
+
+	for slot in 0 ..< SLOTS {
+		candidate := int(candidates[slot])
+		distance := position - candidate
+
+		// An empty slot holds position zero, which is as good a candidate as
+		// any other.
+		if uint(distance - 1) >= uint(reach) || !lazy_same(fast_word(src, candidate), word) {
+			continue
+		}
+
+		if best.length >= limit || src[candidate + best.length] != src[position + best.length] {
+			continue
+		}
+
+		length := LAZY_HASH_BYTES + common_length(src, candidate + LAZY_HASH_BYTES, position + LAZY_HASH_BYTES, limit - LAZY_HASH_BYTES)
+
+		if length == LAZY_HASH_BYTES && distance >> LAZY_SHORT_REACH_BITS != 0 {
+			continue
+		}
+
+		score := match_score(length, distance)
+
+		if score > best.score {
+			best = {length, distance, score, 0}
+		}
+	}
+
+	return best
+}
+
+// Parses src[start:end] into `records`, counts their symbols and returns how
+// many there are and how many literals follow the last copy. Levels 2 to 4:
+// the last CACHE distances and SLOTS positions per bucket, a copy given up
+// for a clearly better one starting later, every position of a copy entered.
+parse_lazy :: proc(
+	e: ^Encoder,
+	start, end: int,
+	records: []Fast_Record,
+	histograms: ^Fast_Histograms,
+	$SLOTS: int,
+	$CACHE: int,
+) -> (
+	total: int,
+	trailing: int,
+) #no_bounds_check {
+	src := e.src
+	table := ([^]u64)(raw_data(e.finder.buckets))
+	shift := e.finder.bucket_shift
+	window := e.window_max
+	ring := e.ring
+	// A word is read at every position looked at.
+	last := min(end - LAZY_HASH_BYTES, len(src) - size_of(u64))
+	position := start
+	literal_start := start
+	sparse_after := position + LAZY_SPREE
+
+	for position <= last {
+		match := lazy_find(src, table, &ring, position, end, window, shift, 0, SLOTS, CACHE)
+
+		if match.score == SCORE_MIN {
+			position += 1
+
+			// After a long run without matches the data is probably
+			// incompressible: look at fewer positions.
+			if position > sparse_after {
+				step := 4 if position > sparse_after + 4 * LAZY_SPREE else 2
+				stop := min(position + 4 * step, last)
+
+				for ; position < stop; position += step {
+					_ = lazy_enter(table, fast_word(src, position), position, shift, SLOTS)
+				}
+			}
+
+			continue
+		}
+
+		// Give up to four literals when a later start scores clearly better.
+		// That takes a copy about as long as this one: shorter candidates
+		// are not compared in full.
+		for _ in 0 ..< 4 {
+			if position + 1 > last || position + match.length >= end {
+				break
+			}
+
+			next := lazy_find(src, table, &ring, position + 1, end, window, shift, match.length - 1, SLOTS, CACHE)
+
+			if next.score < match.score + LAZY_GAIN {
+				break
+			}
+
+			position += 1
+			match = next
+		}
+
+		// Entered so far: the positions up to the one last looked at.
+		first := position + 2
+
+		// The copy may have begun among the literals before it, where the
+		// table no longer or not yet had its source.
+		for position > literal_start && match.distance < position && src[position - 1] == src[position - 1 - match.distance] {
+			position -= 1
+			match.length += 1
+		}
+
+		next := position + match.length
+
+		if next <= last {
+			lazy_prefetch(src, table, fast_word(src, next), shift, SLOTS)
+		}
+
+		// Index the copied bytes; of a short-period repeat only the tail, so
+		// that its buckets do not fill with one pattern.
+		stop := min(next, last + 1)
+
+		if match.distance < match.length >> 2 {
+			first = max(first, next - match.distance << 2)
+		}
+
+		for covered in first ..< stop {
+			_ = lazy_enter(table, fast_word(src, covered), covered, shift, SLOTS)
+		}
+
+		insert_length := position - literal_start
+		code := distance_code(&ring, match.distance)
+		symbol := command_symbol(insert_code(insert_length), copy_code(match.length), code == 0)
+		histograms.command[symbol] += 1
+
+		for value in src[literal_start:position] {
+			histograms.literal[value] += 1
+		}
+
+		record := Fast_Record {
+			insert_length = u32(insert_length),
+			copy_length   = u32(match.length),
+			symbol        = u16(symbol),
+		}
+
+		if code != 0 {
+			ring_push(&ring, match.distance)
+		}
+
+		if code != 0 || !distance_is_implicit(u16(symbol)) {
+			prefix, extra_bits, extra := distance_prefix(code, 0, 0)
+			record.distance_symbol = u8(prefix) + 1
+			record.distance_bits = extra_bits
+			record.distance_extra = extra
+			histograms.distance[prefix] += 1
+		}
+
+		records[total] = record
+		total += 1
+		sparse_after = position + 2 * match.length + LAZY_SPREE
+		position = next
+		literal_start = next
+	}
+
+	e.ring = ring
+
+	return total, end - literal_start
+}
+
 // Pending output bits of the fast writer, which knows the size of what it
 // writes beforehand and has the room reserved.
 Fast_Bits :: struct {
@@ -596,10 +890,17 @@ write_fast_meta_block :: proc(e: ^Encoder, records: []Fast_Record, start, end: i
 	histograms: Fast_Histograms
 	total, trailing: int
 
-	if e.level == Level(0) {
+	#partial switch e.level {
+	case Level(0):
 		total, trailing = parse_fast(e, start, end, records, &histograms, 1)
-	} else {
+	case Level(1):
 		total, trailing = parse_fast(e, start, end, records, &histograms, 2)
+	case Level(2):
+		total, trailing = parse_lazy(e, start, end, records, &histograms, 2, 1)
+	case Level(3):
+		total, trailing = parse_lazy(e, start, end, records, &histograms, 4, 2)
+	case:
+		total, trailing = parse_lazy(e, start, end, records, &histograms, 8, 2)
 	}
 
 	// The literals after the last copy: a command whose copy is never read.
@@ -611,6 +912,16 @@ write_fast_meta_block :: proc(e: ^Encoder, records: []Fast_Record, start, end: i
 		for value in src[end - trailing:end] {
 			histograms.literal[value] += 1
 		}
+	}
+
+	// The codes may be built from counts evened out; the sizes come from
+	// the true ones.
+	counted := histograms
+
+	if e.level >= SMOOTH_LEVEL_MIN {
+		smooth_for_rle(histograms.literal[:])
+		smooth_for_rle(histograms.command[:])
+		smooth_for_rle(histograms.distance[:])
 	}
 
 	write_plain_header(w, end - start, last)
@@ -633,17 +944,17 @@ write_fast_meta_block :: proc(e: ^Encoder, records: []Fast_Record, start, end: i
 
 	for &entry, value in literal_table {
 		entry = u32(literal_codes[value]) | u32(literal_lengths[value]) << 16
-		coded += int(histograms.literal[value]) * int(literal_lengths[value])
+		coded += int(counted.literal[value]) * int(literal_lengths[value])
 	}
 
 	for &entry, symbol in command_table {
 		cell := symbol >> 6
 		extra := INSERT_EXTRA[int(COMMAND_INSERT_CELL[cell]) + symbol >> 3 & 7] + COPY_EXTRA[int(COMMAND_COPY_CELL[cell]) + symbol & 7]
 		entry = u32(command_codes[symbol]) | u32(command_lengths[symbol]) << 16
-		coded += int(histograms.command[symbol]) * int(command_lengths[symbol] + extra)
+		coded += int(counted.command[symbol]) * int(command_lengths[symbol] + extra)
 	}
 
-	for count, symbol in histograms.distance {
+	for count, symbol in counted.distance {
 		extra := (symbol - 14) >> 1 if symbol >= 16 else 0
 		coded += int(count) * (int(distance_lengths[symbol]) + extra)
 	}
