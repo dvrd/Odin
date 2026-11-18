@@ -159,7 +159,9 @@ create :: proc(
 		return nil, allocation_error(owner, .Malformed_PEM)
 	}
 	key_error := Error.None
-	if len(trim_whitespace(rest)) != 0 {
+	if !block_opens_input(key_input, block.label) {
+		key_error = .Malformed_PEM
+	} else if len(trim_whitespace(rest)) != 0 {
 		key_error = .Malformed_PEM
 	} else if len(block.data) > x509.MAX_RSA_PKCS8_DER_SIZE {
 		key_error = .Input_Limit
@@ -184,7 +186,7 @@ create :: proc(
 			return nil, allocation_error(owner, .Malformed_PEM)
 		}
 		cert_error := Error.None
-		if cert_block.label != "CERTIFICATE" {
+		if cert_block.label != "CERTIFICATE" || !block_opens_input(remaining, cert_block.label) {
 			cert_error = .Malformed_PEM
 		} else if len(cert_block.data) == 0 || len(cert_block.data) > l.max_der_bytes - der_sum {
 			cert_error = .Input_Limit
@@ -357,6 +359,25 @@ sign_digest_pss_sha256 :: proc(
 	}
 	copy(out[:n], scratch[:n])
 	return n, .None
+}
+// block_opens_input reports whether the first line of input is the BEGIN
+// boundary of the decoded block. pem.decode skips malformed BEGIN lines in
+// front of a valid block; a credential must not accept such input.
+@(private)
+block_opens_input :: proc(input: []u8, label: string) -> bool {
+	end := 0
+	for end < len(input) && input[end] != '\n' && input[end] != '\r' {
+		end += 1
+	}
+
+	line := string(input[:end])
+	prefix :: "-----BEGIN "
+	suffix :: "-----"
+	if len(line) != len(prefix) + len(label) + len(suffix) {
+		return false
+	}
+
+	return line[:len(prefix)] == prefix && line[len(prefix):][:len(label)] == label && line[len(prefix) + len(label):] == suffix
 }
 @(private)
 trim_whitespace :: proc(data: []u8) -> []u8 {
