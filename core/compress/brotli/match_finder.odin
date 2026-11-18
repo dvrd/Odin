@@ -1046,17 +1046,24 @@ fast_command :: #force_inline proc(
 	fast_flush(b)
 	index := 0
 
-	for ; index + 2 <= len(inserted); index += 2 {
+	// Three codes, 45 bits at most, are put together apart from the pending
+	// bits: those are then held up once per three literals, not per literal.
+	for ; index + 3 <= len(inserted); index += 3 {
 		first := literals[inserted[index]]
 		second := literals[inserted[index + 1]]
-		fast_put(b, u64(first & 0xffff), uint(first >> 16))
-		fast_put(b, u64(second & 0xffff), uint(second >> 16))
+		third := literals[inserted[index + 2]]
+		two := first >> 16 + second >> 16
+		joined := u64(first & 0xffff) | u64(second & 0xffff) << (first >> 16) | u64(third & 0xffff) << two
+		fast_put(b, joined, uint(two + third >> 16))
 		fast_flush(b)
 	}
 
 	if index < len(inserted) {
-		entry = literals[inserted[index]]
-		fast_put(b, u64(entry & 0xffff), uint(entry >> 16))
+		for value in inserted[index:] {
+			entry = literals[value]
+			fast_put(b, u64(entry & 0xffff), uint(entry >> 16))
+		}
+
 		fast_flush(b)
 	}
 }
