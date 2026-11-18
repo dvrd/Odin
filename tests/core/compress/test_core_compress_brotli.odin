@@ -1,14 +1,23 @@
 package test_core_compress
 
 import "core:bytes"
+import "base:runtime"
+import "core:compress"
 import "core:compress/brotli"
 import "core:testing"
 
 brotli_decode :: proc(data: []u8) -> (plain: []u8, err: brotli.Error) {
-	buf: bytes.Buffer
-	err = brotli.load(data, &buf)
+	output: [dynamic]u8
+	err = brotli.decompress(&output, data)
 
-	return buf.buf[:], err
+	return output[:], err
+}
+
+brotli_encode :: proc(data: []u8, level: brotli.Level) -> (packed: []u8, err: brotli.Error) {
+	output: [dynamic]u8
+	err = brotli.compress(&output, data, level)
+
+	return output[:], err
 }
 
 BROTLI_LEVELS := [?]brotli.Level{.Fastest, .Fast, .Default, .Best, .Optimal}
@@ -64,7 +73,7 @@ brotli_encode_round_trips_every_level :: proc(t: ^testing.T) {
 			defer delete(data)
 
 			for level in BROTLI_LEVELS {
-				packed, encode_error := brotli.encode(data, level)
+				packed, encode_error := brotli_encode(data, level)
 				defer delete(packed)
 
 				testing.expect_value(t, encode_error, nil)
@@ -82,7 +91,7 @@ brotli_encode_round_trips_every_level :: proc(t: ^testing.T) {
 @(test)
 brotli_encode_uses_the_static_dictionary :: proc(t: ^testing.T) {
 	text := BROTLI_DICTIONARY_TEXT
-	packed, encode_error := brotli.encode(transmute([]u8)text, .Best)
+	packed, encode_error := brotli_encode(transmute([]u8)text, .Best)
 	defer delete(packed)
 
 	testing.expect_value(t, encode_error, nil)
@@ -103,7 +112,7 @@ brotli_encode_levels_order_by_size :: proc(t: ^testing.T) {
 	previous := max(int) / 2
 
 	for level in BROTLI_LEVELS {
-		packed, encode_error := brotli.encode(data, level)
+		packed, encode_error := brotli_encode(data, level)
 		defer delete(packed)
 
 		testing.expect_value(t, encode_error, nil)
@@ -114,7 +123,7 @@ brotli_encode_levels_order_by_size :: proc(t: ^testing.T) {
 	random := encode_sample(0, 100000)
 	defer delete(random)
 
-	stored, stored_error := brotli.encode(random, .Default)
+	stored, stored_error := brotli_encode(random, .Default)
 	defer delete(stored)
 
 	testing.expect_value(t, stored_error, nil)
@@ -126,7 +135,7 @@ brotli_decode_rejects_damaged_streams :: proc(t: ^testing.T) {
 	data := encode_sample(1, 20000)
 	defer delete(data)
 
-	packed, encode_error := brotli.encode(data, .Default)
+	packed, encode_error := brotli_encode(data, .Default)
 	defer delete(packed)
 
 	testing.expect_value(t, encode_error, nil)
@@ -250,16 +259,203 @@ brotli_round_trips_across_meta_blocks :: proc(t: ^testing.T) {
 
 	for level in 0 ..= 11 {
 		for meta_block_max in ([?]int{1 << 12, 1 << 16, 1 << 18}) {
-			packed, encode_error := brotli.encode_meta_blocks(sample, brotli.Level(level), meta_block_max)
+			packed: [dynamic]u8
 			defer delete(packed)
+
+			encode_error := brotli.compress_meta_blocks(&packed, sample, brotli.Level(level), meta_block_max)
 
 			testing.expectf(t, encode_error == nil, "encode failed: level %d block %d: %v", level, meta_block_max, encode_error)
 
-			unpacked, err := brotli_decode(packed)
+			unpacked, err := brotli_decode(packed[:])
 			defer delete(unpacked)
 
 			testing.expectf(t, err == nil, "decode failed: level %d block %d: %v", level, meta_block_max, err)
 			testing.expectf(t, bytes.equal(unpacked, sample), "mismatch: level %d block %d", level, meta_block_max)
 		}
 	}
+}
+
+@(test)
+brotli_compress_to_slice_matches_every_level :: proc(t: ^testing.T) {
+	sizes := [?]int{0, 1, 5, 4096, 65537, 300000, 600000}
+	state := new(brotli.Brotli)
+	defer free(state)
+
+	for kind in 0 ..< 5 {
+		for size in sizes {
+			data := encode_sample(kind, size)
+			defer delete(data)
+
+			// Bytes past the bound that no level may write.
+			GUARD :: 64
+			bound := brotli.compress_bound(size)
+			guarded := make([]u8, bound + GUARD)
+			defer delete(guarded)
+
+			output := guarded[:bound]
+
+			for &value in guarded[bound:] {
+				value = 0xa5
+			}
+
+			for level in 0 ..= 11 {
+				if level >= 10 && size > 300000 {
+					continue
+				}
+
+				packed, encode_error := brotli_encode(data, brotli.Level(level))
+				defer delete(packed)
+
+				testing.expect_value(t, encode_error, nil)
+				testing.expectf(t, len(packed) <= bound - brotli.COMPRESS_SLACK, "kind %d size %d level %d: %d bytes past the bound", kind, size, level, len(packed))
+
+				written: int
+				slice_error: brotli.Error
+
+				if brotli.Level(level) <= brotli.PLAIN_LEVEL_MAX {
+					// These levels work from the state alone.
+					context.allocator = runtime.panic_allocator()
+					written, slice_error = brotli.compress(state, output, data, brotli.Level(level))
+				} else {
+					written, slice_error = brotli.compress(state, output, data, brotli.Level(level))
+				}
+
+				testing.expect_value(t, slice_error, nil)
+				testing.expectf(t, bytes.equal(output[:written], packed), "kind %d size %d level %d: slice and dynamic differ", kind, size, level)
+
+				for value in guarded[bound:] {
+					testing.expectf(t, value == 0xa5, "kind %d size %d level %d: wrote past the output", kind, size, level)
+				}
+			}
+		}
+	}
+}
+
+@(test)
+brotli_compress_checks_its_arguments :: proc(t: ^testing.T) {
+	data := encode_sample(1, 1000)
+	defer delete(data)
+
+	state := new(brotli.Brotli)
+	defer free(state)
+
+	bound := brotli.compress_bound(len(data))
+	output := make([]u8, bound)
+	defer delete(output)
+
+	testing.expect_value(t, brotli.compress_bound(-1), -1)
+	testing.expect_value(t, brotli.compress_bound(brotli.COMPRESS_INPUT_MAX + 1), -1)
+
+	_, short_error := brotli.compress(state, output[:bound - 1], data, .Fast)
+	testing.expect_value(t, short_error, brotli.Error(compress.General_Error.Output_Too_Short))
+
+	_, state_error := brotli.compress(nil, output, data, .Fast)
+	testing.expect_value(t, state_error, brotli.Error(compress.General_Error.Incompatible_Options))
+
+	testing.expect_value(t, brotli.compress_to_dynamic(nil, data), brotli.Error(compress.General_Error.Incompatible_Options))
+
+	// The output is overwritten, not appended to.
+	packed: [dynamic]u8
+	defer delete(packed)
+
+	append(&packed, "stale")
+	testing.expect_value(t, brotli.compress(&packed, data, .Fast), nil)
+
+	written, slice_error := brotli.compress(state, output, data, .Fast)
+	testing.expect_value(t, slice_error, nil)
+	testing.expect(t, bytes.equal(packed[:], output[:written]))
+}
+
+@(test)
+brotli_decompress_honours_its_limits :: proc(t: ^testing.T) {
+	data := encode_sample(1, 150000)
+	defer delete(data)
+
+	packed, encode_error := brotli_encode(data, .Default)
+	defer delete(packed)
+
+	testing.expect_value(t, encode_error, nil)
+
+	Limit :: struct {
+		expected: int,
+		limit:    int,
+		err:      brotli.Error,
+	}
+
+	limits := [?]Limit {
+		{-1, compress.COMPRESS_OUTPUT_ALLOCATE_MAX, nil},
+		{len(data), compress.COMPRESS_OUTPUT_ALLOCATE_MAX, nil},
+		{len(data) + 1, compress.COMPRESS_OUTPUT_ALLOCATE_MAX, nil},
+		{-1, len(data), nil},
+		{len(data) - 1, compress.COMPRESS_OUTPUT_ALLOCATE_MAX, compress.General_Error.Output_Too_Short},
+		{-1, len(data) - 1, compress.General_Error.Output_Too_Short},
+		{-1, len(data) / 2, compress.General_Error.Output_Too_Short},
+		{-1, 0, compress.General_Error.Output_Too_Short},
+		{len(data), len(data) - 1, compress.General_Error.Output_Too_Short},
+		{-1, -1, compress.General_Error.Incompatible_Options},
+	}
+
+	output: [dynamic]u8
+	defer delete(output)
+
+	for limit in limits {
+		append(&output, "stale")
+		err := brotli.decompress(&output, packed, limit.expected, limit.limit)
+
+		testing.expectf(t, err == limit.err, "expected %d limit %d: %v", limit.expected, limit.limit, err)
+
+		if limit.limit < 0 {
+			// Refused before the output is touched.
+			clear(&output)
+			continue
+		}
+
+		testing.expectf(t, len(output) <= limit.limit, "expected %d limit %d: %d bytes out", limit.expected, limit.limit, len(output))
+
+		if err == nil {
+			testing.expectf(t, bytes.equal(output[:], data), "expected %d limit %d: output differs", limit.expected, limit.limit)
+		}
+	}
+
+	testing.expect_value(t, brotli.decompress_from_bytes(nil, packed), brotli.Error(compress.General_Error.Incompatible_Options))
+}
+
+@(test)
+brotli_decompress_reads_a_stream_context :: proc(t: ^testing.T) {
+	data := encode_sample(1, 400000)
+	defer delete(data)
+
+	for level in ([?]brotli.Level{.Fastest, .Default}) {
+		packed, encode_error := brotli_encode(data, level)
+		defer delete(packed)
+
+		testing.expect_value(t, encode_error, nil)
+
+		reader: bytes.Reader
+		output: [dynamic]u8
+		defer delete(output)
+
+		// A backing smaller than the stream: the window is refilled many times.
+		backing: [300]u8
+		z := compress.init_context(bytes.reader_init(&reader, packed), &output, buffer = backing[:])
+		defer compress.destroy_context(&z)
+
+		testing.expect_value(t, brotli.decompress(&z), nil)
+		testing.expect_value(t, z.bytes_written, i64(len(data)))
+		testing.expect(t, bytes.equal(output[:], data))
+
+		// One byte short, and one byte more.
+		bytes.reader_init(&reader, packed[:len(packed) - 1])
+		z = compress.init_context(bytes.reader_to_stream(&reader), &output, buffer = backing[:])
+		testing.expect(t, brotli.decompress(&z) != nil)
+
+		longer := make([]u8, len(packed) + 1)
+		defer delete(longer)
+
+		copy(longer, packed)
+		bytes.reader_init(&reader, longer)
+		z = compress.init_context(bytes.reader_to_stream(&reader), &output, buffer = backing[:])
+		testing.expect_value(t, brotli.decompress(&z), brotli.Error(brotli.E_Brotli.Trailing_Data))
+	}
+
 }

@@ -179,17 +179,17 @@ brotli_incremental_equals_one_shot_load :: proc(t: ^testing.T) {
 	defer delete(window)
 
 	for vector in vectors {
-		buffer: bytes.Buffer
-		defer bytes.buffer_destroy(&buffer)
+		buffer: [dynamic]u8
+		defer delete(buffer)
 
-		testing.expect_value(t, brotli.load(vector.wire, &buffer), nil)
+		testing.expect_value(t, brotli.decompress(&buffer, vector.wire), nil)
 
 		enc, dec := brotli_limits(vector.wire, vector.plain)
 		run := run_brotli(vector.wire, 4096, 4096, compress.DECODE_MAX_WORK, window, enc, dec)
 		defer delete(run.output)
 
 		testing.expect_value(t, run.err, compress.Decode_Error.None)
-		testing.expectf(t, bytes.equal(run.output[:], buffer.buf[:]), "%s: incremental differs from brotli.load", vector.name)
+		testing.expectf(t, bytes.equal(run.output[:], buffer[:]), "%s: incremental differs from brotli.decompress", vector.name)
 	}
 }
 
@@ -490,11 +490,11 @@ brotli_metadata_and_uncompressed_meta_blocks :: proc(t: ^testing.T) {
 	append(&expected, ..b)
 	append(&expected, ..a)
 
-	buffer: bytes.Buffer
-	defer bytes.buffer_destroy(&buffer)
+	buffer: [dynamic]u8
+	defer delete(buffer)
 
-	testing.expect_value(t, brotli.load(w.bytes[:], &buffer), nil)
-	testing.expect(t, bytes.equal(buffer.buf[:], expected[:]))
+	testing.expect_value(t, brotli.decompress(&buffer, w.bytes[:]), nil)
+	testing.expect(t, bytes.equal(buffer[:], expected[:]))
 
 	for input_size in ([4]int{1, 3, 100, 1 << 30}) {
 		for output_size in ([3]int{1, 5, 4096}) {
@@ -620,15 +620,15 @@ brotli_check_bit_flips :: proc(t: ^testing.T, wire: []u8, window: []u8, name: st
 		testing.expectf(t, whole.err == bytewise.err, "%s bit %d: %v vs %v", name, bit, whole.err, bytewise.err)
 		testing.expectf(t, bytes.equal(whole.output[:], bytewise.output[:]), "%s bit %d: partitions differ", name, bit)
 
-		buffer: bytes.Buffer
-		defer bytes.buffer_destroy(&buffer)
+		buffer: [dynamic]u8
+		defer delete(buffer)
 
-		one_shot := brotli.load(flipped, &buffer)
+		one_shot := brotli.decompress(&buffer, flipped)
 
 		testing.expectf(t, (whole.err == .None) == (one_shot == nil), "%s bit %d: incremental %v, one-shot %v", name, bit, whole.err, one_shot)
 
 		if whole.err == .None && one_shot == nil {
-			testing.expectf(t, bytes.equal(whole.output[:], buffer.buf[:]), "%s bit %d: output differs from one-shot", name, bit)
+			testing.expectf(t, bytes.equal(whole.output[:], buffer[:]), "%s bit %d: output differs from one-shot", name, bit)
 		}
 	}
 }

@@ -204,17 +204,28 @@ Fast_Look :: struct {
 // per input byte up to 2^(15 + extra_bits). Zeroed, so that every slot
 // points into the data from the start.
 fast_finder_make :: proc(f: ^Finder, size: int, extra_bits: uint, allocator: runtime.Allocator) -> runtime.Allocator_Error {
-	table_bits := clamp(bits.len_u32(u32(min(size, 1 << 30))), BUCKET_BITS_MIN, BUCKET_BITS_MAX + int(extra_bits))
+	table_bits := fast_table_bits(size, extra_bits)
 	f.bucket_shift = u32(32 - table_bits)
 	f.buckets = make([]u32, 1 << uint(table_bits), allocator) or_return
 
 	return nil
 }
 
+// log2 of the slots of the fast table for `size` bytes of input.
+fast_table_bits :: proc(size: int, extra_bits: uint) -> int {
+	return clamp(bits.len_u32(u32(min(size, 1 << 30))), BUCKET_BITS_MIN, BUCKET_BITS_MAX + int(extra_bits))
+}
+
+// Records a block of `length` bytes can make when its copies are at least
+// `shortest` long.
+fast_record_count :: proc(length, shortest: int) -> int {
+	return length / shortest + 1
+}
+
 // Room for the records of one block of `length` bytes whose copies are at
 // least `shortest` long; they are written before they are read.
 fast_records_make :: proc(length, shortest: int, allocator: runtime.Allocator) -> ([]Fast_Record, runtime.Allocator_Error) {
-	count := length / shortest + 1
+	count := fast_record_count(length, shortest)
 	memory, memory_error := runtime.mem_alloc_non_zeroed(count * size_of(Fast_Record), align_of(Fast_Record), allocator)
 
 	if memory_error != nil {
@@ -425,7 +436,7 @@ LAZY_GAIN :: 175
 lazy_finder_make :: proc(f: ^Finder, size: int, slot_bits: uint, allocator: runtime.Allocator) -> runtime.Allocator_Error {
 	assert(slot_bits >= 1)
 
-	bucket_bits := clamp(bits.len_u32(u32(min(size, 1 << 30))) - 1, BUCKET_BITS_MIN, LAZY_BUCKET_BITS_MAX)
+	bucket_bits := lazy_bucket_bits(size)
 	f.bucket_shift = u32(32 - bucket_bits)
 	slots, slots_error := runtime.mem_alloc((4 << uint(bucket_bits)) << slot_bits, 64, allocator)
 
@@ -436,6 +447,11 @@ lazy_finder_make :: proc(f: ^Finder, size: int, slot_bits: uint, allocator: runt
 	f.buckets = ([^]u32)(raw_data(slots))[:(1 << uint(bucket_bits)) << slot_bits]
 
 	return nil
+}
+
+// log2 of the buckets of the lazy table for `size` bytes of input.
+lazy_bucket_bits :: proc(size: int) -> int {
+	return clamp(bits.len_u32(u32(min(size, 1 << 30))) - 1, BUCKET_BITS_MIN, LAZY_BUCKET_BITS_MAX)
 }
 
 // Index of the first word of the bucket of `word` in a table of SLOTS

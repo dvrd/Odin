@@ -11,26 +11,28 @@ Example:
 	main :: proc() {
 		INPUT := "Brotli packs repeated text such as Brotli packs repeated text well."
 
-		packed, encode_err := brotli.encode(transmute([]u8)INPUT, .Default)
+		packed: [dynamic]u8
 		defer delete(packed)
 
-		if encode_err != nil {
-			fmt.printf("\nEncode error: %v\n", encode_err)
+		compress_err := brotli.compress(&packed, transmute([]u8)INPUT, .Default)
+
+		if compress_err != nil {
+			fmt.printf("\nCompress error: %v\n", compress_err)
 			return
 		}
 
-		buf: bytes.Buffer
-		defer bytes.buffer_destroy(&buf)
+		unpacked: [dynamic]u8
+		defer delete(unpacked)
 
-		decode_err := brotli.load(packed, &buf, expected_output_size = len(INPUT))
+		decompress_err := brotli.decompress(&unpacked, packed[:], expected_output_size = len(INPUT))
 
-		if decode_err != nil {
-			fmt.printf("\nDecode error: %v\n", decode_err)
+		if decompress_err != nil {
+			fmt.printf("\nDecompress error: %v\n", decompress_err)
 			return
 		}
 
-		fmt.printf("Input: %v bytes, packed: %v bytes, unpacked: %v bytes\n", len(INPUT), len(packed), len(buf.buf))
-		assert(bytes.equal(buf.buf[:], transmute([]u8)INPUT))
+		fmt.printf("Input: %v bytes, packed: %v bytes, unpacked: %v bytes\n", len(INPUT), len(packed), len(unpacked))
+		assert(bytes.equal(unpacked[:], transmute([]u8)INPUT))
 	}
 */
 package compress_brotli
@@ -42,6 +44,6 @@ package compress_brotli
 	List of contributors:
 		Jeroen van Rijn: Initial implementation.
 
-	Brotli decoder and encoder. `brotli.load` decodes, `brotli.encode` encodes,
-	and `brotli.Level` selects the speed/ratio trade-off of the encoder.
+	Brotli decoder and encoder. `brotli.decompress` decodes, `brotli.compress`
+	encodes, and `brotli.Level` selects the speed/ratio trade-off of the encoder.
 */

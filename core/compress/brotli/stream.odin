@@ -6,7 +6,7 @@ import "core:compress"
 // Bounded streaming encoder: fixed memory, no allocation, any partition of
 // the input. Each STREAM_BLOCK of input becomes one meta-block with its own
 // prefix codes, matched against the last STREAM_WINDOW bytes. For a better
-// ratio on data held in memory use `encode`.
+// ratio on data held in memory use `compress`.
 
 STREAM_WINDOW_BITS :: 16
 STREAM_WINDOW :: 1 << STREAM_WINDOW_BITS

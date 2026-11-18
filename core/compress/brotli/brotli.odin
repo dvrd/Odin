@@ -4,14 +4,12 @@ package compress_brotli
 	This package implements the Brotli compressed data format,
 	as specified in RFC 7932.
 
-	Decoding reads from a `Context_Memory_Input`, writes to a `bytes.Buffer`
-	and reports `compress.Error`.
+	Decoding reads from a `compress.Context`, writes to its `[dynamic]u8`
+	output and reports `compress.Error`.
 */
 
-import "core:bytes"
 import "core:compress"
 import "core:math/bits"
-import "core:os"
 
 Error     :: compress.Error
 E_General :: compress.General_Error
@@ -101,6 +99,8 @@ Command_Entry :: struct {
 Load_Decoder :: struct {
 	// Set when a read ran past the end of the input.
 	short:         bool,
+	// Most bytes the output may hold.
+	limit:         int,
 	literal:       Block_State,
 	command:       Block_State,
 	distance:      Block_State,
@@ -121,100 +121,108 @@ command_entry :: proc(symbol: int) -> Command_Entry {
 	return {u16(INSERT_BASE[insert]), u16(COPY_BASE[copy]), INSERT_EXTRA[insert], COPY_EXTRA[copy]}
 }
 
-load :: proc{load_from_bytes, load_from_file, load_from_context}
+decompress :: proc{decompress_from_bytes, decompress_from_context}
 
-load_from_file :: proc(filename: string, buf: ^bytes.Buffer, expected_output_size := -1, allocator := context.allocator) -> (err: Error) {
-	context.allocator = allocator
+// Decodes the complete Brotli stream `input` into `output`, which is
+// overwritten and grown as needed with `allocator`.
+decompress_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, expected_output_size := -1, max_output_size := compress.COMPRESS_OUTPUT_ALLOCATE_MAX, allocator := context.allocator) -> (err: Error) {
+	input := input
+	ctx := compress.init_context_from_slice(&input, output = output)
 
-	file_data, file_err := os.read_entire_file(filename, allocator)
-	defer delete(file_data)
-
-	return load_from_bytes(file_data, buf, expected_output_size) if file_err == nil else E_General.File_Not_Found
+	return decompress_from_context(&ctx, expected_output_size, max_output_size, allocator)
 }
 
-load_from_bytes :: proc(data: []byte, buf: ^bytes.Buffer, expected_output_size := -1, allocator := context.allocator) -> (err: Error) {
-	z := &Context_Memory_Input{
-		input_data = data,
-		output     = buf,
-	}
-
-	return load_from_context(z, buf, expected_output_size, allocator)
-}
-
-// Decodes one complete Brotli stream from `z` into `buf`. Bytes after the end
-// of the stream are an error.
-load_from_context :: proc(z: ^$C, buf: ^bytes.Buffer, expected_output_size := -1, allocator := context.allocator) -> (err: Error) {
+// Decodes one complete Brotli stream from `z` into `z.output`, which is
+// overwritten. Bytes after the end of the stream are an error.
+//
+// The output never exceeds `max_output_size`, nor `expected_output_size` (or
+// `z.size_unpacked`) when that is positive: a stream that holds more fails
+// with `.Output_Too_Short`. What was decoded before an error stays in
+// `z.output`.
+decompress_from_context :: proc(z: ^compress.Context, expected_output_size := -1, max_output_size := compress.COMPRESS_OUTPUT_ALLOCATE_MAX, allocator := context.allocator) -> (err: Error) {
 	context.allocator = allocator
 
-	if expected_output_size > compress.COMPRESS_OUTPUT_ALLOCATE_MAX {
-		return E_General.Output_Exceeds_COMPRESS_OUTPUT_ALLOCATE_MAX
+	if z.output == nil || max_output_size < 0 {
+		return E_General.Incompatible_Options
 	}
 
-	z.output        = buf
+	expected := expected_output_size
+
+	if expected <= 0 && z.size_unpacked > 0 && z.size_unpacked <= i64(max(int)) {
+		expected = int(z.size_unpacked)
+	}
+
+	limit := max_output_size
+
+	if expected > 0 {
+		if expected > limit {
+			return E_General.Output_Too_Short
+		}
+
+		limit = expected
+	}
+
 	z.bytes_written = 0
-	z.num_bits      = 0
-	z.code_buffer   = 0
+	z.num_bits = 0
+	z.code_buffer = 0
 
-	clear(&buf.buf)
-
-	if expected_output_size > 0 {
-		reserve(&buf.buf, expected_output_size) or_return
-	}
+	clear(z.output)
+	defer non_zero_resize(z.output, int(z.bytes_written))
 
 	d := new(Load_Decoder) or_return
 	defer free(d)
 	defer delete(d.tables)
 
+	d.limit = limit
 	d.tables = make([dynamic]Entry) or_return
 
 	for &entry, symbol in d.commands {
 		entry = command_entry(symbol)
 	}
 
-	stream_err := decode_stream(z, d)
-	resize(&buf.buf, int(z.bytes_written)) or_return
+	non_zero_resize(z.output, min(compress.output_reservation(expected, -1, compress.input_size(z)), limit)) or_return
 
-	return stream_err
+	return decode_stream(z, d)
 }
 
 // ------------------------------------------------------------------ bit input
 
-// Input of a one-shot decode: the encoded bytes still to read, the LSB-first
-// bit buffer over them and the output written so far.
-Context_Memory_Input :: struct {
-	input_data:    []u8,
-	output:        ^bytes.Buffer,
-	bytes_written: i64,
-	code_buffer:   u64,
-	num_bits:      u64,
+// Makes more input available in `z.window`; false at the end of the input.
+refill_input :: proc(z: ^compress.Context) -> bool {
+	if compress.is_memory_context(z) {
+		return false
+	}
+
+	return compress.refill_window(z, 1) == nil && len(z.window) > 0
 }
 
-// Tops the bit buffer up to more than `width` bits while input remains.
-refill_lsb :: proc(z: ^Context_Memory_Input, width := i8(48)) {
-	refill := u64(width)
-
-	for z.num_bits <= refill {
+// Tops the LSB-first bit buffer of `z` up to more than `width` bits while
+// input remains.
+refill_bits :: proc(z: ^compress.Context, width := u64(48)) {
+	for z.num_bits <= width {
 		if z.code_buffer == 0 && z.num_bits > 63 {
 			z.num_bits = 0
 		}
+
 		if z.code_buffer >= 1 << uint(z.num_bits) {
 			// Code buffer is malformed.
 			z.num_bits = max(u64)
 			return
 		}
-		if len(z.input_data) == 0 {
+
+		if len(z.window) == 0 && !refill_input(z) {
 			return
 		}
 
-		z.code_buffer |= u64(z.input_data[0]) << u8(z.num_bits)
-		z.input_data = z.input_data[1:]
+		z.code_buffer |= u64(z.window[0]) << u8(z.num_bits)
+		z.window = z.window[1:]
 		z.num_bits += 8
 	}
 }
 
-read_bits :: #force_inline proc(z: ^$C, d: ^Load_Decoder, width: u8) -> u32 {
+read_bits :: #force_inline proc(z: ^compress.Context, d: ^Load_Decoder, width: u8) -> u32 {
 	if z.num_bits < u64(width) {
-		refill_lsb(z)
+		refill_bits(z)
 
 		if z.num_bits < u64(width) {
 			d.short = true
@@ -230,25 +238,23 @@ read_bits :: #force_inline proc(z: ^$C, d: ^Load_Decoder, width: u8) -> u32 {
 }
 
 // Discards the bits up to the next byte boundary; false if any was set.
-align_to_byte :: proc(z: ^$C, d: ^Load_Decoder) -> bool {
+align_to_byte :: proc(z: ^compress.Context, d: ^Load_Decoder) -> bool {
 	return read_bits(z, d, u8(z.num_bits & 7)) == 0
 }
 
 // Grows the output so that `extra` more bytes fit.
-reserve_output :: proc(z: ^$C, extra: int) -> Error {
+reserve_output :: proc(z: ^compress.Context, d: ^Load_Decoder, extra: int) -> Error {
 	need := int(z.bytes_written) + extra
 
-	if need <= len(z.output.buf) {
+	if need <= len(z.output) {
 		return nil
 	}
 
-	if need > compress.COMPRESS_OUTPUT_ALLOCATE_MAX {
-		return E_General.Output_Exceeds_COMPRESS_OUTPUT_ALLOCATE_MAX
+	if need > d.limit {
+		return E_General.Output_Too_Short
 	}
 
-	size := min(max(len(z.output.buf) * 2, need), compress.COMPRESS_OUTPUT_ALLOCATE_MAX)
-
-	return non_zero_resize(&z.output.buf, size)
+	return non_zero_resize(z.output, compress.output_grow_capacity(len(z.output), need, d.limit))
 }
 
 // --------------------------------------------------------------- prefix codes
@@ -349,9 +355,9 @@ fill_table :: proc(table: []Entry, symbol: int) {
 	}
 }
 
-read_symbol :: #force_inline proc(z: ^$C, d: ^Load_Decoder, table: []Entry) -> u32 #no_bounds_check {
+read_symbol :: #force_inline proc(z: ^compress.Context, d: ^Load_Decoder, table: []Entry) -> u32 #no_bounds_check {
 	if z.num_bits < CODE_LENGTH_MAX {
-		refill_lsb(z)
+		refill_bits(z)
 	}
 
 	entry := table[z.code_buffer & (1 << ROOT_BITS - 1)]
@@ -374,7 +380,7 @@ read_symbol :: #force_inline proc(z: ^$C, d: ^Load_Decoder, table: []Entry) -> u
 	return u32(entry.value)
 }
 
-read_prefix_code :: proc(z: ^$C, d: ^Load_Decoder, table: []Entry, alphabet: int) -> Error {
+read_prefix_code :: proc(z: ^compress.Context, d: ^Load_Decoder, table: []Entry, alphabet: int) -> Error {
 	lengths: [ALPHABET_MAX]u8
 	skip := int(read_bits(z, d, 2))
 
@@ -389,7 +395,7 @@ read_prefix_code :: proc(z: ^$C, d: ^Load_Decoder, table: []Entry, alphabet: int
 
 	for index := skip; index < 18 && space > 0; index += 1 {
 		if z.num_bits < 4 {
-			refill_lsb(z)
+			refill_bits(z)
 		}
 
 		peek := z.code_buffer & 15
@@ -505,7 +511,7 @@ read_prefix_code :: proc(z: ^$C, d: ^Load_Decoder, table: []Entry, alphabet: int
 	return nil
 }
 
-read_simple_code :: proc(z: ^$C, d: ^Load_Decoder, table: []Entry, alphabet: int, lengths: []u8) -> Error {
+read_simple_code :: proc(z: ^compress.Context, d: ^Load_Decoder, table: []Entry, alphabet: int, lengths: []u8) -> Error {
 	count := int(read_bits(z, d, 2)) + 1
 	width := u8(bits.len_u32(u32(alphabet - 1)))
 	symbols: [4]int
@@ -557,7 +563,7 @@ read_simple_code :: proc(z: ^$C, d: ^Load_Decoder, table: []Entry, alphabet: int
 
 // ---------------------------------------------------------------- block types
 
-read_variable_byte :: proc(z: ^$C, d: ^Load_Decoder) -> int {
+read_variable_byte :: proc(z: ^compress.Context, d: ^Load_Decoder) -> int {
 	if read_bits(z, d, 1) == 0 {
 		return 0
 	}
@@ -571,13 +577,13 @@ read_variable_byte :: proc(z: ^$C, d: ^Load_Decoder) -> int {
 	return 1 << width + int(read_bits(z, d, width))
 }
 
-read_block_count :: proc(z: ^$C, d: ^Load_Decoder, table: []Entry) -> int {
+read_block_count :: proc(z: ^compress.Context, d: ^Load_Decoder, table: []Entry) -> int {
 	symbol := read_symbol(z, d, table)
 
 	return int(BLOCK_COUNT_BASE[symbol] + read_bits(z, d, BLOCK_COUNT_EXTRA[symbol]))
 }
 
-read_block_state :: proc(z: ^$C, d: ^Load_Decoder, state: ^Block_State) -> Error {
+read_block_state :: proc(z: ^compress.Context, d: ^Load_Decoder, state: ^Block_State) -> Error {
 	state.type_count = read_variable_byte(z, d) + 1
 	state.current = 0
 	state.previous = 1
@@ -594,7 +600,7 @@ read_block_state :: proc(z: ^$C, d: ^Load_Decoder, state: ^Block_State) -> Error
 	return nil
 }
 
-switch_block :: proc(z: ^$C, d: ^Load_Decoder, state: ^Block_State) {
+switch_block :: proc(z: ^compress.Context, d: ^Load_Decoder, state: ^Block_State) {
 	if state.type_count < 2 {
 		state.remaining = 1 << 28
 		return
@@ -621,7 +627,7 @@ switch_block :: proc(z: ^$C, d: ^Load_Decoder, state: ^Block_State) {
 	state.remaining = read_block_count(z, d, state.count_table[:])
 }
 
-read_context_map :: proc(z: ^$C, d: ^Load_Decoder, values: []u8) -> (trees: int, err: Error) {
+read_context_map :: proc(z: ^compress.Context, d: ^Load_Decoder, values: []u8) -> (trees: int, err: Error) {
 	trees = read_variable_byte(z, d) + 1
 
 	for &value in values {
@@ -690,7 +696,7 @@ read_context_map :: proc(z: ^$C, d: ^Load_Decoder, values: []u8) -> (trees: int,
 
 // --------------------------------------------------------------------- stream
 
-decode_stream :: proc(z: ^$C, d: ^Load_Decoder) -> Error {
+decode_stream :: proc(z: ^compress.Context, d: ^Load_Decoder) -> Error {
 	window_bits := 16
 
 	if read_bits(z, d, 1) == 1 {
@@ -759,7 +765,7 @@ decode_stream :: proc(z: ^$C, d: ^Load_Decoder) -> Error {
 			continue
 		}
 
-		reserve_output(z, length) or_return
+		reserve_output(z, d, length) or_return
 		decode_meta_block(z, d, length, window_max, &distances, dictionary_offsets[:]) or_return
 	}
 
@@ -771,7 +777,7 @@ decode_stream :: proc(z: ^$C, d: ^Load_Decoder) -> Error {
 		return E_Brotli.Invalid_Padding
 	}
 
-	refill_lsb(z)
+	refill_bits(z)
 
 	if z.num_bits >= 8 {
 		return E_Brotli.Trailing_Data
@@ -781,16 +787,16 @@ decode_stream :: proc(z: ^$C, d: ^Load_Decoder) -> Error {
 }
 
 // Bytes of input known to remain; unbounded for streams.
-input_remaining :: proc(z: ^$C) -> int {
-	when C == Context_Memory_Input {
-		return int(z.num_bits / 8) + len(z.input_data)
-	} else {
-		return max(int)
+input_remaining :: proc(z: ^compress.Context) -> int {
+	if compress.is_memory_context(z) {
+		return int(z.num_bits / 8) + len(z.window)
 	}
+
+	return max(int)
 }
 
 // Metadata meta-block: its bytes carry no output.
-skip_metadata :: proc(z: ^$C, d: ^Load_Decoder) -> Error {
+skip_metadata :: proc(z: ^compress.Context, d: ^Load_Decoder) -> Error {
 	if read_bits(z, d, 1) != 0 {
 		return E_Brotli.Invalid_Meta_Block
 	}
@@ -825,7 +831,7 @@ skip_metadata :: proc(z: ^$C, d: ^Load_Decoder) -> Error {
 	return nil
 }
 
-copy_stored :: proc(z: ^$C, d: ^Load_Decoder, length: int) -> Error {
+copy_stored :: proc(z: ^compress.Context, d: ^Load_Decoder, length: int) -> Error {
 	if !align_to_byte(z, d) {
 		return E_Brotli.Invalid_Meta_Block
 	}
@@ -834,10 +840,10 @@ copy_stored :: proc(z: ^$C, d: ^Load_Decoder, length: int) -> Error {
 		return E_General.Stream_Too_Short
 	}
 
-	reserve_output(z, length) or_return
+	reserve_output(z, d, length) or_return
 
 	for _ in 0 ..< length {
-		z.output.buf[z.bytes_written] = u8(read_bits(z, d, 8))
+		z.output[z.bytes_written] = u8(read_bits(z, d, 8))
 		z.bytes_written += 1
 
 		if d.short {
@@ -849,7 +855,7 @@ copy_stored :: proc(z: ^$C, d: ^Load_Decoder, length: int) -> Error {
 }
 
 decode_meta_block :: proc(
-	z: ^$C,
+	z: ^compress.Context,
 	d: ^Load_Decoder,
 	length, window_max: int,
 	distances: ^[4]int,
@@ -893,7 +899,7 @@ decode_meta_block :: proc(
 		return E_General.Stream_Too_Short
 	}
 
-	out := z.output.buf[:]
+	out := z.output[:]
 	position := int(z.bytes_written)
 	defer z.bytes_written = i64(position)
 

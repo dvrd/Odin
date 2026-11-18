@@ -32,7 +32,7 @@ brotli_corpus_round_trips_every_level :: proc(t: ^testing.T) {
 				continue
 			}
 
-			packed, encode_error := brotli.encode(file.data, level)
+			packed, encode_error := brotli_encode(file.data, level)
 			defer delete(packed)
 
 			testing.expectf(t, encode_error == nil, "%s level %v: encode error %v", file.name, level, encode_error)
@@ -61,7 +61,7 @@ brotli_corpus_levels_stay_monotonic :: proc(t: ^testing.T) {
 			continue
 		}
 
-		packed, encode_error := brotli.encode(data, level)
+		packed, encode_error := brotli_encode(data, level)
 		defer delete(packed)
 
 		testing.expect_value(t, encode_error, nil)

@@ -119,54 +119,159 @@ Encoder :: struct {
 	finder:        Finder,
 }
 
-
-// Compresses `src` into a complete Brotli stream.
-encode :: proc(src: []u8, level := Level.Default, allocator := context.allocator) -> (output: []u8, err: Error) {
-	return encode_meta_blocks(src, level, META_BLOCK_MAX, allocator)
+// Working memory of `compress_to_slice`, owned by the caller: the match table,
+// the records of a block and the prefix code scratch of the levels 0..4. It
+// needs no initialisation and may be reused, by one call at a time. About
+// 4.6 MiB: allocate it, do not declare it on the stack.
+Brotli :: struct #align(64) {
+	table:   [PLAIN_TABLE_SLOTS_MAX]u32,
+	records: [PLAIN_BLOCK / LAZY_MATCH_MIN + 1]Fast_Record,
+	huffman: compress.Huffman_Scratch,
 }
 
-// `encode` with at most `meta_block_max` input bytes per meta-block; smaller
-// meta-blocks adapt their prefix codes sooner and cost more headers.
-encode_meta_blocks :: proc(
-	src: []u8,
-	level: Level,
-	meta_block_max: int,
-	allocator := context.allocator,
-) -> (
-	output: []u8,
-	err: Error,
-) {
+// Slots of the largest table of the levels 0..4: level 4 on a large input.
+PLAIN_TABLE_SLOTS_MAX :: 1 << (LAZY_BUCKET_BITS_MAX + 3)
+
+#assert(BUCKET_BITS_MAX + 2 <= LAZY_BUCKET_BITS_MAX + 3)
+#assert(FAST_MATCH_MIN >= LAZY_MATCH_MIN)
+
+// Bytes a meta-block may add to the data it holds: one that does not shrink
+// is stored behind a header of at most 28 bits, byte aligned.
+COMPRESS_BLOCK_OVERHEAD :: 5
+
+// Room `compress_to_slice` needs past the stream itself: the prefix codes of
+// a meta-block are written before it is known whether it shrinks, and whole
+// words are stored at the end of the output.
+COMPRESS_SLACK :: 1024
+
+// Positions in the input are 32-bit.
+when size_of(int) == 8 {
+	COMPRESS_INPUT_MAX :: 1 << 32 - 2
+} else {
+	COMPRESS_INPUT_MAX :: max(int) / 2
+}
+
+compress :: proc{compress_to_slice, compress_to_dynamic}
+
+// Size of the output `compress_to_slice` asks for to compress `length` bytes,
+// which no stream of `compress` at any level exceeds; -1 when `length` is
+// negative or more than `COMPRESS_INPUT_MAX`.
+compress_bound :: proc(length: int) -> int {
+	if length < 0 || length > COMPRESS_INPUT_MAX {
+		return -1
+	}
+
+	return length + COMPRESS_BLOCK_OVERHEAD * (length / BLOCK_CHUNK + 1) + COMPRESS_SLACK
+}
+
+// Compresses `input` into `output`, which is overwritten and grown as needed,
+// as a complete Brotli stream. The working memory of the encoder comes from
+// `allocator` and is freed before returning; `output` is left empty on error.
+compress_to_dynamic :: proc(output: ^[dynamic]u8, input: []u8, level := Level.Default, allocator := context.allocator) -> (err: Error) {
+	return compress_meta_blocks(output, input, level, META_BLOCK_MAX, allocator)
+}
+
+// Compresses `input` into `output` as a complete Brotli stream, the same
+// bytes `compress_to_dynamic` gives for `level`, and returns its size.
+// `output` must hold at least `compress_bound(len(input))` bytes.
+//
+// Levels 0..4 allocate nothing: their tables are those of `s` and the stream
+// is written straight into `output`. Levels 5..11 size their tables and their
+// model by the input and cannot work from a fixed state: they take their
+// working memory and a temporary copy of the stream from `context.allocator`,
+// free both before returning, and leave `s` untouched.
+compress_to_slice :: proc(s: ^Brotli, output, input: []u8, level := Level.Default) -> (written: int, err: Error) {
+	bound := compress_bound(len(input))
+
+	if s == nil || bound < 0 {
+		return 0, E_General.Incompatible_Options
+	}
+
+	if len(output) < bound {
+		return 0, E_General.Output_Too_Short
+	}
+
+	if level > PLAIN_LEVEL_MAX {
+		packed: [dynamic]u8
+		defer delete(packed)
+
+		compress_to_dynamic(&packed, input, level) or_return
+
+		return copy(output, packed[:]), nil
+	}
+
+	e: Encoder
+	window_bits := encoder_begin(&e, input, level)
+	e.huffman = &s.huffman
+	e.writer.out = fixed_buffer(output)
+
+	records: []Fast_Record
+
+	if e.level <= FAST_LEVEL_MAX {
+		table_bits := fast_table_bits(len(input), e.parameters.block_bits)
+		e.finder.bucket_shift = u32(32 - table_bits)
+		e.finder.buckets = s.table[:1 << uint(table_bits)]
+		records = s.records[:fast_record_count(min(len(input), PLAIN_BLOCK), FAST_MATCH_MIN)]
+	} else {
+		bucket_bits := lazy_bucket_bits(len(input))
+		e.finder.bucket_shift = u32(32 - bucket_bits)
+		e.finder.buckets = s.table[:(1 << uint(bucket_bits)) << e.parameters.block_bits]
+		records = s.records[:fast_record_count(min(len(input), PLAIN_BLOCK), LAZY_MATCH_MIN)]
+	}
+
+	// Every slot points into the data from the start.
+	slice.zero(e.finder.buckets)
+
+	stream_error := encode_stream(&e, nil, nil, nil, records, window_bits, META_BLOCK_MAX)
+
+	// Only a stream past the bound would not fit.
+	if stream_error != nil || e.writer.err != nil {
+		return 0, E_General.Output_Too_Short
+	}
+
+	return len(e.writer.out), nil
+}
+
+// `compress_to_dynamic` with at most `meta_block_max` input bytes per
+// meta-block; smaller meta-blocks adapt their prefix codes sooner and cost
+// more headers, beyond what `compress_bound` allows for.
+compress_meta_blocks :: proc(output: ^[dynamic]u8, input: []u8, level: Level, meta_block_max: int, allocator := context.allocator) -> (err: Error) {
 	assert(meta_block_max > 0 && meta_block_max <= META_BLOCK_MAX)
+
+	context.allocator = allocator
+	bound := compress_bound(len(input))
+
+	if output == nil || bound < 0 {
+		return E_General.Incompatible_Options
+	}
+
+	if bound > compress.COMPRESS_OUTPUT_ALLOCATE_MAX {
+		return E_General.Output_Too_Short
+	}
 
 	e := new(Encoder, allocator) or_return
 	defer free(e, allocator)
 
-	e.src = src
+	window_bits := encoder_begin(e, input, level)
 	e.allocator = allocator
-	e.ring = {4, 11, 15, 16}
-	e.writer.out = make([dynamic]u8, 0, len(src) / 3 + 64, allocator) or_return
-	e.commands = make([dynamic]Command, 0, len(src) / 16 + 16, allocator) or_return
+
+	clear(output)
+	non_zero_reserve(output, len(input) / 3 + 64) or_return
+
+	// The writer grows the caller's array; it is handed back whatever happens.
+	e.writer.out = output^
+	defer output^ = e.writer.out
+	defer if err != nil {
+		clear(&e.writer.out)
+	}
+
+	e.commands = make([dynamic]Command, 0, len(input) / 16 + 16, allocator) or_return
 	defer delete(e.commands)
 
 	// The scratch is written before it is read: skip clearing its half megabyte.
-	scratch, scratch_error := runtime.mem_alloc_non_zeroed(
-		size_of(compress.Huffman_Scratch),
-		align_of(compress.Huffman_Scratch),
-		allocator,
-	)
-
-	if scratch_error != nil {
-		return nil, scratch_error
-	}
-
+	scratch := runtime.mem_alloc_non_zeroed(size_of(compress.Huffman_Scratch), align_of(compress.Huffman_Scratch), allocator) or_return
 	e.huffman = (^compress.Huffman_Scratch)(raw_data(scratch))
 	defer free(e.huffman, allocator)
-
-	e.level = Level(min(int(level), len(PARAMETERS) - 1))
-	e.parameters = PARAMETERS[e.level]
-
-	window_bits := clamp(bits.len_u32(u32(min(len(src) + 15, 1 << 30))), WINDOW_BITS_MIN, WINDOW_BITS_MAX)
-	e.window_max = 1 << uint(window_bits) - 16
 
 	block := block_make(allocator) or_return
 	defer block_destroy(block, allocator)
@@ -182,18 +287,67 @@ encode_meta_blocks :: proc(
 
 	switch {
 	case e.level >= OPTIMAL_LEVEL_MIN:
-		optimal = optimal_make(e, min(len(src), OPTIMAL_BLOCK), allocator) or_return
+		optimal = optimal_make(e, min(len(input), OPTIMAL_BLOCK), allocator) or_return
 		parsed = make([dynamic]Command, allocator) or_return
 	case e.level <= FAST_LEVEL_MAX:
-		fast_finder_make(&e.finder, len(src), e.parameters.block_bits, allocator) or_return
-		records = fast_records_make(min(len(src), PLAIN_BLOCK), FAST_MATCH_MIN, allocator) or_return
+		fast_finder_make(&e.finder, len(input), e.parameters.block_bits, allocator) or_return
+		records = fast_records_make(min(len(input), PLAIN_BLOCK), FAST_MATCH_MIN, allocator) or_return
 	case e.level <= PLAIN_LEVEL_MAX:
-		lazy_finder_make(&e.finder, len(src), e.parameters.block_bits, allocator) or_return
-		records = fast_records_make(min(len(src), PLAIN_BLOCK), LAZY_MATCH_MIN, allocator) or_return
+		lazy_finder_make(&e.finder, len(input), e.parameters.block_bits, allocator) or_return
+		records = fast_records_make(min(len(input), PLAIN_BLOCK), LAZY_MATCH_MIN, allocator) or_return
 	case:
-		finder_make(&e.finder, len(src), e.parameters.block_bits, allocator) or_return
+		finder_make(&e.finder, len(input), e.parameters.block_bits, allocator) or_return
 	}
 
+	encode_stream(e, block, optimal, &parsed, records, window_bits, meta_block_max) or_return
+
+	return e.writer.err
+}
+
+// Readies `e` to encode `src` at `level`; returns the window bits of the
+// stream.
+encoder_begin :: proc(e: ^Encoder, src: []u8, level: Level) -> (window_bits: int) {
+	e.src = src
+	e.ring = {4, 11, 15, 16}
+	e.level = Level(min(int(level), len(PARAMETERS) - 1))
+	e.parameters = PARAMETERS[e.level]
+	window_bits = clamp(bits.len_u32(u32(min(len(src) + 15, 1 << 30))), WINDOW_BITS_MIN, WINDOW_BITS_MAX)
+	e.window_max = 1 << uint(window_bits) - 16
+
+	return
+}
+
+// Allocator of a buffer that cannot grow: every request fails.
+fixed_allocator_proc :: proc(
+	allocator_data: rawptr,
+	mode: runtime.Allocator_Mode,
+	size, alignment: int,
+	old_memory: rawptr,
+	old_size: int,
+	location := #caller_location,
+) -> ([]byte, runtime.Allocator_Error) {
+	return nil, .Out_Of_Memory
+}
+
+// An empty dynamic array over `backing` that reports an error instead of
+// growing past it.
+fixed_buffer :: proc(backing: []u8) -> [dynamic]u8 {
+	return transmute([dynamic]u8)runtime.Raw_Dynamic_Array{raw_data(backing), 0, len(backing), {fixed_allocator_proc, nil}}
+}
+
+// Writes the whole stream for e.src to e.writer, at most `meta_block_max`
+// input bytes per meta-block. `block` is the model of the levels above
+// PLAIN_LEVEL_MAX, `optimal` and `parsed` the state of the optimal ones,
+// `records` the room of the others.
+encode_stream :: proc(
+	e: ^Encoder,
+	block: ^Meta_Block,
+	optimal: ^Optimal,
+	parsed: ^[dynamic]Command,
+	records: []Fast_Record,
+	window_bits, meta_block_max: int,
+) -> runtime.Allocator_Error {
+	src := e.src
 	w := &e.writer
 
 	switch {
@@ -224,15 +378,15 @@ encode_meta_blocks :: proc(
 
 		if optimal != nil {
 			// Parsed a block at a time, modelled and coded as one meta-block.
-			clear(&parsed)
+			clear(parsed)
 
 			for from := start; from < end; from += OPTIMAL_BLOCK {
 				clear(&e.commands)
 				parse_optimal(e, optimal, block, from, min(from + OPTIMAL_BLOCK, end)) or_return
-				join_commands(&parsed, e.commands[:]) or_return
+				join_commands(parsed, e.commands[:]) or_return
 			}
 
-			e.commands, parsed = parsed, e.commands
+			e.commands, parsed^ = parsed^, e.commands
 		} else if e.level <= PLAIN_LEVEL_MAX {
 			write_fast_meta_block(e, records, start, end, end == len(src)) or_return
 			start = end
@@ -257,14 +411,7 @@ encode_meta_blocks :: proc(
 
 	flush_bits(w)
 
-	if w.err != nil {
-		delete(w.out)
-		return nil, w.err
-	}
-
-	shrink(&w.out)
-
-	return w.out[:], nil
+	return nil
 }
 
 // Bytes looked at together when the end of a meta-block is chosen.
