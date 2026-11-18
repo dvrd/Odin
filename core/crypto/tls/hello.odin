@@ -450,6 +450,9 @@ hello_put_extension :: proc(dst: []u8, at: ^int, extension: Extension_Type, size
 	hello_put_u16(dst, at, cast(u16)size)
 }
 
+// Offset of ClientHello.random in the handshake message: header, legacy_version.
+CLIENT_HELLO_RANDOM_OFFSET :: 4 + 2
+
 // ServerHello wire format
 
 // Our offer has an empty session ID, one cipher, and one key share. A full

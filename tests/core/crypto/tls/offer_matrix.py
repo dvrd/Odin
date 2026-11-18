@@ -4,6 +4,8 @@
 Client half: the blocking client restricted to each cipher suite and group,
 against `openssl s_server` holding Ed25519, RSA, ECDSA P-256 and ECDSA P-384
 credentials and forced signature algorithms.
+Socket half: upstream's Socket API with its whole offer against `openssl
+s_server` with each credential, each suite, and ALPN.
 Server half: the asynchronous server engine against `openssl s_client`
 restricted to each cipher suite and group, with RSA and ECDSA P-256
 credentials (the only keys the credential store signs with).
@@ -54,6 +56,22 @@ def client_case(a, client, cert, key, roots, name, suite, group, sigalgs):
         server.communicate()
 
 
+def socket_case(a, program, cert, key, roots, name, suite):
+    port = free_port()
+    command = [a.openssl, 's_server', '-accept', f'127.0.0.1:{port}', '-cert', str(cert), '-key', str(key),
+               '-tls1_3', '-ciphersuites', suite, '-alpn', 'http/1.1', '-rev', '-quiet']
+    server = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        wait_listening(port, server)
+        result = subprocess.run([str(program), '127.0.0.1', str(port), str(roots), name], capture_output=True, text=True, timeout=30)
+        if result.returncode != 0 or result.stdout.strip() != f'OK {suite} Http_1_1':
+            raise RuntimeError(f'socket {suite} {name}: {result.stdout}{result.stderr}')
+        return result.stdout.strip()
+    finally:
+        server.kill()
+        server.communicate()
+
+
 def server_case(a, server_binary, cert, key, roots, name, suite, groups, hellos=1):
     server = subprocess.Popen([str(server_binary), str(cert), str(key)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
@@ -91,7 +109,7 @@ def main():
     mtls = root / 'core/crypto/tls/testdata/mtls'
     build = pathlib.Path(a.build)
     build.mkdir(parents=True, exist_ok=True)
-    for program in ['client', 'server']:
+    for program in ['client', 'server', 'socket']:
         subprocess.run([a.odin, 'build', str(here / 'offer_matrix' / program), '-out:' + str(build / program)], check=True)
 
     ed25519 = (here / 'testdata/leaf.pem', here / 'testdata/key.pem', here / 'testdata/root.pem', 'localhost')
@@ -116,6 +134,10 @@ def main():
         for (cert, key, roots, name), sigalg in signatures:
             for suite in SUITES:
                 record(f'client {suite} X25519 {sigalg}', client_case(a, build / 'client', cert, key, roots, name, suite, 'X25519', sigalg))
+
+        for label, credential in [('ed25519', ed25519), ('rsa', rsa), ('ecdsa-p256', p256), ('ecdsa-p384', p384)]:
+            for suite in SUITES:
+                record(f'socket {suite} {label}', socket_case(a, build / 'socket', *credential, suite))
 
         for suite in SUITES:
             for group in GROUPS:

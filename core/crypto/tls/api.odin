@@ -5,7 +5,6 @@ import "core:io"
 import "core:net"
 import "core:time"
 import "core:sync"
-import "core:sync/chan"
 
 // Error is the common error returned from all TLS calls.
 Error :: union #shared_nil {
@@ -76,16 +75,23 @@ Socket_State :: struct {
 	err:      Error,
 	err_lock: sync.Benaphore,
 
-	secrets: Connection_Secrets,
+	// The client engine behind the socket, owned from a successful
+	// handshake until close.
+	conn: ^Conn,
 
 	rx_closed:  bool,
 	handshaked: bool,
+	// Set by close before it shuts the connection down: what a blocked
+	// send or recv then fails with is the close, not an error.
+	closing:    bool,
+	// The peer asked for new keys in the send direction: recv notes
+	// it here, and the sender answers before its next record.
+	key_update_owed: bool,
 
-	done:         sync.Wait_Group,
-	tx_chan:      chan.Chan(Worker_Req),
-	tx_resp_chan: chan.Chan(Worker_Resp),
-	rx_chan:      chan.Chan(Worker_Req),
-	rx_resp_chan: chan.Chan(Worker_Resp),
+	// send and recv may be called from two threads at once: each
+	// direction of the engine is serialized by its own lock.
+	tx_lock: sync.Mutex,
+	rx_lock: sync.Mutex,
 
 	allocator: runtime.Allocator,
 }
@@ -111,40 +117,16 @@ close :: proc(socket: ^Socket, max_close_wait := 100 * time.Millisecond) {
 		net.close(socket.fd)
 
 		socket.fd = net.TCP_Socket{}
-		clear_connection_secrets(&socket._state.secrets)
 
 		socket_set_error(socket, orig_err)
 		return
 	}
 
-	// Try to send a Close_Notify.
-	worker_send_alert(socket, .Close_Notify)
-
-	// Close the channels so the worker threads will terminate,
-	// assuming they are not blocked on send/recv.
-	chan.close(socket._state.tx_chan)
-	chan.close(socket._state.rx_chan)
-
-	// Wait for the workers to terminate.
-	ok := sync.wait_with_timeout(&socket._state.done, max_close_wait)
-
-	// Well, we waited, yeet the socket.
-	net.close(socket.fd)
-
-	if !ok {
-		// The threads did not terminate when we closed the channels,
-		// so they must have been blocked on send/recv.  Now that the
-		// socket got yeeted off to Narnia to chill with the Lion,
-		// we can wait, because the threads will error out.
-		sync.wait(&socket._state.done)
-	}
+	// Try to send a Close_Notify, close the TCP socket, and wait for
+	// send/recv calls on other threads to leave the engine.
+	socket_engine_close(socket, max_close_wait)
 
 	socket.fd = net.TCP_Socket{}
-	clear_connection_secrets(&socket._state.secrets)
-	chan.destroy(socket._state.tx_chan)
-	chan.destroy(socket._state.tx_resp_chan)
-	chan.destroy(socket._state.rx_chan)
-	chan.destroy(socket._state.rx_resp_chan)
 	socket._state.handshaked = false
 
 	// Restore the original error, or set it to Closed.
@@ -168,29 +150,7 @@ send :: proc(socket: ^Socket, buf: []byte) -> (n: int, err: Error) {
 		return
 	}
 
-	req := Worker_Req{
-		op = .Transfer,
-		data = buf,
-	}
-	if !chan.send(socket._state.tx_chan, req) {
-		err = socket_error(socket)
-		if err == nil {
-			err = io.Error.Unknown
-		}
-		return
-	}
-
-	resp, ok := chan.recv(socket._state.tx_resp_chan)
-	if !ok {
-		// Unlikely to happen.
-		err = socket_error(socket)
-		if err == nil {
-			err = io.Error.Unknown
-		}
-		return
-	}
-
-	return resp.n, resp.err
+	return socket_engine_send(socket, buf)
 }
 
 // recv receives data from an established Socket into the provided buffer,
@@ -217,33 +177,12 @@ recv :: proc(socket: ^Socket, buf: []byte) -> (n: int, err: Error) {
 		return 0, nil
 	}
 
-	req := Worker_Req{
-		op = .Transfer,
-		data = buf,
-	}
-	if !chan.send(socket._state.rx_chan, req) {
-		err = socket_error(socket)
-		if err == nil {
-			err = io.Error.Unknown
-		}
-		return
-	}
-
-	resp, ok := chan.recv(socket._state.rx_resp_chan)
-	if !ok {
-		// Should NEVER happen.
-		err = socket_error(socket)
-		if err == nil {
-			err = io.Error.Unknown
-		}
-		return
-	}
-
-	if resp.err == Protocol_Error.Close_Notify {
+	n, err = socket_engine_recv(socket, buf)
+	if err == Protocol_Error.Close_Notify {
 		socket._state.rx_closed = true
 	}
 
-	return resp.n, resp.err
+	return
 }
 
 // socket_error returns the error status of a Socket.

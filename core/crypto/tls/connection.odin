@@ -6,6 +6,7 @@ import credential_store "credentials/store"
 import "core:mem"
 import trans "core:net"
 import "core:net"
+import "core:os"
 import "core:time"
 
 // Connection configuration and state
@@ -46,6 +47,15 @@ Config :: struct {
 	// these groups, each sent with its key share. Nil keeps upstream's lists.
 	cipher_suites: []Cipher_Suite,
 	groups: []Named_Group,
+	// Debugging options that destroy security, as upstream's client_handshake
+	// takes them: the certificate chain is parsed but not verified (the
+	// CertificateVerify signature still is), and the traffic secrets are
+	// written in NSS key log format to a file the connection then closes.
+	unsafe_skip_verify: bool,
+	unsafe_secret_logger: ^os.File,
+	// An empty root_cas stays empty instead of loading the platform anchors:
+	// verification then fails for want of an authority.
+	no_system_roots: bool,
 }
 
 Client_Error :: enum {
@@ -176,7 +186,7 @@ config_validate :: proc(config: Config) -> Client_Error {
 
 	// A nil slice is omitted trust and fails before any dial. A non-nil empty
 	// slice asks for platform anchors. Verification is never skipped.
-	if raw_data(config.root_cas) == nil {
+	if raw_data(config.root_cas) == nil && !config_roots_optional(config) {
 		return .Missing_Trust_Roots
 	}
 	for root in config.root_cas {
@@ -221,6 +231,11 @@ client :: proc(conn: ^Conn, underlying: trans.Connection, config: Config) -> Cli
 	return .None
 }
 
+// Whether the configuration may leave root_cas empty.
+config_roots_optional :: proc(config: Config) -> bool {
+	return config.unsafe_skip_verify || config.no_system_roots
+}
+
 // Loads Darwin/Unix system anchors for a non-nil empty root list.
 // A nil list is omitted trust. An explicit slice is not combined with the system store.
 client_trust :: proc(
@@ -232,7 +247,7 @@ client_trust :: proc(
 	err: Client_Error,
 ) {
 	settings = config
-	if len(settings.root_cas) == 0 {
+	if len(settings.root_cas) == 0 && !config_roots_optional(config) {
 		if raw_data(settings.root_cas) == nil {
 			return {}, nil, {}, .Missing_Trust_Roots
 		}

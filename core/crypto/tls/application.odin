@@ -140,7 +140,23 @@ read :: proc(conn: ^Conn, dst: []u8) -> (received: int, error: IO_Error) {
 
 	if conn.tls12.negotiated do return tls12_application_read(conn, dst)
 
-	if len(dst) == 0 do return 0, {}
+	received, error = application_read_records(conn, dst)
+	if error.kind != .None && error.kind != .EOF {
+		return 0, application_fail(conn, error)
+	}
+	return received, error
+}
+
+// The receive direction of an established TLS 1.3 connection: it touches
+// only the receive protection, the inbound buffer and the server's traffic
+// secret, so one thread may run it while another runs
+// application_write_records. A failure is returned, not recorded: the caller
+// owns the connection's terminal state. A KeyUpdate request is answered here
+// unless conn.defer_key_updates leaves key_update_pending for the caller.
+application_read_records :: proc(conn: ^Conn, dst: []u8) -> (received: int, error: IO_Error) {
+	if len(dst) == 0 {
+		return 0, {}
+	}
 
 	state := &conn.application
 	if state.inbound_at < state.inbound_size {
@@ -149,61 +165,65 @@ read :: proc(conn: ^Conn, dst: []u8) -> (received: int, error: IO_Error) {
 		return count, {}
 	}
 
-	if state.peer_closed do return 0, {kind = .EOF}
+	if state.peer_closed {
+		return 0, {kind = .EOF}
+	}
 
 	for _ in 0 ..< MAX_NON_APPLICATION_RECORDS {
 		content_type, content, record_err := application_record_read(conn)
 		if record_err.kind != .None {
-			return 0, application_fail(conn, record_err)
+			return 0, record_err
 		}
 
 		if state.post_used > 0 && content_type != .Handshake {
-			return 0, application_fail(conn, {kind = .Interleaved_Record})
+			return 0, {kind = .Interleaved_Record}
 		}
 
 		#partial switch content_type {
 		case .Application_Data:
-			if len(content) == 0 do continue
+			if len(content) == 0 {
+				continue
+			}
 
 			state.inbound_at = copy(dst, content)
 			state.inbound_size = len(content)
 			return state.inbound_at, {}
 		case .Alert:
-			if alert_error := application_alert_read(conn, content); alert_error.kind != .None {
+			if alert_error := application_alert_apply(state, content); alert_error.kind != .None {
 				return 0, alert_error
 			}
-			continue
 		case .Handshake:
 			if err := application_post_handshake(conn, content); err.kind != .None {
-				return 0, application_fail(conn, err)
+				return 0, err
 			}
-
 		case:
-			return 0, application_fail(conn, {kind = .Unexpected_Content_Type})
+			return 0, {kind = .Unexpected_Content_Type}
 		}
 	}
-	return 0, application_fail(conn, {kind = .No_Progress})
+	return 0, {kind = .No_Progress}
 }
 
 application_alert_read :: proc(conn: ^Conn, content: []u8) -> IO_Error {
-	state := &conn.application
+	err := application_alert_apply(&conn.application, content)
+	if err.kind == .Peer_Alert {
+		return application_fail(conn, err)
+	}
+	return err
+}
+
+// close_notify ends the receive direction (EOF) and user_canceled is
+// ignored; any other alert is the peer's fatal error, returned unrecorded.
+application_alert_apply :: proc(state: ^Application_State, content: []u8) -> IO_Error {
 	switch content[1] {
 	case 0:
-		// close_notify
 		state.peer_closed = true
 		record_protection_clear(&state.receive)
 		crypto.zero_explicit(&state.secrets.server_secret, size_of(state.secrets.server_secret))
 		return {kind = .EOF}
 	case 90:
-		// user_canceled; normally followed by close_notify.
 		return {}
-	case:
-		return application_fail(
-			conn,
-			{kind = .Peer_Alert, alert_level = content[0], alert_description = content[1]},
-		)
 	}
-	return {}
+	return {kind = .Peer_Alert, alert_level = content[0], alert_description = content[1]}
 }
 
 // Splits application bytes into records of at most 16KiB. A partial transport
@@ -215,18 +235,28 @@ write :: proc(conn: ^Conn, src: []u8) -> (written: int, error: IO_Error) {
 	}
 	if conn.tls12.negotiated do return tls12_application_write(conn, src)
 
+	written, error = application_write_records(conn, src)
+	if error.kind != .None {
+		return written, application_fail(conn, error)
+	}
+	return written, {}
+}
+
+// The send direction of an established TLS 1.3 connection: it touches only
+// the send protection and the client's traffic secret. A failure is
+// returned, not recorded.
+application_write_records :: proc(conn: ^Conn, src: []u8) -> (written: int, error: IO_Error) {
 	for written < len(src) {
 		// Reserve the final allowed old-key record for KeyUpdate itself.
 		if application_send_key_exhausted(&conn.application) {
 			if err := application_send_key_update(conn); err.kind != .None {
-				return written, application_fail(conn, err)
+				return written, err
 			}
 		}
 
 		count := min(MAX_PLAINTEXT_SIZE, len(src) - written)
-		if err := application_record_write(conn, .Application_Data, src[written:][:count]);
-		   err.kind != .None {
-			return written, application_fail(conn, err)
+		if err := application_record_write(conn, .Application_Data, src[written:][:count]); err.kind != .None {
+			return written, err
 		}
 
 		written += count

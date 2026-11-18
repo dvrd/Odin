@@ -335,13 +335,11 @@ handshake_flight_certificates_verify :: proc(
 	}
 
 	defer server_certificates_destroy(&certs)
-	if err := verify_server_certificates(
-		&certs,
-		conn.config.server_name,
-		conn.config.root_cas,
-		time.now(),
-	); err.kind != .None {
-		return handshake_fail(conn, {kind = .Authentication_Failed, authentication = err})
+	if !conn.config.unsafe_skip_verify {
+		err := verify_server_certificates(&certs, conn.config.server_name, conn.config.root_cas, time.now())
+		if err.kind != .None {
+			return handshake_fail(conn, {kind = .Authentication_Failed, authentication = err})
+		}
 	}
 
 	transcript_update(transcript, certificate)
@@ -1217,7 +1215,13 @@ client_handshake_secrets_install :: proc(conn: ^Conn) {
 
 	transcript: Handshake_Transcript
 	handshake_hello_transcript(conn, &transcript)
-	init_connection_secrets(&conn.secrets, &conn.keys, &transcript, CIPHER_SUITE_AEAD[suite], true, context.allocator, nil)
+	// The key log names the connection by the ClientHello random.
+	logger := conn.config.unsafe_secret_logger
+	client_random: []u8
+	if logger != nil {
+		client_random = conn.client_hello[CLIENT_HELLO_RANDOM_OFFSET:][:RANDOM_SIZE]
+	}
+	init_connection_secrets(&conn.secrets, &conn.keys, &transcript, CIPHER_SUITE_AEAD[suite], true, context.allocator, client_random, logger)
 
 	record_protection_init(&conn.handshake_send, &conn.secrets.client_aead)
 	record_protection_init(&conn.handshake_receive, &conn.secrets.server_aead)
