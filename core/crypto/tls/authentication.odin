@@ -2,6 +2,7 @@ package tls
 
 import "core:crypto/ecdsa"
 import "core:crypto/ed25519"
+import "core:crypto/hash"
 import "core:crypto/rsa"
 import "core:crypto/x509"
 import "core:time"
@@ -131,6 +132,7 @@ verify_certificate_signature :: proc(
 	message: []u8,
 	transcript_digest: []u8,
 	server: bool,
+	schemes: []Signature_Scheme = COMPATIBLE_SIGNATURE_SCHEMES,
 ) -> Authentication_Error {
 	if certs == nil || certs.count < 1 || certs.count > MAX_SERVER_CERTIFICATES {
 		return {kind = .Empty_Certificate_List}
@@ -152,6 +154,11 @@ verify_certificate_signature :: proc(
 		return {kind = .Length_Mismatch}
 	}
 
+	// Only a scheme the verifier offered may sign (RFC 8446 section 4.4.3).
+	if !signature_scheme_offered(schemes, scheme) {
+		return {kind = .Unsupported_Signature_Scheme}
+	}
+
 	signature := message[8:]
 	signed_storage: [MAX_CERTIFICATE_VERIFY_INPUT_SIZE]u8
 	signed := certificate_verify_content(signed_storage[:], transcript_digest, server)
@@ -169,6 +176,9 @@ verify_certificate_signature :: proc(
 	return {}
 }
 
+// Verifies signature over signed with the leaf's key under scheme: every
+// scheme of upstream's SIGNATURE_SCHEMES, through upstream's scheme tables.
+// The caller has already restricted scheme to the ones it offered.
 authentication_signature_check :: proc(
 	leaf: ^x509.Certificate,
 	scheme: Signature_Scheme,
@@ -177,13 +187,19 @@ authentication_signature_check :: proc(
 	bool,
 	Authentication_Error,
 ) {
-	valid: bool
-	#partial switch scheme {
-	case .Ed25519:
-		if leaf.public_key_algorithm != .Ed25519 {
-			return false, {kind = .Signature_Key_Mismatch}
-		}
+	if !signature_scheme_offered(SIGNATURE_SCHEMES, scheme) {
+		return false, {kind = .Unsupported_Signature_Scheme}
+	}
 
+	key_type := SIGNATURE_SCHEME_TO_X509_PUBLIC_KEY[scheme]
+	if key_type != leaf.public_key_algorithm {
+		return false, {kind = .Signature_Key_Mismatch}
+	}
+
+	algorithm := SIGNATURE_SCHEME_HASH[scheme]
+	valid: bool
+	#partial switch key_type {
+	case .Ed25519:
 		pub: ed25519.Public_Key
 		if !ed25519.public_key_set_bytes(&pub, leaf.ec_point) {
 			return false, {kind = .Invalid_Public_Key}
@@ -191,35 +207,40 @@ authentication_signature_check :: proc(
 
 		defer ed25519.public_key_clear(&pub)
 		valid = ed25519.verify(&pub, signed, signature)
-	case .Ecdsa_Secp256r1_Sha256:
-		if leaf.public_key_algorithm != .ECDSA_P256 {
-			return false, {kind = .Signature_Key_Mismatch}
+	case .ECDSA_P256, .ECDSA_P384:
+		curve := ecdsa.Curve.SECP256R1
+		if key_type == .ECDSA_P384 {
+			curve = .SECP384R1
 		}
 
 		pub: ecdsa.Public_Key
-		if !ecdsa.public_key_set_bytes(&pub, .SECP256R1, leaf.ec_point) {
+		if !ecdsa.public_key_set_bytes(&pub, curve, leaf.ec_point) {
 			return false, {kind = .Invalid_Public_Key}
 		}
 
 		defer ecdsa.public_key_clear(&pub)
-		valid = ecdsa.verify_asn1(&pub, .SHA256, signed, signature)
-	case .Rsa_Pss_Rsae_Sha256:
-		if leaf.public_key_algorithm != .RSA {
-			return false, {kind = .Signature_Key_Mismatch}
-		}
-
+		valid = ecdsa.verify_asn1(&pub, algorithm, signed, signature)
+	case .RSA:
 		pub: rsa.Public_Key
 		if !rsa.public_key_set_bytes(&pub, leaf.rsa_n, leaf.rsa_e) {
 			return false, {kind = .Invalid_Public_Key}
 		}
 
 		defer rsa.public_key_clear(&pub)
-		// TLS requires MGF1 with the same hash and a digest-sized salt.
-		valid = rsa.verify_pss(&pub, .SHA256, 32, signed, signature, mgf1_algo = .SHA256)
+		if signature_scheme_is_pkcs1(scheme) {
+			valid = rsa.verify_pkcs1(&pub, algorithm, signed, signature)
+		} else {
+			// TLS requires MGF1 with the same hash and a digest-sized salt.
+			valid = rsa.verify_pss(&pub, algorithm, hash.DIGEST_SIZES[algorithm], signed, signature, mgf1_algo = algorithm)
+		}
 	case:
 		return false, {kind = .Unsupported_Signature_Scheme}
 	}
 	return valid, {}
+}
+
+signature_scheme_is_pkcs1 :: proc(scheme: Signature_Scheme) -> bool {
+	return scheme == .Rsa_Pkcs1_Sha256 || scheme == .Rsa_Pkcs1_Sha384 || scheme == .Rsa_Pkcs1_Sha512
 }
 
 authentication_certificates_parse_into :: proc(

@@ -257,8 +257,7 @@ tls12_client_establish :: proc(conn: ^Conn) -> Handshake_Error {
 		version      = TLS12_VERSION,
 		cipher_suite = cast(Cipher_Suite)conn.tls12.cipher,
 	}
-	crypto.zero_explicit(&conn.x25519_private_key, size_of(conn.x25519_private_key))
-	crypto.zero_explicit(&conn.shared_secret, size_of(conn.shared_secret))
+	clear_ephemeral_keys(&conn.ephemeral)
 	tls12_prefix_release(conn)
 	conn.application.initialized = true
 	conn.phase = .Established

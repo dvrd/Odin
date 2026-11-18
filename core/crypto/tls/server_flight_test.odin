@@ -105,7 +105,9 @@ server_flight_crypto_order_streaming_and_pin :: proc(t: ^testing.T) {
 					hs, he := handshake_secrets_derive(shared, hello, sh); assert(he == .None)
 					expected_hs = hs
 					transcript_update(&reference, sh)
-					testing.expect_value(t, expected_hs, o._flight.handshake)
+					testing.expect_value(t, string(o._flight.client_handshake_secret[:32]), string(expected_hs.client_traffic_secret[:]))
+					testing.expect_value(t, string(o._flight.server_handshake_secret[:32]), string(expected_hs.server_traffic_secret[:]))
+					testing.expect_value(t, o._flight.cipher, Cipher_Suite.TLS_AES_128_GCM_SHA256)
 				} else {
 					append(&flight, ..event.bytes)
 					transcript_update(&reference, event.bytes)
@@ -157,7 +159,8 @@ server_flight_crypto_order_streaming_and_pin :: proc(t: ^testing.T) {
 		}
 		testing.expect_value(t, secret_index, 4)
 		testing.expect_value(t, o._phase, .Await_Client_Finished)
-		testing.expect(t, mem.check_zero_ptr(&o._flight.handshake, size_of(o._flight.handshake)))
+		testing.expect(t, mem.check_zero_ptr(&o._flight.keys, size_of(o._flight.keys)))
+		testing.expect(t, mem.check_zero_ptr(&o._flight.server_handshake_secret, size_of(o._flight.server_handshake_secret)))
 		testing.expect(
 			t,
 			mem.check_zero_ptr(&o._flight.application, size_of(o._flight.application)),

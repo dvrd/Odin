@@ -2,7 +2,6 @@ package tls
 
 import "core:crypto"
 import "core:crypto/hash"
-import "core:crypto/x25519"
 import "core:mem"
 import transport "core:net"
 import "core:net"
@@ -367,7 +366,8 @@ handshake_flight_signature_verify :: proc(
 
 	digest_storage: [MAX_TRANSCRIPT_HASH_SIZE]u8
 	digest := transcript_hash(transcript, digest_storage[:])
-	if err := verify_certificate_signature(certs, certificate_verify, digest, true);
+	schemes := client_offer_signature_schemes(conn.config.offer)
+	if err := verify_certificate_signature(certs, certificate_verify, digest, true, schemes);
 	   err.kind != .None {
 		return handshake_fail(conn, {kind = .Authentication_Failed, authentication = err})
 	}
@@ -689,8 +689,11 @@ client_hello_prepare :: proc(conn: ^Conn) -> Client_Hello_Send_Error {
 	}
 	crypto.rand_bytes(hello.random[:])
 	conn.tls12.client_random = hello.random
-	crypto.rand_bytes(conn.x25519_private_key[:])
-	x25519.scalarmult_basepoint(hello.x25519_public_key[:], conn.x25519_private_key[:])
+
+	clear_ephemeral_keys(&conn.ephemeral)
+	if !init_ephemeral_keys(&conn.ephemeral, config_groups(&conn.config)) {
+		return client_hello_fail(conn, {kind = .Entropy_Unavailable})
+	}
 	// One flight offers TLS 1.3 and the two TLS 1.2 AES-GCM suites. The
 	// TLS 1.3-only encoder stays available for tests and is not this path.
 	conn.psk_offered = false
@@ -700,7 +703,7 @@ client_hello_prepare :: proc(conn: ^Conn) -> Client_Hello_Send_Error {
 	conn.early_accepted = false
 	conn.early_rejected = false
 	conn.early_effect_done = false
-	size, encode_err := compatible_client_hello_encode(conn.client_hello[:], hello)
+	size, encode_err := client_hello_offer_encode(conn, &hello)
 	if encode_err != .None {
 		return client_hello_fail(conn, {kind = .Encode_Failed, encode = encode_err})
 	}
@@ -727,6 +730,30 @@ client_hello_prepare :: proc(conn: ^Conn) -> Client_Hello_Send_Error {
  conn.client_hello_size = size
 
 	return {}
+}
+
+// Encodes the first flight of the configured offer from the fresh ephemeral
+// keys of conn.
+client_hello_offer_encode :: proc(conn: ^Conn, hello: ^Client_Hello) -> (int, Client_Hello_Error) {
+	if conn.config.offer == .Upstream {
+		return upstream_client_hello_encode(conn.client_hello[:], hello^, config_cipher_suites(&conn.config), &conn.ephemeral)
+	}
+
+	client_key_share_bytes(&conn.ephemeral, .X25519, hello.x25519_public_key[:])
+	return compatible_client_hello_encode(conn.client_hello[:], hello^)
+}
+
+// The largest ServerHello the offer of conn can be answered with.
+server_hello_cap :: proc(conn: ^Conn) -> int {
+	if conn.config.offer == .Upstream {
+		return MAX_UPSTREAM_SERVER_HELLO_SIZE
+	}
+	return MAX_SERVER_HELLO_SIZE
+}
+
+// Reassembly storage for one ServerHello or HelloRetryRequest of the offer.
+server_hello_storage_size :: proc(conn: ^Conn) -> int {
+	return max(MAX_HELLO_RETRY_REQUEST_SIZE, server_hello_cap(conn))
 }
 
 client_hello_send :: proc(conn: ^Conn) -> Client_Hello_Send_Error {
@@ -762,7 +789,7 @@ client_hello_fail :: proc(conn: ^Conn, err: Client_Hello_Send_Error) -> Client_H
 	conn.early_accepted = false
 	conn.early_rejected = false
 	conn.early_effect_done = false
-	crypto.zero_explicit(&conn.x25519_private_key, size_of(conn.x25519_private_key))
+	clear_ephemeral_keys(&conn.ephemeral)
 	return err
 }
 
@@ -814,13 +841,15 @@ server_hello_read :: proc(conn: ^Conn) -> Server_Hello_Read_Error {
 		return {kind = .Invalid_State}
 	}
 
-	message: [MAX_HELLO_RETRY_REQUEST_SIZE]u8
-	received, read_error := server_hello_message_read(conn, message[:])
+	storage: [MAX_SERVER_HELLO_MESSAGE_SIZE]u8
+	message := storage[:server_hello_storage_size(conn)]
+	received, read_error := server_hello_message_read(conn, message)
 	if read_error.kind != .None do return server_hello_fail(conn, read_error)
 	if hello_is_retry(message[:received]) {
 		return server_hello_retry_accept(conn, message[:received])
 	}
-	if tls12_server_hello_selected(message[:received]) {
+	// Only the Compatible offer carries the TLS 1.2 suites.
+	if conn.config.offer == .Compatible && tls12_server_hello_selected(message[:received]) {
 		return tls12_server_hello_accept(conn, message[:received])
 	}
 	if conn.tls12.prefix != nil {
@@ -832,6 +861,7 @@ server_hello_read :: proc(conn: ^Conn) -> Server_Hello_Read_Error {
 server_hello_message_append :: proc(
 	message, body: []u8,
 	received: ^int,
+	cap: int = MAX_SERVER_HELLO_SIZE,
 ) -> (
 	bool,
 	Server_Hello_Read_Error,
@@ -855,7 +885,7 @@ server_hello_message_append :: proc(
 
 	if received^ >= 38 &&
 	   !hello_is_retry(message[:received^]) &&
-	   expected > MAX_SERVER_HELLO_SIZE {
+	   expected > cap {
 		return false, {kind = .Message_Oversized}
 	}
 
@@ -884,18 +914,28 @@ server_hello_ccs_validate :: proc(body: []u8, ignored_ccs: ^int) -> Server_Hello
 // TLS 1.3 still rejects a ServerHello that shares its record with later
 // handshake bytes. TLS 1.2 keeps that tail for the certificate flight. The
 // 90-byte cap applies once the suite is TLS 1.3; a retry may be larger.
-server_hello_message_limit :: proc(message: []u8, received: int) -> (int, Server_Hello_Read_Error) {
+server_hello_message_limit :: proc(
+	message: []u8,
+	received: int,
+	cap: int = MAX_SERVER_HELLO_SIZE,
+) -> (
+	int,
+	Server_Hello_Read_Error,
+) {
 	if received < 4 do return len(message), {}
 	if received >= 39 && int(message[38]) > 32 {
 		return 0, {kind = .Invalid_Server_Hello, decode = .Session_ID_Mismatch}
 	}
 	limit := len(message)
 	if received >= 38 && !hello_is_retry(message[:received]) {
-		limit = TLS12_MAX_SERVER_HELLO_SIZE
+		// Until the suite is read, either version's cap may apply.
+		limit = max(TLS12_MAX_SERVER_HELLO_SIZE, cap)
 		if cipher, ok := tls12_server_hello_cipher(message[:received]); ok &&
 		   cipher != TLS12_ECDHE_RSA_AES128_GCM_SHA256 &&
 		   cipher != TLS12_ECDHE_ECDSA_AES128_GCM_SHA256 {
-			limit = MAX_SERVER_HELLO_SIZE
+			limit = cap
+		} else if ok {
+			limit = TLS12_MAX_SERVER_HELLO_SIZE
 		}
 	}
 	expected := 4 + handshake_body_size(message)
@@ -908,6 +948,7 @@ server_hello_message_limit :: proc(message: []u8, received: int) -> (int, Server
 server_hello_consume :: proc(
 	message, body: []u8,
 	received: ^int,
+	cap: int = MAX_SERVER_HELLO_SIZE,
 ) -> (
 	complete: bool,
 	consumed: int,
@@ -916,7 +957,7 @@ server_hello_consume :: proc(
 	for consumed < len(body) {
 		expected := len(message)
 		if received^ >= 4 {
-			var_expected, limit_error := server_hello_message_limit(message, received^)
+			var_expected, limit_error := server_hello_message_limit(message, received^, cap)
 			if limit_error.kind != .None do return false, consumed, limit_error
 			expected = var_expected
 			if received^ == expected do return true, consumed, {}
@@ -934,7 +975,7 @@ server_hello_consume :: proc(
 		consumed += n
 	}
 	if received^ >= 4 {
-		expected, limit_error := server_hello_message_limit(message, received^)
+		expected, limit_error := server_hello_message_limit(message, received^, cap)
 		if limit_error.kind != .None do return false, consumed, limit_error
 		if received^ == expected do return true, consumed, {}
 	}
@@ -961,7 +1002,7 @@ server_hello_message_read :: proc(conn: ^Conn, message: []u8) -> (int, Server_He
 			if ccs_error := server_hello_ccs_validate(body, &ignored_ccs); ccs_error.kind != .None do return 0, ccs_error
 			continue
 		case .Handshake:
-			complete, consumed, append_error := server_hello_consume(message, body, &received)
+			complete, consumed, append_error := server_hello_consume(message, body, &received, server_hello_cap(conn))
 			if append_error.kind != .None do return 0, append_error
 			if !complete do continue
 			if consumed < len(body) {
@@ -991,7 +1032,7 @@ server_hello_retry_accept :: proc(conn: ^Conn, message: []u8) -> Server_Hello_Re
 		)
 	}
 
-	cookie, cookie_error := hello_retry_request_decode(message)
+	cookie, cookie_error := hello_retry_request_decode(message, config_cipher_suites(&conn.config))
 	if cookie_error != .None {
 		return server_hello_fail(conn, {kind = .Invalid_Server_Hello, decode = cookie_error})
 	}
@@ -1007,19 +1048,40 @@ server_hello_retry_accept :: proc(conn: ^Conn, message: []u8) -> Server_Hello_Re
 server_hello_accept :: proc(conn: ^Conn, message: []u8) -> Server_Hello_Read_Error {
 	received := len(message)
 	copy(conn.server_hello[:], message[:received])
-	parameters, decode_err := server_hello_decode(conn.server_hello[:received], conn.psk_offered)
+	parameters, decode_err := server_hello_decode_offered(
+		conn.server_hello[:received],
+		config_cipher_suites(&conn.config),
+		config_groups(&conn.config),
+		conn.psk_offered,
+	)
+	defer crypto.zero_explicit(&parameters, size_of(parameters))
 	if decode_err != .None {
 		return server_hello_fail(conn, {kind = .Invalid_Server_Hello, decode = decode_err})
 	}
 
-	x25519.scalarmult(
-		conn.shared_secret[:],
-		conn.x25519_private_key[:],
-		parameters.x25519_public_key[:],
+	algorithm := CIPHER_SUITE_HASH[parameters.cipher_suite]
+
+	// RFC 8446 section 4.1.4: the suite of a retry binds the ServerHello.
+	if conn.retry_transcript_size != 0 && algorithm != client_hello_retry_hash(conn.retry_transcript[conn.retry_message_hash_size:conn.retry_transcript_size]) {
+		return server_hello_fail(conn, {kind = .Invalid_Server_Hello, decode = .Unoffered_Cipher})
+	}
+
+	// Sessions hold SHA-256 PSKs: a PSK may only be selected with its hash.
+	if parameters.psk_selected && algorithm != .SHA256 {
+		return server_hello_fail(conn, {kind = .Invalid_Server_Hello, decode = .Unoffered_Cipher})
+	}
+
+	// Upstream's schedule from the early secret through the key exchange.
+	// RFC 8446 section 7.4.2: a low-order or malformed share fails here.
+	schedule_init(&conn.keys, algorithm, handshake_selected_psk(conn, parameters.psk_selected))
+	agreed := update_handshake_keys_ephemeral(
+		&conn.keys,
+		&conn.ephemeral,
+		parameters.group,
+		parameters.key_share[:parameters.key_share_size],
 	)
-	crypto.zero_explicit(&conn.x25519_private_key, size_of(conn.x25519_private_key))
-	// RFC 8446 section 7.4.2: reject low-order X25519 inputs.
-	if crypto.is_zero_constant_time(conn.shared_secret[:]) == 1 {
+	clear_ephemeral_keys(&conn.ephemeral)
+	if !agreed {
 		return server_hello_fail(conn, {kind = .Invalid_Key_Share})
 	}
 
@@ -1030,12 +1092,30 @@ server_hello_accept :: proc(conn: ^Conn, message: []u8) -> Server_Hello_Read_Err
 	return {}
 }
 
+// The PSK of the session the server selected, or nil when none was selected
+// or its session is gone (key installation reports that).
+handshake_selected_psk :: proc(conn: ^Conn, selected: bool) -> []u8 {
+	if !selected {
+		return nil
+	}
+
+	bound_session := conn.offered_session
+	if bound_session == nil {
+		bound_session = conn.config.session
+	}
+
+	if bound_session == nil || !bound_session.usable {
+		return nil
+	}
+	return bound_session.psk[:]
+}
+
 server_hello_fail :: proc(conn: ^Conn, err: Server_Hello_Read_Error) -> Server_Hello_Read_Error {
 	conn.phase = .Failed
 	alpn_clear(conn)
 	conn.server_hello_error = err
-	crypto.zero_explicit(&conn.x25519_private_key, size_of(conn.x25519_private_key))
-	crypto.zero_explicit(&conn.shared_secret, size_of(conn.shared_secret))
+	clear_ephemeral_keys(&conn.ephemeral)
+	clear_handshake_keys(&conn.keys)
 	return err
 }
 
@@ -1081,24 +1161,17 @@ client_handshake_keys_init :: proc(conn: ^Conn) -> Handshake_Keys_Error {
 		return {kind = .Invalid_State}
 	}
 
-	psk: []u8
-	if conn.psk_selected {
-		bound_session := conn.offered_session
-		if bound_session == nil {
-			bound_session = conn.config.session
-		}
-		if bound_session == nil || !bound_session.usable {
-			conn.phase = .Failed
-			alpn_clear(conn)
-			conn.offered_session = nil
-			conn.handshake_keys_error = {kind = .Derivation_Failed, cause = .Invalid_Secret_Length}
-			handshake_keys_clear(conn)
-			return conn.handshake_keys_error
-		}
-		// Handshake secrets only. 0-RTT packet keys are not installed here.
-		psk = bound_session.psk[:]
+	// Handshake secrets only. 0-RTT packet keys are not installed here.
+	if conn.psk_selected && handshake_selected_psk(conn, true) == nil {
+		conn.phase = .Failed
+		alpn_clear(conn)
+		conn.offered_session = nil
+		conn.handshake_keys_error = {kind = .Derivation_Failed, cause = .Invalid_Secret_Length}
+		handshake_keys_clear(conn)
+		return conn.handshake_keys_error
 	}
-	if err := client_handshake_schedule_check(conn, psk); err != .None {
+
+	if err := client_handshake_schedule_check(conn); err != .None {
 		conn.phase = .Failed
 		alpn_clear(conn)
 		conn.handshake_keys_error = {
@@ -1109,13 +1182,12 @@ client_handshake_keys_init :: proc(conn: ^Conn) -> Handshake_Keys_Error {
 		return conn.handshake_keys_error
 	}
 
-	client_handshake_secrets_install(conn, conn.shared_secret[:], psk)
-	crypto.zero_explicit(&conn.shared_secret, size_of(conn.shared_secret))
+	client_handshake_secrets_install(conn)
 	conn.phase = .Handshake_Keys_Ready
 	return {}
 }
 
-client_handshake_schedule_check :: proc(conn: ^Conn, psk: []u8) -> Key_Schedule_Error {
+client_handshake_schedule_check :: proc(conn: ^Conn) -> Key_Schedule_Error {
 	if !schedule_message_valid(handshake_effective_client_hello(conn), .Client_Hello) {
 		return .Invalid_Client_Hello
 	}
@@ -1128,27 +1200,20 @@ client_handshake_schedule_check :: proc(conn: ^Conn, psk: []u8) -> Key_Schedule_
 		return .Invalid_Server_Hello
 	}
 
-	digest_size := hash.DIGEST_SIZES[CIPHER_SUITE_HASH[conn.server_parameters.cipher_suite]]
-	if len(psk) != 0 && len(psk) != digest_size {
-		return .Invalid_Secret_Length
-	}
-
-	if crypto.is_zero_constant_time(conn.shared_secret[:]) == 1 {
+	// ServerHello acceptance left the handshake secret of the suite's hash.
+	if conn.keys.hash != CIPHER_SUITE_HASH[conn.server_parameters.cipher_suite] {
 		return .Invalid_Shared_Secret
 	}
 
 	return .None
 }
 
-// Runs upstream's schedule for the negotiated suite over the stored hello
-// messages: early secret (PSK or zero), handshake secret from the key
-// exchange output, then both handshake traffic secrets and their AEAD state,
-// which move into the record protections.
-client_handshake_secrets_install :: proc(conn: ^Conn, shared_secret: []u8, psk: []u8) {
+// Continues upstream's schedule from the handshake secret that ServerHello
+// acceptance left in conn.keys: both handshake traffic secrets over the
+// stored hello messages and their AEAD state, which move into the record
+// protections.
+client_handshake_secrets_install :: proc(conn: ^Conn) {
 	suite := conn.server_parameters.cipher_suite
-
-	schedule_init(&conn.keys, CIPHER_SUITE_HASH[suite], psk)
-	update_handshake_keys(&conn.keys, shared_secret)
 
 	transcript: Handshake_Transcript
 	handshake_hello_transcript(conn, &transcript)
@@ -1160,8 +1225,7 @@ client_handshake_secrets_install :: proc(conn: ^Conn, shared_secret: []u8, psk: 
 
 handshake_keys_clear :: proc(conn: ^Conn) {
  client_auth_clear(conn)
-	crypto.zero_explicit(&conn.x25519_private_key, size_of(conn.x25519_private_key))
-	crypto.zero_explicit(&conn.shared_secret, size_of(conn.shared_secret))
+	clear_ephemeral_keys(&conn.ephemeral)
 	clear_handshake_keys(&conn.keys)
 	clear_connection_secrets(&conn.secrets)
 	crypto.zero_explicit(&conn.resumption_master, size_of(conn.resumption_master))
@@ -1193,13 +1257,21 @@ MAX_RETRY_COOKIE_SIZE :: 1024
 MAX_HELLO_RETRY_REQUEST_SIZE :: 44 + 6 + 6 + MAX_RETRY_COOKIE_SIZE
 MAX_RETRY_TRANSCRIPT_SIZE :: MAX_MESSAGE_HASH_SIZE + MAX_HELLO_RETRY_REQUEST_SIZE
 MAX_RETRY_CLIENT_HELLO_SIZE :: MAX_CLIENT_HELLO_SIZE + 6 + MAX_RETRY_COOKIE_SIZE
+// Reassembly storage for a ServerHello of any offer or a HelloRetryRequest.
+MAX_SERVER_HELLO_MESSAGE_SIZE :: max(MAX_HELLO_RETRY_REQUEST_SIZE, MAX_UPSTREAM_SERVER_HELLO_SIZE)
 RETRY_COOKIE_EXTENSION :: cast(u16)44
 
 // RFC 8446 sections 4.1.4, 4.2.2, 4.2.8. Cookie bytes borrow wire. For our
 // fixed offer, any key_share HRR is invalid: X25519 was already shared, and
 // every other group was not offered. A retry must make a real change, so a
 // cookie is required and may not be empty.
-hello_retry_request_decode :: proc(wire: []u8) -> (cookie: []u8, err: Server_Hello_Error) {
+hello_retry_request_decode :: proc(
+	wire: []u8,
+	suites: []Cipher_Suite = COMPATIBLE_CIPHER_SUITES,
+) -> (
+	cookie: []u8,
+	err: Server_Hello_Error,
+) {
 	if len(wire) < 44 do return nil, .Truncated
 
 	if wire[0] != cast(u8)Handshake_Type.Server_Hello {
@@ -1220,7 +1292,7 @@ hello_retry_request_decode :: proc(wire: []u8) -> (cookie: []u8, err: Server_Hel
 
 	if wire[38] != 0 do return nil, .Session_ID_Mismatch
 
-	if retry_u16(wire, 39) != cast(u16)Cipher_Suite.TLS_AES_128_GCM_SHA256 {
+	if !cipher_suite_offered(suites, Cipher_Suite(retry_u16(wire, 39))) {
 		return nil, .Unoffered_Cipher
 	}
 
@@ -1355,8 +1427,7 @@ client_hello_retry_prepare :: proc(conn: ^Conn, retry: []u8, cookie: []u8) -> Se
 	}
 	first := conn.client_hello[:size]
 	layout, valid := client_hello_layout_decode(first)
-	if !valid || layout.session_size != 0 || layout.has_cookie ||
-	   !client_hello_layout_has_cipher(first, layout, u16(Cipher_Suite.TLS_AES_128_GCM_SHA256)) {
+	if !valid || layout.session_size != 0 || layout.has_cookie {
 		return .Invalid_Retry_Client_Hello
 	}
 	if len(cookie) == 0 || len(cookie) > MAX_RETRY_COOKIE_SIZE {
@@ -1366,10 +1437,15 @@ client_hello_retry_prepare :: proc(conn: ^Conn, retry: []u8, cookie: []u8) -> Se
 		return .Retry_Cookie_Oversized
 	}
 
+	// The retry must name a suite this ClientHello offered.
+	if !client_hello_layout_has_cipher(first, layout, u16(client_hello_retry_suite(retry))) {
+		return .Invalid_Retry_Client_Hello
+	}
+
 	new_size := size + 6 + len(cookie)
 	extensions_size := layout.extensions_size + 6 + len(cookie)
 	if new_size > len(conn.retry_client_hello) || extensions_size > 65535 ||
-	   36 + len(retry) > len(conn.retry_transcript) ||
+	   MAX_MESSAGE_HASH_SIZE + len(retry) > len(conn.retry_transcript) ||
 	   !client_hello_retry_inputs_disjoint(conn, retry, cookie, new_size) {
 		return .Invalid_Retry_Client_Hello
 	}
@@ -1389,20 +1465,19 @@ client_hello_retry_prepare :: proc(conn: ^Conn, retry: []u8, cookie: []u8) -> Se
 	return .None
 }
 
-// The retry names the suite, and with it the hash of message_hash. A retry
-// that names no TLS 1.3 suite is rejected by the ServerHello checks; SHA-256
-// keeps this step total until then.
+// The suite a decoded retry names (its legacy session id is empty). A retry
+// too short to name one counts as TLS_AES_128_GCM_SHA256, the suite of every
+// offer, so this step stays total; the retry decoder rejects such input.
+client_hello_retry_suite :: proc(retry: []u8) -> Cipher_Suite {
+	if len(retry) < 41 {
+		return .TLS_AES_128_GCM_SHA256
+	}
+	return Cipher_Suite(retry_u16(retry, 39))
+}
+
+// The hash of message_hash is the hash of the suite the retry names.
 client_hello_retry_hash :: proc(retry: []u8) -> hash.Algorithm {
-	if len(retry) < 39 {
-		return .SHA256
-	}
-
-	at := 39 + int(retry[38])
-	if len(retry) < at + 2 {
-		return .SHA256
-	}
-
-	return cipher_suite_hash(Cipher_Suite(retry_u16(retry, at)))
+	return cipher_suite_hash(client_hello_retry_suite(retry))
 }
 
 cipher_suite_known :: proc(suite: Cipher_Suite) -> bool {
@@ -1427,6 +1502,7 @@ client_hello_retry_transcript_prepare :: proc(conn: ^Conn, first, retry: []u8) {
 	digest := transcript_hash(&t, digest_storage[:])
 	message := transcript_message_hash_encode(conn.retry_transcript[:], digest)
 	copy(conn.retry_transcript[len(message):], retry)
+	conn.retry_message_hash_size = len(message)
 	conn.retry_transcript_size = len(message) + len(retry)
 }
 
@@ -1814,9 +1890,10 @@ async_handshake_drive :: proc(conn: ^Async_Conn) {
 			); return
 		case .Handshake:
 			complete, append_error := server_hello_message_append(
-				conn.hello[:],
+				conn.hello[:server_hello_storage_size(p)],
 				body,
 				&conn.hello_used,
+				server_hello_cap(p),
 			)
 			if append_error.kind != .None {
 				async_handshake_fail(

@@ -30,7 +30,7 @@ early_test_ticket :: proc(identity:^store.Store,config:Server_Handshake_Config,s
  bytes:[4096]u8;hello:=early_test_hello(bytes[:],nil,scope,false);assert(early_test_admit(&owner,config,identity,hello,time.now())==.None)
  for _ in 0..<100 {event,_:=server_handshake_peek(&owner);if event.kind==.None {break};assert(event.kind!=.Fatal);assert(server_handshake_accept(&owner,event.id)==.None)}
  master:=owner._resumption.master;defer crypto.zero_explicit(&master,size_of(master))
- finished:[36]u8;_,e:=finished_encode(finished[:],owner._flight.client_finished_secret,transcript_snapshot(&owner._transcript));assert(e==.None)
+ finished:[36]u8;_,e:=finished_encode(finished[:],server_test_client_secret(&owner),transcript_snapshot(&owner._transcript));assert(e==.None)
  transcript:=owner._transcript;transcript_update(&transcript,finished[:]);hash:=transcript_snapshot(&transcript);secret:[32]u8;schedule_expand(.SHA256, master[:],"res master",hash[:],secret[:]);defer crypto.zero_explicit(&secret,size_of(secret))
  _,_,fe:=server_handshake_feed(&owner,.Handshake,finished[:]);assert(fe==.None)
  event,_:=server_handshake_peek(&owner);assert(event.kind==.Handshake_Bytes&&event.level==.Application)

@@ -33,16 +33,25 @@ server_async_handshake_drive :: proc(s:^Server_Async_Conn) {
 		case .Early_Traffic_Secret: server_async_fail(s,{kind=.Protocol_Failed},{kind=.Handshake,engine=.Unsupported});return
 		case .Traffic_Secret:
 			if !server_async_grant(s,&s._key_grant,size_of(Server_Async_Keys),align_of(Server_Async_Keys)) {return}
-			secret:[32]u8;copy(secret[:],event.secret)
-			if event.level==.Handshake {server_async_install(s,event.direction,secret)} else if event.level==.Application {
-				keys:=server_async_keys(s)
-				if event.direction==.Read {keys.application_read=secret;s._application_secrets|=1} else {keys.application_write=secret;s._application_secrets|=2;server_async_install(s,.Write,secret)}
-			} else {server_async_fail(s,{kind=.Protocol_Failed},{kind=.Handshake,engine=.Wrong_Level});return}
+			s._cipher = event.cipher
+			if event.level == .Handshake {
+				server_async_install(s, event.direction, event.cipher, event.secret)
+			} else if event.level == .Application {
+				server_async_application_secret(s, event.direction, event.cipher, event.secret)
+				if event.direction == .Read {
+					s._application_secrets |= 1
+				} else {
+					s._application_secrets |= 2
+					server_async_application_install(s, .Write)
+				}
+			} else {
+				server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Handshake, engine = .Wrong_Level})
+				return
+			}
 			// The secret event is wiped by acceptance; only active protections
 			// and the two pending/current application secrets survive here. The
 			// server write direction changes after its Finished, including alerts;
 			// application API readiness still requires authenticated Complete.
-			crypto.zero_explicit(&secret,size_of(secret))
 			if e:=server_handshake_accept(&s._engine,event.id);e!=.None {server_async_fail(s,{kind=.Protocol_Failed},{kind=.Handshake,engine=e});return}
 		case .Complete:
 			if s._application_secrets!=3 {server_async_fail(s,{kind=.Protocol_Failed},{kind=.Handshake,engine=.Invalid_State});return}
@@ -52,8 +61,7 @@ server_async_handshake_drive :: proc(s:^Server_Async_Conn) {
 			s._peer_identity=server_handshake_peer_identity(&s._engine)
 			s._resumed=server_handshake_resumed(&s._engine)
 			if server_handshake_accept(&s._engine,event.id)!=.None {server_async_fail(s,{kind=.Protocol_Failed},{kind=.Handshake,engine=.Invalid_Event});return}
-			keys:=server_async_keys(s)
-			server_async_install(s,.Read,keys.application_read)
+			server_async_application_install(s, .Read)
 			_=server_handshake_destroy(&s._engine)
 			s._phase=.Established;s._ccs_allowed=false;s._non_application_records=0
 			server_async_handshake_emit(s,{})

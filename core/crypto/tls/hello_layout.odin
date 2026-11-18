@@ -71,7 +71,7 @@ client_hello_layout_has_cipher :: proc(wire: []u8, layout: Client_Hello_Layout, 
 @(private)
 client_hello_retry_inputs_disjoint :: proc(conn: ^Conn, retry, cookie: []u8, new_size: int) -> bool {
 	hello := conn.retry_client_hello[:new_size]
-	transcript := conn.retry_transcript[:36 + len(retry)]
+	transcript := conn.retry_transcript[:MAX_MESSAGE_HASH_SIZE + len(retry)]
 	return !bytes.alias(hello, retry) && !bytes.alias(hello, cookie) &&
 	       !bytes.alias(transcript, retry) && !bytes.alias(transcript, cookie)
 }

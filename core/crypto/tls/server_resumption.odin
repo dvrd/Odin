@@ -34,6 +34,10 @@ server_resumption_policy :: proc(owner:^Server_Handshake)->(out:[32]u8) {
 @(private)
 server_resumption_prepare :: proc(owner:^Server_Handshake,now:time.Time)->Server_Handshake_Error {
  config:=owner._config.tickets;if config==nil {return .None}
+ // Tickets carry SHA-256 PSKs: no resumption state for another hash.
+ if CIPHER_SUITE_HASH[owner._selection.cipher] != .SHA256 {
+  return .None
+ }
  grant,ok:=server_handshake_allocate(owner,size_of(Server_Resumption),align_of(Server_Resumption));if !ok {return .Allocation_Failed}
  state:=cast(^Server_Resumption)raw_data(grant);owner._resumption=state
  state.claims.sni=ticket_hash(owner._hello.server_name);state.claims.alpn=ticket_hash(owner._parameters.value.alpn)

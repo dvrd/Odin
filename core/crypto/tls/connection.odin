@@ -39,6 +39,13 @@ Config :: struct {
 	client_credentials: ^credential_store.Store,
 	// Optional generation pinned by an origin pool, borrowed through handshake.
 	client_credential_lease: ^credential_store.Lease,
+	// The first flight and the answers accepted for it. The zero value keeps
+	// the TLS_AES_128_GCM_SHA256/X25519 offer with the TLS 1.2 fallback.
+	offer: Client_Offer,
+	// Upstream offer only: restrict it to these suites (in this order) or to
+	// these groups, each sent with its key share. Nil keeps upstream's lists.
+	cipher_suites: []Cipher_Suite,
+	groups: []Named_Group,
 }
 
 Client_Error :: enum {
@@ -53,6 +60,7 @@ Client_Error :: enum {
 	Invalid_Timeout,
 	Invalid_ALPN,
 	Invalid_Client_Credentials,
+	Invalid_Offer,
 }
 
 Conn_Phase :: enum {
@@ -80,12 +88,12 @@ Conn :: struct {
 	// header) participates in transcript authentication.
 	client_hello:                 [MAX_CLIENT_HELLO_SIZE]u8,
 	client_hello_size:            int,
-	x25519_private_key:           [32]u8,
+	// One private key per offered group, until ServerHello selects one.
+	ephemeral:                    Ephemeral_Keys,
 	client_hello_error:           Client_Hello_Send_Error,
-	server_hello:                 [MAX_SERVER_HELLO_SIZE]u8,
+	server_hello:                 [MAX_UPSTREAM_SERVER_HELLO_SIZE]u8,
 	server_hello_size:            int,
 	server_parameters:            Server_Hello,
-	shared_secret:                [32]u8,
 	server_hello_error:           Server_Hello_Read_Error,
 	// Upstream's schedule state: the stage secret, then the traffic secrets
 	// of the negotiated suite. Record keys live in the protections below.
@@ -110,6 +118,8 @@ Conn :: struct {
 	tcp:                          trans.TCP_Connection,
 	retry_transcript:             [MAX_RETRY_TRANSCRIPT_SIZE]u8,
 	retry_transcript_size:        int,
+	// Size of the message_hash prefix; the HelloRetryRequest follows it.
+	retry_message_hash_size:      int,
 	retry_client_hello:           [MAX_RETRY_CLIENT_HELLO_SIZE]u8,
 	retry_client_hello_size:      int,
 	// Owned only when the caller supplied no roots. Explicit roots are the
@@ -173,6 +183,9 @@ config_validate :: proc(config: Config) -> Client_Error {
 		if root == nil do return .Invalid_Trust_Root
 	}
 	if _, valid := alpn_protocols_size(config.alpn_protocols); !valid {return .Invalid_ALPN}
+	if !config_offer_valid(config) {
+		return .Invalid_Offer
+	}
 	return .None
 }
 
@@ -440,7 +453,7 @@ Async_Conn :: struct {
 	handshake_deadline:                                                time.Time,
 	flight:                                                            []u8,
 	flight_used:                                                       int,
-	hello:                                                             [MAX_HELLO_RETRY_REQUEST_SIZE]u8,
+	hello:                                                             [MAX_SERVER_HELLO_MESSAGE_SIZE]u8,
 	hello_used, ignored_ccs:                                           int,
 	finishing:                                                         bool,
 	read_op, write_op, close_op:                                       ^net.Async_Operation,

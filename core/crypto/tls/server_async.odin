@@ -43,7 +43,9 @@ Server_Async_Phase :: enum {Uninitialized, Ready, Handshaking, Established, Clos
 Server_Async_Send :: enum {None, Handshake, Data, Key_Update, Notify, Fatal_Alert}
 Server_Async_Keys :: struct {
 	read, write: Record_Protection,
-	application_read, application_write: [32]u8,
+	// Application traffic secrets of the negotiated suite, in upstream's
+	// schedule state: the client secret is the read direction.
+	application: Connection_Secrets,
 }
 
 // Stable-address, serial owner. Calls/callbacks use the supplied executor's
@@ -79,6 +81,7 @@ Server_Async_Conn :: struct {
 	_rx_wire, _rx_plain, _tx_wire, _key_grant: []u8,
 	_read_keys, _write_keys: bool,
 	_application_secrets: u8,
+	_cipher: Cipher_Suite,
 	_tx_kind: Server_Async_Send,
 	_tx_size, _tx_plain_count: int,
 	_tx_done: bool,
@@ -153,7 +156,7 @@ server_async_connection :: proc(s:^Server_Async_Conn) -> net.Async_Connection {
 }
 server_async_connection_state :: proc(s:^Server_Async_Conn) -> Connection_State {
 	if !server_async_valid(s) || s._phase!=.Established || s._failure.kind!=.None || s._closing {return {}}
-	return {handshake_complete=true,version=VERSION_TLS_1_3,cipher_suite=.TLS_AES_128_GCM_SHA256,
+	return {handshake_complete=true,version=VERSION_TLS_1_3,cipher_suite=s._cipher,
 		server_name=string(s._name[:s._name_size]),negotiated_protocol=string(s._alpn[:s._alpn_size]),peer_identity=s._peer_identity,resumed=s._resumed}
 }
 server_async_failure :: proc(s:^Server_Async_Conn) -> Server_Async_Failure {

@@ -4,6 +4,8 @@ import "core:mem"
 
 import "core:crypto"
 import "core:crypto/ecdh"
+import "core:crypto/hash"
+import "core:crypto/mlkem"
 import "core:crypto/x509"
 import "core:time"
 import credential_store "credentials/store"
@@ -31,12 +33,27 @@ Server_Flight :: struct {
 	store:                                   ^credential_store.Store,
 	lease:                                   credential_store.Lease,
 	count, index, offset, certificate_bytes: int,
-	handshake:                               Handshake_Secrets,
+	// The negotiated suite; the hello views are released after ServerHello.
+	cipher:                                  Cipher_Suite,
+	// Upstream's schedule stage: handshake secret, then master secret.
+	keys:                                    Handshake_Keys,
+	// Sized by the suite's hash. The client secret stays through its Finished.
+	client_handshake_secret:                 [MAX_TRANSCRIPT_HASH_SIZE]u8,
+	server_handshake_secret:                 [MAX_TRANSCRIPT_HASH_SIZE]u8,
 	using transient: struct #raw_union {
-		application: Application_Secrets,
+		application: Server_Application_Secrets,
 		retry: Server_Retry,
 	},
-	client_finished_secret:                  [32]u8,
+}
+
+Server_Application_Secrets :: struct {
+	client_traffic_secret: [MAX_TRANSCRIPT_HASH_SIZE]u8,
+	server_traffic_secret: [MAX_TRANSCRIPT_HASH_SIZE]u8,
+}
+
+// Bytes of one traffic secret of the flight's suite.
+server_flight_secret_size :: proc(f: ^Server_Flight) -> int {
+	return hash.DIGEST_SIZES[CIPHER_SUITE_HASH[f.cipher]]
 }
 
 // Explicit admission, after accepting tentative Peer_Parameters. The host keeps
@@ -167,7 +184,7 @@ server_flight_secret :: proc(
 			kind = .Traffic_Secret,
 			level = .Application if application else .Handshake,
 			direction = direction,
-			cipher = .TLS_AES_128_GCM_SHA256,
+			cipher = owner._flight.cipher,
 			secret = secret,
 		},
 	)
@@ -194,16 +211,20 @@ server_flight_next :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 		}
 		private: ecdh.Private_Key
 		defer ecdh.private_key_clear(&private)
-		curve := ecdh.Curve.X25519 if owner._selection.group == .X25519 else .SECP256R1
-		if !ecdh.private_key_generate(&private, curve) {return .Entropy_Unavailable}
-		random: [32]u8; crypto.rand_bytes(random[:])
+
+		if !ecdh.private_key_generate(&private, server_flight_curve(owner._selection.group)) {
+			return .Entropy_Unavailable
+		}
+
+		random: [32]u8
+		crypto.rand_bytes(random[:])
 		return server_flight_prepare_ecdh(owner, &private, random)
 	case .Handshake_Write:
 		f.stage = .Handshake_Read
-		return server_flight_secret(owner, f.handshake.server_traffic_secret[:], .Write)
+		return server_flight_secret(owner, f.server_handshake_secret[:server_flight_secret_size(f)], .Write)
 	case .Handshake_Read:
 		f.stage = .Extensions
-		return server_flight_secret(owner, f.handshake.client_traffic_secret[:], .Read)
+		return server_flight_secret(owner, f.client_handshake_secret[:server_flight_secret_size(f)], .Read)
 	case .Extensions:
 		f.stage = .Finished if owner._resumed else .Certificate_Request
 		return server_parameters_extensions(owner)
@@ -247,13 +268,18 @@ server_flight_next :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 		wire: [2]u8
 		return server_flight_bytes(owner, mem.slice_ptr(cast(^u8)(cast(rawptr)&wire),len(wire)))
 	case .Verify:
-		wire: [520]u8; defer crypto.zero_explicit(&wire, size_of(wire))
-		signed := certificate_verify_input(transcript_snapshot(&owner._transcript), true)
+		wire: [520]u8
+		defer crypto.zero_explicit(&wire, size_of(wire))
+
+		digest_storage: [MAX_TRANSCRIPT_HASH_SIZE]u8
+		signed_storage: [MAX_CERTIFICATE_VERIFY_INPUT_SIZE]u8
+		digest := transcript_hash(&owner._transcript, digest_storage[:])
+		signed := certificate_verify_content(signed_storage[:], digest, true)
 		// Hello views/selection were erased after ServerHello. The live lease
 		// identifies the same admitted generation even after store rotation.
 		scheme,se:=credential_store.signature_scheme(f.store,f.lease)
 		if se.kind!=.None {return .Signing_Failed}
-		n, e := credential_store.sign_sha256(f.store, f.lease, scheme, signed[:], wire[8:])
+		n, e := credential_store.sign_sha256(f.store, f.lease, scheme, signed, wire[8:])
 		if e.kind != .None {
 			return .Signing_Failed
 		}
@@ -262,30 +288,39 @@ server_flight_next :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 		f.stage = .Finished
 		return server_flight_bytes(owner, mem.slice_ptr(cast(^u8)(cast(rawptr)&wire),8 + n))
 	case .Finished:
-		wire: [36]u8; defer crypto.zero_explicit(&wire, size_of(wire))
-		n, e := finished_encode(
-			wire[:],
-			f.handshake.server_traffic_secret,
-			transcript_snapshot(&owner._transcript),
-		)
-		if e != .None {
-			return .Invalid_State
-		}
+		wire: [MAX_FINISHED_MESSAGE_SIZE]u8
+		defer crypto.zero_explicit(&wire, size_of(wire))
+
+		size := server_flight_secret_size(f)
+		digest_storage: [MAX_TRANSCRIPT_HASH_SIZE]u8
+		digest := transcript_hash(&owner._transcript, digest_storage[:])
+		finished_header_encode(wire[:], size)
+		schedule_finished_mac(f.keys.hash, f.server_handshake_secret[:size], digest, wire[4:4 + size])
+
 		f.stage = .Application_Write
-		return server_flight_bytes(owner, mem.slice_ptr(cast(^u8)(cast(rawptr)&wire),n))
+		return server_flight_bytes(owner, mem.slice_ptr(cast(^u8)(cast(rawptr)&wire), 4 + size))
 	case .Application_Write:
-		f.application = application_secrets_derive(
-			f.handshake.handshake_secret,
-			transcript_snapshot(&owner._transcript),
-		)
-		if owner._resumption!=nil {owner._resumption.master=f.application.master_secret}
-		f.client_finished_secret = f.handshake.client_traffic_secret
-		crypto.zero_explicit(&f.handshake, size_of(f.handshake))
+		// Upstream's schedule step to the master secret (zero IKM), then the
+		// application traffic secrets over the transcript through server Finished.
+		size := server_flight_secret_size(f)
+		zeroes: [MAX_TRANSCRIPT_HASH_SIZE]u8
+		digest_storage: [MAX_TRANSCRIPT_HASH_SIZE]u8
+		digest := transcript_hash(&owner._transcript, digest_storage[:])
+
+		update_handshake_keys(&f.keys, zeroes[:size])
+		schedule_derive_secret(&f.keys, "c ap traffic", digest, f.application.client_traffic_secret[:size])
+		schedule_derive_secret(&f.keys, "s ap traffic", digest, f.application.server_traffic_secret[:size])
+		if owner._resumption != nil {
+			copy(owner._resumption.master[:], schedule_secret(&f.keys))
+		}
+
+		clear_handshake_keys(&f.keys)
+		crypto.zero_explicit(&f.server_handshake_secret, size_of(f.server_handshake_secret))
 		f.stage = .Application_Read
-		return server_flight_secret(owner, f.application.server_traffic_secret[:], .Write, true)
+		return server_flight_secret(owner, f.application.server_traffic_secret[:size], .Write, true)
 	case .Application_Read:
 		f.stage = .End
-		return server_flight_secret(owner, f.application.client_traffic_secret[:], .Read, true)
+		return server_flight_secret(owner, f.application.client_traffic_secret[:server_flight_secret_size(f)], .Read, true)
 	case .End:
 		// Keep the admitted generation pinned through client Finished. Shared
 		// cleanup releases it on verified completion or any terminal failure.
@@ -300,12 +335,21 @@ server_flight_hello :: proc(dst: []u8, session: []u8, public, random: [32]u8) ->
 	pub:=public
 	return server_flight_group_hello(dst, session, .X25519, pub[:], random)
 }
-server_flight_group_hello :: proc(dst: []u8, session: []u8, group: Named_Group, public: []u8, random: [32]u8) -> int {
+server_flight_group_hello :: proc(
+	dst: []u8,
+	session: []u8,
+	group: Named_Group,
+	public: []u8,
+	random: [32]u8,
+	cipher: Cipher_Suite = .TLS_AES_128_GCM_SHA256,
+) -> int {
 	at := 4
 	hello_put_u16(dst, &at, 0x0303)
 	for b,i in random {dst[at+i]=b}; at += 32
 	dst[at] = u8(len(session)); at += 1; copy(dst[at:], session); at += len(session)
-	hello_put_u16(dst, &at, 0x1301); dst[at] = 0; at += 1
+	hello_put_u16(dst, &at, u16(cipher))
+	dst[at] = 0
+	at += 1
 	hello_put_u16(dst, &at, u16(14+len(public)))
 	hello_put_u16(dst, &at, 43); hello_put_u16(dst, &at, 2); hello_put_u16(dst, &at, 0x0304)
 	hello_put_u16(dst, &at, 51); hello_put_u16(dst, &at, u16(4+len(public))); hello_put_u16(dst, &at, u16(group))
@@ -315,40 +359,133 @@ server_flight_group_hello :: proc(dst: []u8, session: []u8, group: Named_Group, 
 	return at
 }
 
+server_flight_curve :: proc(group: Named_Group) -> ecdh.Curve {
+	#partial switch group {
+	case .X448:
+		return .X448
+	case .Secp256r1:
+		return .SECP256R1
+	case .Secp384r1:
+		return .SECP384R1
+	}
+
+	// X25519, and the classical half of X25519MLKEM768.
+	return .X25519
+}
+
 // Private deterministic seam; production uses OS-generated keys through the
 // pointer API, never a by-value ECDH union or a persistent per-owner key.
 server_flight_prepare_hello :: proc(owner: ^Server_Handshake, private_key, random: [32]u8) -> Server_Handshake_Error {
-	private: ecdh.Private_Key; defer ecdh.private_key_clear(&private)
-	curve := ecdh.Curve.X25519 if owner._selection.group == .X25519 else .SECP256R1
-	key:=private_key; defer crypto.zero_explicit(&key,size_of(key))
-	if !ecdh.private_key_set_bytes(&private,curve,key[:]) {return .Malformed}
-	return server_flight_prepare_ecdh(owner,&private,random)
+	private: ecdh.Private_Key
+	defer ecdh.private_key_clear(&private)
+
+	key := private_key
+	defer crypto.zero_explicit(&key, size_of(key))
+
+	if !ecdh.private_key_set_bytes(&private, server_flight_curve(owner._selection.group), key[:]) {
+		return .Malformed
+	}
+	return server_flight_prepare_ecdh(owner, &private, random)
 }
+
+// The server's half of the key exchange for the selected group: its share
+// into share_dst and the shared secret into secret_dst. X25519MLKEM768
+// encapsulates to the client's ML-KEM key and adds X25519 with private
+// (RFC 8446 section 4.2.8; the hybrid concatenates KEM then ECDH).
+server_flight_key_exchange :: proc(
+	group: Named_Group,
+	private: ^ecdh.Private_Key,
+	peer_share: []u8,
+	share_dst, secret_dst: []u8,
+) -> (
+	share: []u8,
+	secret: []u8,
+	ok: bool,
+) {
+	share = share_dst[:named_group_share_size(group, true)]
+	curve := server_flight_curve(group)
+	classical_peer, classical_share := peer_share, share
+	classical_secret := secret_dst[:ecdh.SHARED_SECRET_SIZES[curve]]
+	secret = classical_secret
+
+	if group == .X25519MLKEM768 {
+		kem_key_size := mlkem.ENCAPSULATION_KEY_SIZES[.ML_KEM_768]
+		kem_ciphertext_size := mlkem.CIPHERTEXT_SIZES[.ML_KEM_768]
+		secret = secret_dst[:mlkem.SHARED_SECRET_SIZE + len(classical_secret)]
+		classical_secret = secret[mlkem.SHARED_SECRET_SIZE:]
+		classical_peer = peer_share[kem_key_size:]
+		classical_share = share[kem_ciphertext_size:]
+
+		if !mlkem.encaps(.ML_KEM_768, peer_share[:kem_key_size], secret[:mlkem.SHARED_SECRET_SIZE], share[:kem_ciphertext_size]) {
+			return nil, nil, false
+		}
+	}
+
+	peer: ecdh.Public_Key
+	defer ecdh.public_key_clear(&peer)
+
+	if !ecdh.public_key_set_bytes(&peer, curve, classical_peer) || !ecdh.ecdh(private, &peer, classical_secret) {
+		return nil, nil, false
+	}
+
+	ecdh.private_key_public_bytes(private, classical_share)
+	return share, secret, true
+}
+
+// Emits ServerHello for the selected suite and group, then runs upstream's
+// schedule to the handshake traffic secrets over the transcript through it.
 server_flight_prepare_ecdh :: proc(owner: ^Server_Handshake, private: ^ecdh.Private_Key, random: [32]u8) -> Server_Handshake_Error {
 	f := &owner._flight
-	shared: [32]u8; public: [65]u8
-	defer crypto.zero_explicit(&shared,size_of(shared))
-	peer: ecdh.Public_Key; defer ecdh.public_key_clear(&peer)
-	curve := ecdh.Curve.X25519 if owner._selection.group == .X25519 else .SECP256R1
-	if !ecdh.public_key_set_bytes(&peer,curve,owner._selection.peer_key_share) ||
-	   !ecdh.ecdh(private,&peer,shared[:]) {return .Malformed}
-	size := 32 if curve == .X25519 else 65
-	ecdh.private_key_public_bytes(private,public[:size])
-	wire: [161]u8
-	n := server_flight_group_hello(wire[:],owner._hello.session_id,owner._selection.group,public[:size],random)
- if owner._resumed {
-  at:=n;hello_put_u16(wire[:],&at,41);hello_put_u16(wire[:],&at,2);hello_put_u16(wire[:],&at,owner._resumption.selected_index)
-  ext_at:=42+len(owner._hello.session_id);retry_put_u16(wire[:],ext_at,u16(at-ext_at-2));n=at;server_flight_put24(wire[1:4],n-4)
- }
-	staged := owner._transcript; transcript_update(&staged,wire[:n])
-	psk:[]u8;if owner._resumed {psk=owner._resumption.claims.psk[:]}
-	secrets,e := handshake_secrets_derive_from_hash(shared,transcript_snapshot(&staged),psk)
-	defer crypto.zero_explicit(&secrets,size_of(secrets))
-	if e != .None {return .Malformed}
-	f.handshake=secrets
-	e2:=server_flight_bytes(owner,mem.slice_ptr(cast(^u8)(cast(rawptr)&wire),n),true)
-	if e2 != .None {return e2}
+	group, cipher := owner._selection.group, owner._selection.cipher
+	algorithm := CIPHER_SUITE_HASH[cipher]
+	size := hash.DIGEST_SIZES[algorithm]
+
+	shared_storage: [mlkem.SHARED_SECRET_SIZE + 56]u8
+	defer crypto.zero_explicit(&shared_storage, size_of(shared_storage))
+
+	share_storage: [MAX_KEY_SHARE_SIZE]u8
+	share, shared, agreed := server_flight_key_exchange(group, private, owner._selection.peer_key_share, share_storage[:], shared_storage[:])
+	if !agreed {
+		return .Malformed
+	}
+
+	// Header, version, random, session, suite, compression, extension length,
+	// supported_versions, key_share and the optional pre_shared_key.
+	wire: [44 + 32 + 6 + 8 + MAX_KEY_SHARE_SIZE + 6]u8
+	n := server_flight_group_hello(wire[:], owner._hello.session_id, group, share, random, cipher)
+	if owner._resumed {
+		at := n
+		hello_put_u16(wire[:], &at, 41)
+		hello_put_u16(wire[:], &at, 2)
+		hello_put_u16(wire[:], &at, owner._resumption.selected_index)
+		ext_at := 42 + len(owner._hello.session_id)
+		retry_put_u16(wire[:], ext_at, u16(at - ext_at - 2))
+		n = at
+		server_flight_put24(wire[1:4], n - 4)
+	}
+
+	staged := owner._transcript
+	transcript_update(&staged, wire[:n])
+	digest_storage: [MAX_TRANSCRIPT_HASH_SIZE]u8
+	digest := transcript_hash(&staged, digest_storage[:])
+
+	psk: []u8
+	if owner._resumed {
+		psk = owner._resumption.claims.psk[:]
+	}
+
+	schedule_init(&f.keys, algorithm, psk)
+	update_handshake_keys(&f.keys, shared)
+	schedule_derive_secret(&f.keys, "c hs traffic", digest, f.client_handshake_secret[:size])
+	schedule_derive_secret(&f.keys, "s hs traffic", digest, f.server_handshake_secret[:size])
+	f.cipher = cipher
+
+	// Publishing copies the bytes into the owner before this frame returns.
+	if e := server_flight_bytes(owner, mem.slice_ptr(cast(^u8)(cast(rawptr)&wire), n), true); e != .None {
+		return e
+	}
+
 	server_handshake_release_input(owner)
-	f.stage=.Handshake_Write
+	f.stage = .Handshake_Write
 	return .None
 }

@@ -1,6 +1,7 @@
 package tls
 
 import "core:crypto"
+import "core:crypto/hash"
 import "core:mem"
 
 SERVER_HANDSHAKE_OUTPUT_CAP :: 2048
@@ -17,8 +18,11 @@ Server_Handshake_Config :: struct {
 	max_extensions: int,
 	client_auth: ^Client_Auth_Config,
 	tickets: ^Server_Ticket_Config,
+	// Suites and groups the engine may select. The zero value keeps
+	// TLS_AES_128_GCM_SHA256 over X25519 or P-256.
+	offer: Server_Offer,
 }
-SERVER_HANDSHAKE_DEFAULT_CONFIG :: Server_Handshake_Config{SERVER_CLIENT_HELLO_MAX_WIRE, SERVER_CLIENT_HELLO_MAX_ENTRIES, nil, nil}
+SERVER_HANDSHAKE_DEFAULT_CONFIG :: Server_Handshake_Config{SERVER_CLIENT_HELLO_MAX_WIRE, SERVER_CLIENT_HELLO_MAX_ENTRIES, nil, nil, .Compatible}
 
 // All fields are tentative offers, never authenticated negotiated parameters.
 Server_Handshake_Peer_Parameters :: struct {
@@ -58,7 +62,7 @@ Server_Handshake :: struct {
 	_hello: Server_Client_Hello_View,
 	_selection: Server_Client_Hello_Selection,
 	_transcript: Handshake_Transcript,
-	_secret: [32]u8,
+	_secret: [MAX_TRANSCRIPT_HASH_SIZE]u8,
 	_event: Server_Handshake_Event,
 	_next_id: u64,
 	_error: Server_Handshake_Error,
@@ -192,10 +196,14 @@ server_handshake_feed :: proc(owner: ^Server_Handshake, level: Server_Handshake_
 	if owner._received < owner._message_size {return consumed, .Need_Input, .None}
 	hello, decoded := server_client_hello_decode(owner._input, {owner._config.max_client_hello_bytes, owner._config.max_extensions})
 	selection: Server_Client_Hello_Selection
-	if decoded == .None {selection, decoded = server_client_hello_negotiate(hello)}
+	if decoded == .None {
+		// Tickets carry SHA-256 PSKs, so a ticket-issuing server keeps to the
+		// SHA-256 suites.
+		selection, decoded = server_client_hello_negotiate(hello, owner._config.offer, owner._config.tickets != nil)
+	}
 	retry := owner._phase == .Retry_Client_Hello
 	if retry {
-		if decoded != .None || selection.group != owner._selection.group || !server_retry_invariants(owner._hello,hello,owner._selection.group) {
+		if decoded != .None || selection.group != owner._selection.group || selection.cipher != owner._selection.cipher || !server_retry_invariants(owner._hello,hello,owner._selection.group) {
 			server_handshake_fail(owner,.Malformed); return consumed,.Terminal,.Malformed
 		}
 		server_retry_clear(owner)
@@ -207,7 +215,11 @@ server_handshake_feed :: proc(owner: ^Server_Handshake, level: Server_Handshake_
 		server_handshake_fail(owner, e); return consumed, .Terminal, e
 	}
 	owner._hello, owner._selection = hello, selection
-	owner._binder_transcript=owner._transcript
+	owner._binder_transcript = owner._transcript
+	if !retry {
+		// The transcript is empty until the first ClientHello names the suite.
+		transcript_init(&owner._transcript, CIPHER_SUITE_HASH[selection.cipher])
+	}
 	transcript_update(&owner._transcript, owner._input)
 	owner._phase = .Await_Flight
 	if decoded == .Retry_Required {
@@ -292,11 +304,12 @@ server_handshake_publish :: proc(owner: ^Server_Handshake, source: Server_Handsh
 			event.bytes = owner._output[:len(event.bytes)]
 		}
 	case .Traffic_Secret:
-		if len(event.secret) != 32 || event.level == .Initial || event.cipher != .TLS_AES_128_GCM_SHA256 {
+		if event.level == .Initial || !cipher_suite_known(event.cipher) ||
+		   len(event.secret) != hash.DIGEST_SIZES[CIPHER_SUITE_HASH[event.cipher]] {
 			return .Invalid_Event
 		}
-		copy(owner._secret[:], event.secret)
-		event.secret = owner._secret[:]
+		size := copy(owner._secret[:], event.secret)
+		event.secret = owner._secret[:size]
 	case .Complete: return .Invalid_Event // Only Finished verification can publish success.
 	case: return .Invalid_Event
 	}

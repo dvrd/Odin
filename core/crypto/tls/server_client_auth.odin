@@ -49,8 +49,10 @@ server_client_auth_verify_signature :: proc(owner:^Server_Handshake,message:[]u8
  if scheme != .Rsa_Pss_Rsae_Sha256 && scheme != .Ecdsa_Secp256r1_Sha256 && scheme != .Ed25519 {
   return false
  }
- signed:=certificate_verify_input(transcript_snapshot(&owner._transcript),false)
- valid,e:=authentication_signature_check(&owner._client_auth.certs.chain[0],scheme,signed[:],message[8:])
+ digest_storage:[MAX_TRANSCRIPT_HASH_SIZE]u8
+ signed_storage:[MAX_CERTIFICATE_VERIFY_INPUT_SIZE]u8
+ signed:=certificate_verify_content(signed_storage[:],transcript_hash(&owner._transcript,digest_storage[:]),false)
+ valid,e:=authentication_signature_check(&owner._client_auth.certs.chain[0],scheme,signed,message[8:])
  return valid&&e.kind==.None
 }
 server_client_auth_feed :: proc(owner:^Server_Handshake,level:Server_Handshake_Level,input:[]u8)->(consumed:int,status:Server_Handshake_Status,error:Server_Handshake_Error) {

@@ -39,8 +39,8 @@ retry_test_mutate_extension :: proc(hello:Server_Client_Hello_View,kind:u16) -> 
 @(test)
 server_retry_owner_size_every_split_and_transcript :: proc(t:^testing.T) {
 	// Retry storage replaces application secrets, never enlarges them.
-	testing.expect_value(t,size_of(type_of(Server_Flight{}.transient)),size_of(Application_Secrets))
-	fmt.printf("retry fixed owner=%d event=%d flight transient=%d\n",size_of(Server_Handshake),size_of(Server_Handshake_Event),size_of(Application_Secrets))
+	testing.expect_value(t,size_of(type_of(Server_Flight{}.transient)),size_of(Server_Application_Secrets))
+	fmt.printf("retry fixed owner=%d event=%d flight transient=%d\n",size_of(Server_Handshake),size_of(Server_Handshake_Event),size_of(Server_Application_Secrets))
 	for group in ([]Named_Group{.X25519,.Secp256r1}) {
 		first,second:[1024]u8
 		ch1:=retry_test_hello(first[:],group,false,nil,[]u8{1,2,3})

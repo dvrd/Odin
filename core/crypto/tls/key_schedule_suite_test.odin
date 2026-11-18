@@ -217,3 +217,66 @@ schedule_message_hash_follows_the_suite_hash :: proc(t: ^testing.T) {
 		testing.expect_value(t, string(left), string(right))
 	}
 }
+
+// A cookie-only HelloRetryRequest naming suite, as hello_retry_request_decode
+// accepts it.
+schedule_suite_retry :: proc(dst: []u8, suite: Cipher_Suite, cookie: []u8) -> []u8 {
+	at := 4
+	hello_put_u16(dst, &at, u16(LEGACY_TLS_1_2))
+	random := HELLO_RETRY_REQUEST_RANDOM
+	at += copy(dst[at:], random[:])
+	dst[at] = 0
+	at += 1
+	hello_put_u16(dst, &at, u16(suite))
+	dst[at] = 0
+	at += 1
+	hello_put_u16(dst, &at, u16(6 + 6 + len(cookie)))
+	hello_put_extension(dst, &at, .Supported_Versions, 2)
+	hello_put_u16(dst, &at, VERSION_TLS_1_3)
+	hello_put_u16(dst, &at, RETRY_COOKIE_EXTENSION)
+	hello_put_u16(dst, &at, u16(2 + len(cookie)))
+	hello_put_u16(dst, &at, u16(len(cookie)))
+	at += copy(dst[at:], cookie)
+
+	dst[0] = u8(Handshake_Type.Server_Hello)
+	server_flight_put24(dst[1:4], at - 4)
+	return dst[:at]
+}
+
+@(test)
+schedule_retry_binds_the_transcript_to_the_retry_suite :: proc(t: ^testing.T) {
+	cookie := [?]u8{9, 8, 7}
+	suites := [?]Cipher_Suite{.TLS_AES_256_GCM_SHA384}
+	groups := [?]Named_Group{.X25519}
+
+	conn := new(Conn)
+	defer free(conn)
+	defer handshake_keys_clear(conn)
+	conn.phase = .Handshake_Pending
+	conn.config = {server_name = "example.com", offer = .Upstream, cipher_suites = suites[:], groups = groups[:]}
+	testing.expect_value(t, client_hello_prepare(conn).kind, Client_Hello_Send_Error_Kind.None)
+	conn.phase = .Awaiting_Server_Hello
+
+	// A retry for a suite outside the offer is refused before any state moves.
+	storage: [128]u8
+	unoffered := schedule_suite_retry(storage[:], .TLS_AES_128_GCM_SHA256, cookie[:])
+	_, unoffered_error := hello_retry_request_decode(unoffered, config_cipher_suites(&conn.config))
+	testing.expect_value(t, unoffered_error, Server_Hello_Error.Unoffered_Cipher)
+
+	retry := schedule_suite_retry(storage[:], .TLS_AES_256_GCM_SHA384, cookie[:])
+	testing.expect_value(t, server_hello_retry_accept(conn, retry).kind, Server_Hello_Read_Error_Kind.None)
+	testing.expect_value(t, conn.phase, Conn_Phase.Hello_Retry_Received)
+	testing.expect_value(t, conn.retry_message_hash_size, 4 + 48)
+	testing.expect_value(t, conn.retry_transcript_size, 4 + 48 + len(retry))
+	testing.expect_value(t, conn.retry_client_hello_size, conn.client_hello_size + 6 + len(cookie))
+
+	first: Handshake_Transcript
+	transcript_init(&first, .SHA384)
+	transcript_update(&first, conn.client_hello[:conn.client_hello_size])
+	digest_storage: [MAX_TRANSCRIPT_HASH_SIZE]u8
+	digest := transcript_hash(&first, digest_storage[:])
+	testing.expect_value(t, conn.retry_transcript[0], u8(Handshake_Type.Message_Hash))
+	testing.expect_value(t, string(conn.retry_transcript[4:52]), string(digest))
+	testing.expect_value(t, string(conn.retry_transcript[52:conn.retry_transcript_size]), string(retry))
+	testing.expect_value(t, client_hello_retry_hash(conn.retry_transcript[52:conn.retry_transcript_size]), hash.Algorithm.SHA384)
+}

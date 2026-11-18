@@ -256,42 +256,124 @@ server_hello_psk_valid :: proc(identities, binders: []u8) -> bool {
 // keys nor admits a certificate chain. D153 must match the actual chain's
 // signature metadata against signature_algorithms_cert (fallback: algorithms).
 // No PSK, 0-RTT, ALPN selection, QUIC binding, or HRR state is implemented here.
-server_client_hello_negotiate :: proc(hello: Server_Client_Hello_View) -> (Server_Client_Hello_Selection, Server_Hello_Codec_Status) {
-	if !server_hello_offer_contains(hello.versions, VERSION_TLS_1_3) ||
-	   !server_hello_offer_contains(hello.cipher_suites, u16(Cipher_Suite.TLS_AES_128_GCM_SHA256)) ||
-	   (!hello.has_psk && !server_hello_offer_contains(hello.signature_algorithms, u16(Signature_Scheme.Rsa_Pss_Rsae_Sha256)) &&
-	    !server_hello_offer_contains(hello.signature_algorithms, u16(Signature_Scheme.Ecdsa_Secp256r1_Sha256))) {
+server_client_hello_negotiate :: proc(
+	hello: Server_Client_Hello_View,
+	offer: Server_Offer = .Compatible,
+	sha256_only: bool = false,
+) -> (
+	Server_Client_Hello_Selection,
+	Server_Hello_Codec_Status,
+) {
+	if !server_hello_offer_contains(hello.versions, VERSION_TLS_1_3) {
 		return {}, .Unsupported
 	}
 
-	group: Named_Group
-	if server_hello_offer_contains(hello.groups, u16(Named_Group.X25519)) {
-		group = .X25519
-	} else if server_hello_offer_contains(hello.groups, u16(Named_Group.Secp256r1)) {
-		group = .Secp256r1
-	} else {
+	cipher, cipher_found := server_negotiate_cipher(hello, offer, sha256_only)
+	if !cipher_found {
+		return {}, .Unsupported
+	}
+
+	// The credential store signs with RSA-PSS-SHA256 or ECDSA-P256-SHA256.
+	pss := server_hello_offer_contains(hello.signature_algorithms, u16(Signature_Scheme.Rsa_Pss_Rsae_Sha256))
+	ecdsa := server_hello_offer_contains(hello.signature_algorithms, u16(Signature_Scheme.Ecdsa_Secp256r1_Sha256))
+	if !hello.has_psk && !pss && !ecdsa {
 		return {}, .Unsupported
 	}
 
 	signature := Signature_Scheme.Rsa_Pss_Rsae_Sha256
-	if !server_hello_offer_contains(hello.signature_algorithms, u16(signature)) {
+	if !pss {
 		signature = .Ecdsa_Secp256r1_Sha256
 	}
 
-	selection := Server_Client_Hello_Selection{version = VERSION_TLS_1_3, cipher = .TLS_AES_128_GCM_SHA256, group = group, signature = signature}
-	for n := 0; n < len(hello.key_shares); {
-		if len(hello.key_shares)-n < 4 {return {}, .Malformed}
-		group := hello_u16(hello.key_shares,n)
-		length := int(hello_u16(hello.key_shares,n+2)); n += 4
-		if length > len(hello.key_shares)-n {return {}, .Malformed}
-		if group == u16(selection.group) {
-			if selection.group == .X25519 && length != 32 || selection.group == .Secp256r1 && (length != 65 || hello.key_shares[n] != 4) {
-				return {}, .Malformed
-			}
-			selection.peer_key_share = hello.key_shares[n:n+length]
+	selection := Server_Client_Hello_Selection{version = VERSION_TLS_1_3, cipher = cipher, signature = signature}
+
+	// Prefer, in server order, a group the client already sent a share for;
+	// otherwise the first common group, which costs one HelloRetryRequest.
+	// The Compatible offer keeps its strict order: X25519, then P-256.
+	groups := server_offer_groups(offer)
+	listed := Named_Group.Unallocated_RESERVED
+	for group in groups {
+		if !server_hello_offer_contains(hello.groups, u16(group)) {
+			continue
+		}
+
+		if listed == .Unallocated_RESERVED {
+			listed = group
+		}
+
+		if offer == .Compatible && group != listed {
+			break
+		}
+
+		share, status := server_key_share_find(hello.key_shares, group)
+		if status == .Malformed {
+			return {}, .Malformed
+		}
+
+		if status == .None {
+			selection.group = group
+			selection.peer_key_share = share
 			return selection, .None
+		}
+	}
+
+	if listed == .Unallocated_RESERVED {
+		return {}, .Unsupported
+	}
+
+	selection.group = listed
+	return selection, .Retry_Required
+}
+
+// The first suite of the client's list this offer selects. sha256_only keeps
+// the suites whose PSKs the ticket format can carry.
+server_negotiate_cipher :: proc(
+	hello: Server_Client_Hello_View,
+	offer: Server_Offer,
+	sha256_only: bool,
+) -> (
+	Cipher_Suite,
+	bool,
+) {
+	suites := server_offer_cipher_suites(offer)
+	for at := 0; at + 1 < len(hello.cipher_suites); at += 2 {
+		suite := Cipher_Suite(hello_u16(hello.cipher_suites, at))
+		if !cipher_suite_offered(suites, suite) {
+			continue
+		}
+
+		if sha256_only && CIPHER_SUITE_HASH[suite] != .SHA256 {
+			continue
+		}
+		return suite, true
+	}
+	return {}, false
+}
+
+// The client's share for group. Retry_Required when it sent none; Malformed
+// when the list is damaged or the share has the wrong shape for its group.
+server_key_share_find :: proc(key_shares: []u8, group: Named_Group) -> ([]u8, Server_Hello_Codec_Status) {
+	for n := 0; n < len(key_shares); {
+		if len(key_shares) - n < 4 {
+			return nil, .Malformed
+		}
+
+		entry := hello_u16(key_shares, n)
+		length := int(hello_u16(key_shares, n + 2))
+		n += 4
+		if length > len(key_shares) - n {
+			return nil, .Malformed
+		}
+
+		if entry == u16(group) {
+			share := key_shares[n:n + length]
+			uncompressed := group != .Secp256r1 && group != .Secp384r1 || length > 0 && share[0] == 4
+			if length != named_group_share_size(group, false) || !uncompressed {
+				return nil, .Malformed
+			}
+			return share, .None
 		}
 		n += length
 	}
-	return selection, .Retry_Required
+	return nil, .Retry_Required
 }

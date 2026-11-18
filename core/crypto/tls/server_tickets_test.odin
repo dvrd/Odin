@@ -33,7 +33,7 @@ ticket_test_issue :: proc(t:^testing.T,identity:^store.Store,config:Server_Hands
  event,_:=server_handshake_peek(&owner);assert(server_handshake_accept(&owner,event.id)==.None);assert(server_handshake_start_flight(&owner,identity,time.now())==.None)
  for _ in 0..<100 {event,_=server_handshake_peek(&owner);if event.kind==.None {break};assert(event.kind!=.Fatal);assert(server_handshake_accept(&owner,event.id)==.None)}
  master:=owner._resumption.master;defer crypto.zero_explicit(&master,size_of(master))
- finished:[36]u8;_,fe:=finished_encode(finished[:],owner._flight.client_finished_secret,transcript_snapshot(&owner._transcript));assert(fe==.None)
+ finished:[36]u8;_,fe:=finished_encode(finished[:],server_test_client_secret(&owner),transcript_snapshot(&owner._transcript));assert(fe==.None)
  transcript:=owner._transcript;transcript_update(&transcript,finished[:]);hash:=transcript_snapshot(&transcript);secret:[32]u8;schedule_expand(.SHA256, master[:],"res master",hash[:],secret[:]);defer crypto.zero_explicit(&secret,size_of(secret))
  _,_,e=server_handshake_feed(&owner,.Handshake,finished[:]);assert(e==.None)
  event,_=server_handshake_peek(&owner);testing.expect_value(t,event.kind,.Handshake_Bytes);testing.expect_value(t,event.level,.Application)
@@ -68,4 +68,10 @@ server_tickets_binder_context_and_fallback :: proc(t:^testing.T) {
   // Changed authenticated context must choose a complete new handshake.
   server_handshake_abort(&owner);server_handshake_destroy(&owner);testing.expect_value(t,owner._stats.live_bytes,0)
  }
+}
+
+// The client handshake traffic secret of a TLS_AES_128_GCM_SHA256 flight.
+server_test_client_secret :: proc(owner: ^Server_Handshake) -> (secret: [32]u8) {
+	copy(secret[:], owner._flight.client_handshake_secret[:32])
+	return
 }

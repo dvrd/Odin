@@ -38,7 +38,9 @@ server_retry_begin :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 	for b,i in HELLO_RETRY_REQUEST_RANDOM {wire[at+i]=b}; at += 32
 	session := owner._hello.session_id
 	wire[at] = u8(len(session)); at += 1; copy(wire[at:], session); at += len(session)
-	hello_put_u16(wire[:], &at, 0x1301); wire[at] = 0; at += 1
+	hello_put_u16(wire[:], &at, u16(owner._selection.cipher))
+	wire[at] = 0
+	at += 1
 	hello_put_u16(wire[:], &at, 12)
 	hello_put_u16(wire[:], &at, 43); hello_put_u16(wire[:], &at, 2); hello_put_u16(wire[:], &at, 0x0304)
 	hello_put_u16(wire[:], &at, 51); hello_put_u16(wire[:], &at, 2); hello_put_u16(wire[:], &at, u16(owner._selection.group))

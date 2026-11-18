@@ -141,17 +141,49 @@ server_async_send_process :: proc(s:^Server_Async_Conn) {
 	}
 	s._tx_size,s._tx_plain_count=0,0
 }
-@(private)
-server_async_install :: proc(s:^Server_Async_Conn,direction:Server_Handshake_Direction,secret:[32]u8) {
-	key,iv:=traffic_key_iv(secret)
-	defer crypto.zero_explicit(&key,size_of(key));defer crypto.zero_explicit(&iv,size_of(iv))
-	keys:=server_async_keys(s)
-	if direction==.Read {record_protection_init(&keys.read,key,iv);s._read_keys=true} else {record_protection_init(&keys.write,key,iv);s._write_keys=true}
+// Installs a handshake traffic secret of suite for one direction.
+server_async_install :: proc(s: ^Server_Async_Conn, direction: Server_Handshake_Direction, suite: Cipher_Suite, secret: []u8) {
+	keys := server_async_keys(s)
+	if direction == .Read {
+		record_protection_init(&keys.read, suite, secret)
+		s._read_keys = true
+	} else {
+		record_protection_init(&keys.write, suite, secret)
+		s._write_keys = true
+	}
 }
-@(private)
-server_async_rotate :: proc(s:^Server_Async_Conn,direction:Server_Handshake_Direction) {
-	keys:=server_async_keys(s)
-	if direction==.Read {keys.application_read=traffic_secret_update(keys.application_read);server_async_install(s,.Read,keys.application_read)} else {
-		keys.application_write=traffic_secret_update(keys.application_write);server_async_install(s,.Write,keys.application_write)
+
+// Keeps an application traffic secret for KeyUpdate. The client's secret
+// protects what this server reads.
+server_async_application_secret :: proc(s: ^Server_Async_Conn, direction: Server_Handshake_Direction, suite: Cipher_Suite, secret: []u8) {
+	keys := server_async_keys(s)
+	schedule_load_secret(&keys.application, suite, secret, direction == .Read)
+	keys.application.is_client = false
+}
+
+// Derives the keys of the current application secret of one direction
+// (upstream's update_connection_aead) and moves them into its protection.
+server_async_application_install :: proc(s: ^Server_Async_Conn, direction: Server_Handshake_Direction) {
+	keys := server_async_keys(s)
+	if direction == .Read {
+		update_connection_aead(&keys.application, true, false)
+		record_protection_init(&keys.read, &keys.application.client_aead)
+		s._read_keys = true
+	} else {
+		update_connection_aead(&keys.application, false, false)
+		record_protection_init(&keys.write, &keys.application.server_aead)
+		s._write_keys = true
+	}
+}
+
+// KeyUpdate: the next generation of one direction (upstream's
+// update_connection_secret), installed at sequence zero.
+server_async_rotate :: proc(s: ^Server_Async_Conn, direction: Server_Handshake_Direction) {
+	keys := server_async_keys(s)
+	update_connection_secret(&keys.application, direction == .Write)
+	if direction == .Read {
+		record_protection_init(&keys.read, &keys.application.client_aead)
+	} else {
+		record_protection_init(&keys.write, &keys.application.server_aead)
 	}
 }

@@ -289,7 +289,7 @@ server_async_allocation_failure_and_handshake_cancel :: proc(t:^testing.T) {
 		r:TCP_Test_Result;op:=Server_Async_Handshake_Operation{callback=tcp_test_handshake,user_data=&r}
 		server_async_handshake(&s,&op);tcp_test_run(&stream)
 		if point==6 && r.calls==0 {
-			secret:=s._engine._flight.client_finished_secret;key,iv:=traffic_key_iv(secret)
+			secret:[32]u8;copy(secret[:],s._engine._flight.client_handshake_secret[:32]);key,iv:=traffic_key_iv(secret)
 			client:Record_Protection;record_protection_init(&client,key,iv)
 			bad:[36]u8;tcp_test_record(&stream,&client,.Handshake,bad[:]);tcp_test_run(&stream)
 		}

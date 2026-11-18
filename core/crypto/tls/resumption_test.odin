@@ -394,7 +394,9 @@ resumption_test_install :: proc(conn: ^Conn, shared: [32]u8, psk: []u8) {
 	defer crypto.zero_explicit(&local, size_of(local))
 
 	conn.server_parameters.cipher_suite = .TLS_AES_128_GCM_SHA256
-	client_handshake_secrets_install(conn, local[:], psk)
+	schedule_init(&conn.keys, .SHA256, psk)
+	update_handshake_keys(&conn.keys, local[:])
+	client_handshake_secrets_install(conn)
 }
 
 @(private)

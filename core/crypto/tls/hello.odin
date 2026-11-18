@@ -20,7 +20,15 @@ MAX_SERVER_NAME_SIZE :: 253
 // handshake. client_hello_encode itself stays the TLS 1.3-only profile.
 // MAX_RESUMPTION_EXTENSION fits one psk_dhe_ke offer and no early_data.
 // The extra 4 bytes are the empty early_data extension used only when opted in.
-MAX_CLIENT_HELLO_SIZE :: 139 + MAX_SERVER_NAME_SIZE + 6 + MAX_ALPN_OFFER_BYTES + 32 + MAX_RESUMPTION_EXTENSION + 4
+// The Upstream offer replaces the fixed 139-byte TLS 1.3 part by
+// MAX_UPSTREAM_OFFER_SIZE: three suites, every upstream signature scheme and
+// a key share for each of the five groups.
+MAX_CLIENT_HELLO_SIZE :: MAX_UPSTREAM_OFFER_SIZE + MAX_SERVER_NAME_SIZE + 6 + MAX_ALPN_OFFER_BYTES + 32 + MAX_RESUMPTION_EXTENSION + 4
+
+// Header, version, random, empty session, suites, compression, extension
+// length, supported_versions, server_name framing, signature_algorithms,
+// supported_groups and key_share for the Upstream offer.
+MAX_UPSTREAM_OFFER_SIZE :: 4 + 2 + 32 + 1 + 2 + 2 * 3 + 2 + 2 + 7 + 9 + 6 + 2 * 16 + 6 + 2 * 5 + 6 + 5 * 4 + 1216 + 56 + 97 + 32 + 65
 
 Client_Hello :: struct {
 	server_name:       string,
@@ -312,6 +320,125 @@ compatible_client_hello_encode :: proc(
 	return at, .None
 }
 
+// First flight of the Upstream offer: upstream's ClientHello (suites in the
+// given order, supported_versions 1.3 only, server_name, SIGNATURE_SCHEMES,
+// every group of keys with its key share, ALPN) without its legacy session
+// id. hello.x25519_public_key is ignored: the shares come from keys.
+upstream_client_hello_encode :: proc(
+	dst: []u8,
+	hello: Client_Hello,
+	suites: []Cipher_Suite,
+	keys: ^Ephemeral_Keys,
+) -> (
+	written: int,
+	err: Client_Hello_Error,
+) {
+	if !server_name_valid(hello.server_name) {
+		return 0, .Invalid_Server_Name
+	}
+
+	alpn_size, alpn_valid := alpn_protocols_size(hello.alpn_protocols)
+	if !alpn_valid {
+		return 0, .Invalid_ALPN
+	}
+
+	name := strings.trim_suffix(hello.server_name, ".")
+	if net.parse_address(hello.server_name) != nil {
+		name = ""
+	}
+
+	groups := keys.supported_groups
+	shares_size := 0
+	for group in groups {
+		shares_size += 4 + named_group_share_size(group, false)
+	}
+
+	extensions_size := 7 + 6 + 2 * len(SIGNATURE_SCHEMES) + 6 + 2 * len(groups) + 6 + shares_size
+	if len(name) > 0 {
+		extensions_size += 9 + len(name)
+	}
+	if alpn_size > 0 {
+		extensions_size += 6 + alpn_size
+	}
+
+	body_size := 2 + 32 + 1 + 2 + 2 * len(suites) + 2 + 2 + extensions_size
+	if len(dst) < 4 + body_size || extensions_size > 0xffff {
+		return 0, .Destination_Undersized
+	}
+
+	at := 0
+	dst[0] = u8(Handshake_Type.Client_Hello)
+	dst[1] = u8(body_size >> 16)
+	dst[2] = u8(body_size >> 8)
+	dst[3] = u8(body_size)
+	at = 4
+	hello_put_u16(dst, &at, u16(LEGACY_TLS_1_2))
+	random := hello.random
+	at += copy(dst[at:], random[:])
+	dst[at] = 0 // Empty legacy_session_id.
+	at += 1
+
+	hello_put_u16(dst, &at, u16(2 * len(suites)))
+	for suite in suites {
+		hello_put_u16(dst, &at, u16(suite))
+	}
+	dst[at] = 1 // One legacy compression method: null.
+	dst[at + 1] = 0
+	at += 2
+	hello_put_u16(dst, &at, u16(extensions_size))
+
+	hello_put_extension(dst, &at, .Supported_Versions, 3)
+	dst[at] = 2
+	at += 1
+	hello_put_u16(dst, &at, VERSION_TLS_1_3)
+
+	if len(name) > 0 {
+		hello_put_extension(dst, &at, .Server_Name, 5 + len(name))
+		hello_put_u16(dst, &at, u16(3 + len(name)))
+		dst[at] = 0 // host_name
+		at += 1
+		hello_put_u16(dst, &at, u16(len(name)))
+		at += copy(dst[at:], name)
+	}
+
+	hello_put_extension(dst, &at, .Signature_Algorithms, 2 + 2 * len(SIGNATURE_SCHEMES))
+	hello_put_u16(dst, &at, u16(2 * len(SIGNATURE_SCHEMES)))
+	for scheme in SIGNATURE_SCHEMES {
+		hello_put_u16(dst, &at, u16(scheme))
+	}
+
+	hello_put_extension(dst, &at, .Supported_Groups, 2 + 2 * len(groups))
+	hello_put_u16(dst, &at, u16(2 * len(groups)))
+	for group in groups {
+		hello_put_u16(dst, &at, u16(group))
+	}
+
+	hello_put_extension(dst, &at, .Key_Share, 2 + shares_size)
+	hello_put_u16(dst, &at, u16(shares_size))
+	for group in groups {
+		size := named_group_share_size(group, false)
+		hello_put_u16(dst, &at, u16(group))
+		hello_put_u16(dst, &at, u16(size))
+		client_key_share_bytes(keys, group, dst[at:at + size])
+		at += size
+	}
+
+	if alpn_size > 0 {
+		hello_put_extension(dst, &at, .Application_Layer_Protocol_Negotiation, 2 + alpn_size)
+		hello_put_u16(dst, &at, u16(alpn_size))
+		for protocol in hello.alpn_protocols {
+			dst[at] = u8(len(protocol))
+			at += 1
+			at += copy(dst[at:], protocol)
+		}
+	}
+
+	if at != 4 + body_size {
+		return 0, .Destination_Undersized
+	}
+	return at, .None
+}
+
 hello_put_u16 :: proc(dst: []u8, at: ^int, value: u16) {
 	dst[at^] = cast(u8)(value >> 8)
 	dst[at^ + 1] = cast(u8)value
@@ -329,14 +456,21 @@ hello_put_extension :: proc(dst: []u8, at: ^int, extension: Extension_Type, size
 // handshake response is 90 bytes. Resumption adds a 6-byte pre_shared_key
 // extension and no early_data, so the cap is 96 including the handshake header.
 MAX_SERVER_HELLO_SIZE :: 96
+// The same message with the largest key_share of the Upstream offer.
+MAX_UPSTREAM_SERVER_HELLO_SIZE :: MAX_SERVER_HELLO_SIZE - 32 + MAX_KEY_SHARE_SIZE
 
 Server_Hello :: struct {
 	random:            [32]u8,
 	version:           u16,
 	cipher_suite:      Cipher_Suite,
+	// Set when the server selected X25519.
 	x25519_public_key: [32]u8,
 	// True only when decode was asked to allow resumption identity 0.
 	psk_selected:      bool,
+	// The selected group and the server's share for it.
+	group:             Named_Group,
+	key_share:         [MAX_KEY_SHARE_SIZE]u8,
+	key_share_size:    int,
 }
 
 Server_Hello_Error :: enum {
@@ -369,6 +503,20 @@ Server_Hello_Error :: enum {
 // RFC 8446 sections 4.1.3, 4.1.4, 4.2.1, and 4.2.8. Validates against the
 // fixed offer in client_hello_encode. This does not authenticate the peer.
 server_hello_decode :: proc(wire: []u8, allow_psk: bool = false) -> (hello: Server_Hello, err: Server_Hello_Error) {
+	return server_hello_decode_offered(wire, COMPATIBLE_CIPHER_SUITES, COMPATIBLE_GROUPS, allow_psk)
+}
+
+// The same validation against an offer: the suite and the group must be ones
+// the client offered, and the share must have the size of its group.
+server_hello_decode_offered :: proc(
+	wire: []u8,
+	suites: []Cipher_Suite,
+	groups: []Named_Group,
+	allow_psk: bool = false,
+) -> (
+	hello: Server_Hello,
+	err: Server_Hello_Error,
+) {
 	if len(wire) < 4 do return {}, .Truncated
 
 	if wire[0] != cast(u8)Handshake_Type.Server_Hello {
@@ -393,7 +541,8 @@ server_hello_decode :: proc(wire: []u8, allow_psk: bool = false) -> (hello: Serv
 
 	if wire[38] != 0 do return {}, .Session_ID_Mismatch
 
-	if hello_u16(wire, 39) != cast(u16)Cipher_Suite.TLS_AES_128_GCM_SHA256 {
+	suite := Cipher_Suite(hello_u16(wire, 39))
+	if !cipher_suite_offered(suites, suite) {
 		return {}, .Unoffered_Cipher
 	}
 
@@ -403,13 +552,15 @@ server_hello_decode :: proc(wire: []u8, allow_psk: bool = false) -> (hello: Serv
 		return {}, .Extension_Length_Mismatch
 	}
 
-	return server_hello_extensions_decode(wire, &hello, allow_psk)
+	hello.cipher_suite = suite
+	return server_hello_extensions_decode(wire, &hello, allow_psk, groups)
 }
 
 server_hello_extensions_decode :: proc(
 	wire: []u8,
 	hello: ^Server_Hello,
 	allow_psk: bool = false,
+	groups: []Named_Group = COMPATIBLE_GROUPS,
 ) -> (
 	Server_Hello,
 	Server_Hello_Error,
@@ -451,15 +602,21 @@ server_hello_extensions_decode :: proc(
 				return {}, .Invalid_Key_Share_Length
 			}
 
-			if hello_u16(wire, at) != cast(u16)Named_Group.X25519 {
+			group := Named_Group(hello_u16(wire, at))
+			if !named_group_offered(groups, group) {
 				return {}, .Unoffered_Group
 			}
 
-			if size != 36 || hello_u16(wire, at + 2) != 32 {
+			share_size := named_group_share_size(group, true)
+			if share_size == 0 || size != 4 + share_size || int(hello_u16(wire, at + 2)) != share_size {
 				return {}, .Invalid_Key_Share_Length
 			}
 
-			for i in 0 ..< 32 do hello.x25519_public_key[i] = wire[at + 4 + i]
+			hello.group = group
+			hello.key_share_size = copy(hello.key_share[:], wire[at + 4:at + 4 + share_size])
+			if group == .X25519 {
+				copy(hello.x25519_public_key[:], hello.key_share[:share_size])
+			}
 		case 41: // pre_shared_key, identity 0 only. Early data is not accepted here.
 			if !allow_psk || psk_seen || size != 2 || hello_u16(wire, at) != 0 {
 				return {}, .Unsupported_Extension
@@ -479,8 +636,6 @@ server_hello_extensions_decode :: proc(
 	}
 
 	if !share_seen do return {}, .Missing_Key_Share
-
-	hello.cipher_suite = .TLS_AES_128_GCM_SHA256
 
 	return hello^, .None
 }

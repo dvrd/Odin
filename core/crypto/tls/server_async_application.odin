@@ -41,7 +41,7 @@ server_async_application_drive :: proc(s:^Server_Async_Conn) {
 				case .Handshake:
 					if !server_async_post_handshake(s,body) {return}
 				case .Alert:
-					if body[1]==0 {s._peer_closed=true;record_protection_clear(&server_async_keys(s).read);crypto.zero_explicit(&server_async_keys(s).application_read,32)} else if body[1]!=90 {
+					if body[1]==0 {s._peer_closed=true;record_protection_clear(&server_async_keys(s).read);crypto.zero_explicit(&server_async_keys(s).application.client_secret,size_of(server_async_keys(s).application.client_secret))} else if body[1]!=90 {
 						server_async_fail(s,{kind=.Protocol_Failed},{kind=.Peer_Alert,alert_level=body[0],alert_description=body[1]});return
 					}
 				case: server_async_fail(s,{kind=.Protocol_Failed},{kind=.Record,record=.Unexpected_Content_Type});return
