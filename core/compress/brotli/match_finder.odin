@@ -4,6 +4,7 @@ import "base:intrinsics"
 import "base:runtime"
 import "core:math/bits"
 
+
 // Match finder and parser for levels 0..9: every hash bucket keeps its newest
 // positions in a small ring, searched newest first after the recent distances.
 
@@ -291,110 +292,402 @@ parse_range :: proc(e: ^Encoder, start, end: int) -> runtime.Allocator_Error {
 // Misses before the step between probed positions grows by one, log2.
 FAST_PATIENCE :: 5
 
-// Levels 0 and 1: the last distance and one or four hash slots, positions
-// inside copies mostly left out of the table, and ever longer steps while
-// nothing matches. The table is not cleared: a stale or random slot is
-// rejected by comparing the bytes it points at.
-parse_fast :: proc(e: ^Encoder, start, end: int) -> runtime.Allocator_Error #no_bounds_check {
-	f := &e.finder
+// Shortest copy the fast levels take, and the bytes their hash covers: text
+// packs better without the copies of four and five bytes, which cost about
+// what they save, and there are fewer commands to find and write.
+FAST_MATCH_MIN :: 6
+
+#assert(FAST_MATCH_MIN <= size_of(u64))
+
+// Most hash slots a fast level looks at per position.
+FAST_SLOTS_MAX :: 2
+
+// A command of the fast levels with its symbols worked out: the parser has
+// time for that while it waits on memory, the writer has not.
+Fast_Record :: struct {
+	insert_length:   u32,
+	copy_length:     u32,
+	distance_extra:  u32,
+	symbol:          u16,
+	// Distance symbol plus one; zero when the command symbol stands for the
+	// last distance.
+	distance_symbol: u8,
+	distance_bits:   u8,
+}
+
+Fast_Histograms :: struct {
+	literal:  [LITERAL_ALPHABET]u32,
+	command:  [COMMAND_ALPHABET]u32,
+	distance: [PLAIN_DISTANCE_ALPHABET]u32,
+}
+
+// What is known about a position before it is looked at: its bytes, and the
+// table's candidates with theirs.
+Fast_Look :: struct {
+	word:       u64,
+	candidates: [FAST_SLOTS_MAX]int,
+	words:      [FAST_SLOTS_MAX]u64,
+}
+
+// Table of the fast levels: a position per slot and no counts, about a slot
+// per input byte up to 2^(15 + extra_bits). Zeroed, so that every slot
+// points into the data from the start.
+fast_finder_make :: proc(f: ^Finder, size: int, extra_bits: uint, allocator: runtime.Allocator) -> runtime.Allocator_Error {
+	table_bits := clamp(bits.len_u32(u32(min(size, 1 << 30))), BUCKET_BITS_MIN, BUCKET_BITS_MAX + int(extra_bits))
+	f.bucket_shift = u32(32 - table_bits)
+	f.buckets = make([]u32, 1 << uint(table_bits), allocator) or_return
+
+	return nil
+}
+
+// Room for the records of one block of `length` bytes; they are written
+// before they are read.
+fast_records_make :: proc(length: int, allocator: runtime.Allocator) -> ([]Fast_Record, runtime.Allocator_Error) {
+	count := length / FAST_MATCH_MIN + 1
+	memory, memory_error := runtime.mem_alloc_non_zeroed(count * size_of(Fast_Record), align_of(Fast_Record), allocator)
+
+	if memory_error != nil {
+		return nil, memory_error
+	}
+
+	return ([^]Fast_Record)(raw_data(memory))[:count], nil
+}
+
+fast_word :: #force_inline proc(src: []u8, position: int) -> u64 #no_bounds_check {
+	return u64(intrinsics.unaligned_load((^u64le)(&src[position])))
+}
+
+fast_hash :: #force_inline proc(word: u64, shift: u32) -> u32 {
+	return u32((word << (64 - 8 * FAST_MATCH_MIN)) * 0x1e35a7bd1e35a7bd >> (32 + shift))
+}
+
+// True when the two words start with the same FAST_MATCH_MIN bytes.
+fast_same :: #force_inline proc(a, b: u64) -> bool {
+	return (a ~ b) << (64 - 8 * FAST_MATCH_MIN) == 0
+}
+
+fast_slot :: #force_inline proc(word: u64, position: int, shift, mask: u32, $SLOTS: u32) -> u32 {
+	return (fast_hash(word, shift) + u32(position >> 3) & (SLOTS - 1)) & mask
+}
+
+// Reads what the table holds for `position` and enters the position.
+fast_look :: #force_inline proc(src: []u8, table: [^]u32, position: int, shift, mask: u32, $SLOTS: u32) -> (look: Fast_Look) #no_bounds_check {
+	look.word = fast_word(src, position)
+	key := fast_hash(look.word, shift)
+
+	for slot in 0 ..< SLOTS {
+		look.candidates[slot] = int(table[(key + slot) & mask])
+		look.words[slot] = fast_word(src, look.candidates[slot])
+	}
+
+	table[fast_slot(look.word, position, shift, mask, SLOTS)] = u32(position)
+
+	return
+}
+
+// Parses src[start:end] into `records`, counts their symbols and returns how
+// many there are and how many literals follow the last copy. Levels 0 and 1:
+// the last distance and one or two hash slots, copies of six bytes or more,
+// positions inside copies mostly left out of the table, and ever longer
+// steps while nothing matches.
+//
+// After a copy nothing can go on before the table and the candidate of the
+// next position have been read, so those reads are started first and the
+// bookkeeping of the copy is done while they are under way.
+parse_fast :: proc(
+	e: ^Encoder,
+	start, end: int,
+	records: []Fast_Record,
+	histograms: ^Fast_Histograms,
+	$SLOTS: u32,
+) -> (
+	total: int,
+	trailing: int,
+) #no_bounds_check {
+	// Level 0 gives up on unmatched data sooner, enters fewer positions of a
+	// copy and takes the last distance whenever it matches; level 1 keeps
+	// looking unless it matches well.
+	PATIENCE :: FAST_PATIENCE when SLOTS == 1 else FAST_PATIENCE + 1
+	GOOD :: FAST_MATCH_MIN when SLOTS == 1 else 16
+	TAIL :: 2 when SLOTS == 1 else 4
+
 	src := e.src
-	table := f.buckets
+	table := raw_data(e.finder.buckets)
+	shift := e.finder.bucket_shift
+	mask := u32(len(e.finder.buckets) - 1)
+	window := uint(e.window_max)
+	// A word is read at every position looked at.
+	last := min(end - FAST_MATCH_MIN, len(src) - size_of(u64))
 	position := start
 	literal_start := start
-	last := end - 4
 	misses := 0
+	last_distance := int(e.ring[0])
+	look: Fast_Look
 
-	shift := f.bucket_shift - u32(f.block_bits)
-	mask := u32(len(table) - 1)
-	sweep := u32(1) << f.block_bits
-	// Level 0 looks no further once anything matches and gives up on
-	// unmatched data sooner; level 1 probes four slots.
-	patient := e.level > Level(0)
-	patience: uint = FAST_PATIENCE + 1 if patient else FAST_PATIENCE
-	good := 16 if patient else 4
-	tail := 8 if patient else 2
+	if position <= last {
+		look = fast_look(src, table, position, shift, mask, SLOTS)
+	}
 
 	for position <= last {
-		key := hash4(src, position) >> shift
-		reach := min(position, e.window_max)
-		head := intrinsics.unaligned_load((^u32)(&src[position]))
-		distance := int(e.ring[0])
 		length := 0
+		distance := last_distance
 
-		if distance <= reach && intrinsics.unaligned_load((^u32)(&src[position - distance])) == head {
+		if distance <= position && fast_same(fast_word(src, position - distance), look.word) {
 			length = common_length(src, position - distance, position, end - position)
 		}
 
-		if length < good {
-			best := length
+		if length < GOOD {
+			for slot in 0 ..< SLOTS {
+				candidate := look.candidates[slot]
 
-			for slot in 0 ..< sweep {
-				candidate := int(table[(key + slot) & mask])
-
-				if candidate >= position || position - candidate > reach {
-					continue
-				}
-
-				if intrinsics.unaligned_load((^u32)(&src[candidate])) != head {
+				// An empty slot holds position zero, which is as good a
+				// candidate as any other.
+				if !fast_same(look.words[slot], look.word) || uint(position - candidate - 1) >= window {
 					continue
 				}
 
 				found := common_length(src, candidate, position, end - position)
 
-				if found > best + (1 if best >= 4 else 0) {
-					best = found
+				// A new distance has to pay for itself.
+				if found > length + (1 if length > 0 else 0) {
+					length = found
 					distance = position - candidate
 				}
 			}
-
-			length = best
 		}
 
-		table[(key + u32(position >> 3) & (sweep - 1)) & mask] = u32(position)
-
-		if length < 4 {
-			position += 1 + misses >> patience
+		if length == 0 {
+			position += 1 + misses >> PATIENCE
 			misses += 1
+
+			if position <= last {
+				look = fast_look(src, table, position, shift, mask, SLOTS)
+			}
+
 			continue
 		}
 
-		misses = 0
+		next := position + length
+
+		if next <= last {
+			for back in 1 ..= TAIL {
+				table[fast_slot(fast_word(src, next - back), next - back, shift, mask, SLOTS)] = u32(next - back)
+			}
+
+			look = fast_look(src, table, next, shift, mask, SLOTS)
+		}
 
 		// Only the last distance gets a short code here: the other fifteen
 		// cost more to look for than they save at this level.
-		insert := insert_code(position - literal_start)
-		copy := copy_code(length)
-		command := Command {
-			insert_length = u32(position - literal_start),
+		insert_length := position - literal_start
+		repeated := distance == last_distance
+		symbol := command_symbol(insert_code(insert_length), copy_code(length), repeated)
+		histograms.command[symbol] += 1
+
+		for value in src[literal_start:position] {
+			histograms.literal[value] += 1
+		}
+
+		record := Fast_Record {
+			insert_length = u32(insert_length),
 			copy_length   = u32(length),
-			distance      = u32(distance),
-			code          = u32(distance) + 15,
-			insert_code   = u8(insert),
-			copy_code     = u8(copy),
+			symbol        = u16(symbol),
 		}
 
-		if distance == int(e.ring[0]) {
-			command.code = 0
-		} else {
-			ring_push(&e.ring, distance)
+		if !repeated {
+			prefix, extra_bits, extra := distance_prefix(u32(distance) + 15, 0, 0)
+			record.distance_symbol = u8(prefix) + 1
+			record.distance_bits = extra_bits
+			record.distance_extra = extra
+		} else if !distance_is_implicit(u16(symbol)) {
+			record.distance_symbol = 1
 		}
 
-		command.symbol = u16(command_symbol(insert, copy, command.code == 0))
-		append(&e.commands, command) or_return
-		position += length
-		literal_start = position
+		if record.distance_symbol != 0 {
+			histograms.distance[record.distance_symbol - 1] += 1
+		}
 
-		if position <= last {
-			for back in 1 ..= min(tail, length - 1) {
-				at := position - back
-				table[(hash4(src, at) >> shift + u32(at >> 3) & (sweep - 1)) & mask] = u32(at)
-			}
+		records[total] = record
+		total += 1
+		last_distance = distance
+		misses = 0
+		position = next
+		literal_start = next
+	}
+
+	e.ring[0] = i32(last_distance)
+
+	return total, end - literal_start
+}
+
+// Pending output bits of the fast writer, which knows the size of what it
+// writes beforehand and has the room reserved.
+Fast_Bits :: struct {
+	accumulator: u64,
+	count:       uint,
+	out:         uintptr,
+}
+
+// At most 56 bits may be pending after this. The counts are masked to what
+// they can be, which spares the shifts their check for 64 and more.
+fast_put :: #force_inline proc(b: ^Fast_Bits, value: u64, width: uint) {
+	b.accumulator |= value << (b.count & 63)
+	b.count += width
+}
+
+// Stores the whole bytes; up to 7 bits stay pending.
+fast_flush :: #force_inline proc(b: ^Fast_Bits) {
+	intrinsics.unaligned_store((^u64le)(rawptr(b.out)), u64le(b.accumulator))
+	b.out += uintptr(b.count >> 3)
+	b.accumulator >>= b.count & 56
+	b.count &= 7
+}
+
+// Command symbol with its insert and copy extra bits, then the literals.
+fast_command :: #force_inline proc(
+	b: ^Fast_Bits,
+	commands: ^[COMMAND_ALPHABET]u32,
+	literals: ^[LITERAL_ALPHABET]u32,
+	inserted: []u8,
+	copy_length: u32,
+	symbol: int,
+) #no_bounds_check {
+	cell := symbol >> 6
+	insert := int(COMMAND_INSERT_CELL[cell]) + symbol >> 3 & 7
+	copy := int(COMMAND_COPY_CELL[cell]) + symbol & 7
+	entry := commands[symbol]
+	fast_put(b, u64(entry & 0xffff), uint(entry >> 16))
+	fast_put(b, u64(u32(len(inserted)) - INSERT_BASE[insert]), uint(INSERT_EXTRA[insert]))
+
+	// Only the longest lengths have more extra bits than fit at once.
+	if insert > 20 || copy > 20 {
+		fast_flush(b)
+	}
+
+	fast_put(b, u64(copy_length - COPY_BASE[copy]), uint(COPY_EXTRA[copy]))
+	fast_flush(b)
+	index := 0
+
+	for ; index + 2 <= len(inserted); index += 2 {
+		first := literals[inserted[index]]
+		second := literals[inserted[index + 1]]
+		fast_put(b, u64(first & 0xffff), uint(first >> 16))
+		fast_put(b, u64(second & 0xffff), uint(second >> 16))
+		fast_flush(b)
+	}
+
+	if index < len(inserted) {
+		entry = literals[inserted[index]]
+		fast_put(b, u64(entry & 0xffff), uint(entry >> 16))
+		fast_flush(b)
+	}
+}
+
+// Parses src[start:end] and writes it as a meta-block with one prefix code
+// per alphabet and no context modelling, or as stored bytes when smaller.
+write_fast_meta_block :: proc(e: ^Encoder, records: []Fast_Record, start, end: int, last: bool) -> runtime.Allocator_Error #no_bounds_check {
+	w := &e.writer
+	src := e.src
+	mark_size := len(w.out)
+	mark_accumulator := w.accumulator
+	mark_count := w.count
+	ring := e.ring
+
+	histograms: Fast_Histograms
+	total, trailing: int
+
+	if e.level == Level(0) {
+		total, trailing = parse_fast(e, start, end, records, &histograms, 1)
+	} else {
+		total, trailing = parse_fast(e, start, end, records, &histograms, 2)
+	}
+
+	// The literals after the last copy: a command whose copy is never read.
+	trailing_symbol := command_symbol(insert_code(trailing), 0, true)
+
+	if trailing > 0 {
+		histograms.command[trailing_symbol] += 1
+
+		for value in src[end - trailing:end] {
+			histograms.literal[value] += 1
 		}
 	}
 
-	if literal_start < end {
-		push_command(e, end, end - literal_start, 0, 0, 0) or_return
+	write_plain_header(w, end - start, last)
+
+	literal_lengths: [LITERAL_ALPHABET]u8
+	literal_codes: [LITERAL_ALPHABET]u16
+	command_lengths: [COMMAND_ALPHABET]u8
+	command_codes: [COMMAND_ALPHABET]u16
+	distance_lengths: [PLAIN_DISTANCE_ALPHABET]u8
+	distance_codes: [PLAIN_DISTANCE_ALPHABET]u16
+	build_and_write_code(e, histograms.literal[:], literal_lengths[:], literal_codes[:], true)
+	build_and_write_code(e, histograms.command[:], command_lengths[:], command_codes[:], true)
+	build_and_write_code(e, histograms.distance[:], distance_lengths[:], distance_codes[:], true)
+
+	// The counts and the codes give the exact size: data that does not
+	// shrink is stored without being coded first.
+	literal_table: [LITERAL_ALPHABET]u32
+	command_table: [COMMAND_ALPHABET]u32
+	coded := (len(w.out) - mark_size) * 8 + int(w.count) - int(mark_count)
+
+	for &entry, value in literal_table {
+		entry = u32(literal_codes[value]) | u32(literal_lengths[value]) << 16
+		coded += int(histograms.literal[value]) * int(literal_lengths[value])
 	}
+
+	for &entry, symbol in command_table {
+		cell := symbol >> 6
+		extra := INSERT_EXTRA[int(COMMAND_INSERT_CELL[cell]) + symbol >> 3 & 7] + COPY_EXTRA[int(COMMAND_COPY_CELL[cell]) + symbol & 7]
+		entry = u32(command_codes[symbol]) | u32(command_lengths[symbol]) << 16
+		coded += int(histograms.command[symbol]) * int(command_lengths[symbol] + extra)
+	}
+
+	for count, symbol in histograms.distance {
+		extra := (symbol - 14) >> 1 if symbol >= 16 else 0
+		coded += int(count) * (int(distance_lengths[symbol]) + extra)
+	}
+
+	raw := (^runtime.Raw_Dynamic_Array)(&w.out)
+
+	if coded > (end - start + 4) * 8 {
+		e.ring = ring
+		raw.len = mark_size
+		w.accumulator = mark_accumulator
+		w.count = mark_count
+
+		return write_stored_meta_block(w, src[start:end], last)
+	}
+
+	if raw.len + coded / 8 + 16 > raw.cap {
+		reserve(&w.out, max(raw.cap * 2, raw.len + coded / 8 + 16)) or_return
+	}
+
+	b := Fast_Bits{w.accumulator, w.count, uintptr(raw.data) + uintptr(raw.len)}
+	fast_flush(&b)
+	position := start
+
+	for record in records[:total] {
+		fast_command(&b, &command_table, &literal_table, src[position:][:record.insert_length], record.copy_length, int(record.symbol))
+
+		if record.distance_symbol != 0 {
+			prefix := record.distance_symbol - 1
+			fast_put(&b, u64(distance_codes[prefix]), uint(distance_lengths[prefix]))
+			fast_put(&b, u64(record.distance_extra), uint(record.distance_bits))
+			fast_flush(&b)
+		}
+
+		position += int(record.insert_length) + int(record.copy_length)
+	}
+
+	if trailing > 0 {
+		fast_command(&b, &command_table, &literal_table, src[position:end], 2, trailing_symbol)
+	}
+
+	raw.len = int(b.out - uintptr(raw.data))
+	w.accumulator = b.accumulator
+	w.count = b.count
+	assert((len(w.out) - mark_size) * 8 + int(w.count) - int(mark_count) == coded)
 
 	return nil
 }

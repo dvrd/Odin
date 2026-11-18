@@ -4,6 +4,7 @@ import "base:intrinsics"
 import "base:runtime"
 import "core:compress"
 import "core:math/bits"
+import "core:slice"
 
 // Brotli (RFC 7932) encoder for input held in memory.
 //
@@ -75,7 +76,8 @@ Parameters :: struct {
 }
 
 // One row per level 0..11, as the qualities of the reference encoder; the
-// last two rows parse optimally and only use the modelling flags.
+// first two rows only size their table with block_bits, the last two parse
+// optimally and only use the modelling flags.
 @(rodata)
 PARAMETERS := [12]Parameters {
 	{0, 4, false, false, false},
@@ -166,17 +168,23 @@ encode_meta_blocks :: proc(
 
 	optimal: ^Optimal
 	parsed: [dynamic]Command
-
-	if e.level >= OPTIMAL_LEVEL_MIN {
-		optimal = optimal_make(e, min(len(src), OPTIMAL_BLOCK), allocator) or_return
-		parsed = make([dynamic]Command, allocator) or_return
-	} else {
-		finder_make(&e.finder, len(src), e.parameters.block_bits, e.parameters.cache_size, allocator) or_return
-	}
+	records: []Fast_Record
 
 	defer optimal_destroy(optimal, allocator)
 	defer delete(parsed)
 	defer finder_destroy(&e.finder, allocator)
+	defer delete(records, allocator)
+
+	switch {
+	case e.level >= OPTIMAL_LEVEL_MIN:
+		optimal = optimal_make(e, min(len(src), OPTIMAL_BLOCK), allocator) or_return
+		parsed = make([dynamic]Command, allocator) or_return
+	case e.level <= FAST_LEVEL_MAX:
+		fast_finder_make(&e.finder, len(src), e.parameters.block_bits, allocator) or_return
+		records = fast_records_make(min(len(src), PLAIN_BLOCK), allocator) or_return
+	case:
+		finder_make(&e.finder, len(src), e.parameters.block_bits, e.parameters.cache_size, allocator) or_return
+	}
 
 	w := &e.writer
 
@@ -212,7 +220,10 @@ encode_meta_blocks :: proc(
 
 			e.commands, parsed = parsed, e.commands
 		} else if e.level <= FAST_LEVEL_MAX {
-			parse_fast(e, start, end) or_return
+			write_fast_meta_block(e, records, start, end, end == len(src)) or_return
+			start = end
+
+			continue
 		} else {
 			parse_range(e, start, end) or_return
 		}
@@ -646,9 +657,78 @@ write_context_map :: proc(e: ^Encoder, mapping: []u8, trees: int) {
 	write_bits(w, 1, 1)
 }
 
+// Code lengths of at most `limit` for `frequencies`, of which two or more
+// are not zero: a plain Huffman tree, built again with the rarest counts
+// raised while it comes out too deep. Rarely worse than the package merge
+// and several times quicker, which is what the fast levels need.
+quick_code_lengths :: proc(frequencies: []u32, limit: u16, lengths: []u8) #no_bounds_check {
+	// Leaves in order of weight, then the inner nodes in the order made.
+	keys: [ALPHABET_MAX]u64 = ---
+	weights: [2 * ALPHABET_MAX]u64 = ---
+	parents: [2 * ALPHABET_MAX]u16 = ---
+	depths: [2 * ALPHABET_MAX]u16 = ---
+	used := 0
+
+	for frequency, symbol in frequencies {
+		lengths[symbol] = 0
+
+		if frequency != 0 {
+			keys[used] = u64(frequency) << 16 | u64(symbol)
+			used += 1
+		}
+	}
+
+	slice.sort(keys[:used])
+
+	for floor := u64(1);; floor *= 2 {
+		for key, index in keys[:used] {
+			weights[index] = max(key >> 16, floor)
+		}
+
+		// Both queues are sorted: the two lightest nodes are at their heads.
+		leaf := 0
+		inner := used
+		root := 2 * used - 2
+
+		for node in used ..= root {
+			weight := u64(0)
+
+			for _ in 0 ..< 2 {
+				if leaf < used && (inner == node || weights[leaf] <= weights[inner]) {
+					weight += weights[leaf]
+					parents[leaf] = u16(node)
+					leaf += 1
+				} else {
+					weight += weights[inner]
+					parents[inner] = u16(node)
+					inner += 1
+				}
+			}
+
+			weights[node] = weight
+		}
+
+		depths[root] = 0
+
+		for node := root - 1; node >= 0; node -= 1 {
+			depths[node] = depths[parents[node]] + 1
+		}
+
+		// The lightest leaf is the deepest.
+		if depths[0] <= limit {
+			break
+		}
+	}
+
+	for key, index in keys[:used] {
+		lengths[key & 0xffff] = u8(depths[index])
+	}
+}
+
 // Builds the length-limited code for `histogram`, writes its description and
-// leaves `lengths`/`codes` ready for writing symbols.
-build_and_write_code :: proc(e: ^Encoder, histogram: []u32, lengths: []u8, codes: []u16) {
+// leaves `lengths`/`codes` ready for writing symbols. `quick` trades a little
+// of the code's quality for the time to build it.
+build_and_write_code :: proc(e: ^Encoder, histogram: []u32, lengths: []u8, codes: []u16, quick := false) {
 	w := &e.writer
 	alphabet := len(histogram)
 	used: [4]int
@@ -683,7 +763,12 @@ build_and_write_code :: proc(e: ^Encoder, histogram: []u32, lengths: []u8, codes
 		return
 	}
 
-	compress.huffman_lengths(e.huffman, histogram, CODE_LENGTH_MAX, lengths)
+	if quick {
+		quick_code_lengths(histogram, CODE_LENGTH_MAX, lengths)
+	} else {
+		compress.huffman_lengths(e.huffman, histogram, CODE_LENGTH_MAX, lengths)
+	}
+
 	compress.huffman_codes(lengths, codes)
 
 	if used_count <= 4 {
@@ -889,7 +974,6 @@ write_plain_meta_block :: proc(e: ^Encoder, start, end: int, last: bool, ring: R
 	w := &e.writer
 	src := e.src
 	length := end - start
-	nibbles := 6 if length > 1 << 20 else 5 if length > 1 << 16 else 4
 	mark_size := len(w.out)
 	mark_accumulator := w.accumulator
 	mark_count := w.count
@@ -925,22 +1009,7 @@ write_plain_meta_block :: proc(e: ^Encoder, start, end: int, last: bool, ring: R
 		smooth_for_rle(distance_histogram[:])
 	}
 
-	write_bits(w, 1 if last else 0, 1)
-
-	if last {
-		write_bits(w, 0, 1)
-	}
-
-	write_bits(w, u64(nibbles - 4), 2)
-	write_bits(w, u64(length - 1), uint(nibbles * 4))
-
-	if !last {
-		write_bits(w, 0, 1)
-	}
-
-	// One block type per category; NPOSTFIX and NDIRECT zero; a context
-	// mode; one literal and one distance tree.
-	write_bits(w, 0, 3 + 6 + 2 + 2)
+	write_plain_header(w, length, last)
 
 	literal_lengths: [LITERAL_ALPHABET]u8
 	literal_codes: [LITERAL_ALPHABET]u16
@@ -983,18 +1052,49 @@ write_plain_meta_block :: proc(e: ^Encoder, start, end: int, last: bool, ring: R
 		return nil
 	}
 
-	// Stored meta-block; it cannot be the last one, so an empty one follows.
 	(^runtime.Raw_Dynamic_Array)(&w.out).len = mark_size
 	w.accumulator = mark_accumulator
 	w.count = mark_count
 	e.ring = ring
 
-	write_bits(w, 0, 1)
+	return write_stored_meta_block(w, src[start:end], last)
+}
+
+meta_block_nibbles :: proc(length: int) -> int {
+	return 6 if length > 1 << 20 else 5 if length > 1 << 16 else 4
+}
+
+// Header of a meta-block of `length` bytes without block splits or context
+// modelling, up to where its three prefix codes follow.
+write_plain_header :: proc(w: ^Bit_Writer, length: int, last: bool) {
+	nibbles := meta_block_nibbles(length)
+	write_bits(w, 1 if last else 0, 1)
+
+	if last {
+		write_bits(w, 0, 1)
+	}
+
 	write_bits(w, u64(nibbles - 4), 2)
 	write_bits(w, u64(length - 1), uint(nibbles * 4))
+
+	if !last {
+		write_bits(w, 0, 1)
+	}
+
+	// One block type per category; NPOSTFIX and NDIRECT zero; a context
+	// mode; one literal and one distance tree.
+	write_bits(w, 0, 3 + 6 + 2 + 2)
+}
+
+// Stored meta-block; it cannot be the last one, so an empty one follows.
+write_stored_meta_block :: proc(w: ^Bit_Writer, data: []u8, last: bool) -> runtime.Allocator_Error {
+	nibbles := meta_block_nibbles(len(data))
+	write_bits(w, 0, 1)
+	write_bits(w, u64(nibbles - 4), 2)
+	write_bits(w, u64(len(data) - 1), uint(nibbles * 4))
 	write_bits(w, 1, 1)
 	flush_bits(w)
-	append(&w.out, ..src[start:end]) or_return
+	append(&w.out, ..data) or_return
 
 	if last {
 		write_bits(w, 3, 2)
