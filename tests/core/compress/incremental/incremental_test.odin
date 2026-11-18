@@ -2,8 +2,7 @@ package incremental_test
 
 import "core:bytes"
 import "core:compress"
-import "core:compress/gzip"
-import "core:compress/zlib"
+import "core:compress/deflate"
 import "core:mem"
 import "core:testing"
 
@@ -17,14 +16,14 @@ empty_gzip := #load("testdata/empty.gz")
 // Input partitions, output capacity and work budgets vary independently.
 // Compare every successful output span against independent reference bytes.
 drive_gzip :: proc(encoded, expected: []u8, input_size, output_size, work: int,
-	config: gzip.Config) -> compress.Decode_Error {
-	d: gzip.Decoder
-	if e := gzip.decoder_init(&d, config); e != .None {return e}
+	config: deflate.Gzip_Decoder_Config) -> compress.Decode_Error {
+	d: deflate.Gzip_Decoder
+	if e := deflate.inflate_gzip_decoder_init(&d, config); e != .None {return e}
 	at, produced := 0, 0
 	output: [8192]u8
 	for _ in 0..<2_000_000 {
 		end := min(at+input_size, len(encoded))
-		r := gzip.decoder_step(&d, encoded[at:end], output[:output_size], end == len(encoded), work)
+		r := deflate.inflate_gzip_decoder_step(&d, encoded[at:end], output[:output_size], end == len(encoded), work)
 		if r.consumed < 0 || r.consumed > end-at || r.produced < 0 ||
 			r.produced > output_size || r.work < 0 || r.work > work {return .Invalid_State}
 		at += r.consumed
@@ -43,7 +42,7 @@ drive_gzip :: proc(encoded, expected: []u8, input_size, output_size, work: int,
 	return .Invalid_State
 }
 
-limits :: proc(encoded, decoded: int, members: u32 = 1, header: u32 = 8192) -> gzip.Config {
+limits :: proc(encoded, decoded: int, members: u32 = 1, header: u32 = 8192) -> deflate.Gzip_Decoder_Config {
 	return {u64(encoded), u64(decoded), header, members}
 }
 
@@ -74,14 +73,14 @@ raw_stored_fixed_dynamic_and_precise_trailer_boundary :: proc(t: ^testing.T) {
 	for wire in ([]([]u8){#load("testdata/stored.deflate"),
 		#load("testdata/fixed.deflate"), #load("testdata/dynamic.deflate")}) {
 		for input_size in ([2]int{1, len(wire)}) {
-			d: zlib.Inflate_State
-			testing.expect_value(t, zlib.inflate_init(&d, u64(len(wire)), u64(len(payload))), .None)
+			d: deflate.Inflate_Decoder
+			testing.expect_value(t, deflate.inflate_decoder_init(&d, u64(len(wire)), u64(len(payload))), .None)
 			at, produced := 0, 0
 			output: [113]u8
 			finished := false
 			for _ in 0..<2_000_000 {
 				end := min(at+input_size, len(wire))
-				r := zlib.inflate_step(&d, wire[at:end], output[:], end == len(wire), 7)
+				r := deflate.inflate_decoder_step(&d, wire[at:end], output[:], end == len(wire), 7)
 				testing.expect(t, r.work <= 7 && r.consumed <= end-at && r.produced <= len(output))
 				if r.err != .None {testing.expect_value(t, r.err, .None); break}
 				at += r.consumed
@@ -94,10 +93,10 @@ raw_stored_fixed_dynamic_and_precise_trailer_boundary :: proc(t: ^testing.T) {
 		}
 	}
 	// DEFLATE must leave the following gzip trailer bytes unread.
-	d: zlib.Inflate_State
-	_ = zlib.inflate_init(&d, u64(len(small_gzip)), u64(len(small)))
+	d: deflate.Inflate_Decoder
+	_ = deflate.inflate_decoder_init(&d, u64(len(small_gzip)), u64(len(small)))
 	output: [128]u8
-	r := zlib.inflate_step(&d, small_gzip[10:], output[:], true)
+	r := deflate.inflate_decoder_step(&d, small_gzip[10:], output[:], true)
 	testing.expect(t, r.err == .None && r.status == .Done)
 	testing.expect_value(t, r.consumed, len(small_gzip)-18)
 }
@@ -105,7 +104,7 @@ raw_stored_fixed_dynamic_and_precise_trailer_boundary :: proc(t: ^testing.T) {
 @(test)
 gzip_limits_metadata_members_and_zero_remaining_credit :: proc(t: ^testing.T) {
 	concat := #load("testdata/concat.gz")
-	for test in ([]struct{wire, plain: []u8, config: gzip.Config, error: compress.Decode_Error}{
+	for test in ([]struct{wire, plain: []u8, config: deflate.Gzip_Decoder_Config, error: compress.Decode_Error}{
 		{small_gzip, small, limits(len(small_gzip)-1, len(small)), .Encoded_Limit},
 		{small_gzip, small, limits(len(small_gzip), len(small)-1), .Decoded_Limit},
 		{optional_gzip, small, limits(len(optional_gzip), len(small), 1, 12), .Metadata_Limit},
@@ -131,43 +130,43 @@ gzip_corrupt_trailers_headers_and_every_truncation :: proc(t: ^testing.T) {
 	for n in 0..<len(optional_gzip) {
 		testing.expect_value(t, drive_gzip(optional_gzip[:n], small, 1, 17, 1, limits(1000, 1000)), .Truncated)
 	}
-	d: zlib.Inflate_State
-	_ = zlib.inflate_init(&d, 1, 10)
+	d: deflate.Inflate_Decoder
+	_ = deflate.inflate_decoder_init(&d, 1, 10)
 	bad := [1]u8{7} // RFC1951 reserved BTYPE=11.
 	output: [8]u8
-	r := zlib.inflate_step(&d, bad[:], output[:], true, 1)
+	r := deflate.inflate_decoder_step(&d, bad[:], output[:], true, 1)
 	testing.expect_value(t, r.err, .Malformed)
 }
 
 @(test)
 gzip_argument_atomicity_sticky_failure_and_terminal_state :: proc(t: ^testing.T) {
-	d: gzip.Decoder
-	_ = gzip.decoder_init(&d)
+	d: deflate.Gzip_Decoder
+	_ = deflate.inflate_gzip_decoder_init(&d)
 	before := d
 	buffer: [64]u8
 	copy(buffer[:], small_gzip)
 	bytes_before := buffer
-	r := gzip.decoder_step(&d, buffer[:20], buffer[4:24], false)
+	r := deflate.inflate_gzip_decoder_step(&d, buffer[:20], buffer[4:24], false)
 	testing.expect_value(t, r.err, .Overlapping_Buffers)
 	testing.expect(t, bytes.equal(mem.byte_slice(&d, size_of(d)), mem.byte_slice(&before, size_of(before))))
 	testing.expect(t, bytes.equal(buffer[:], bytes_before[:]))
 	for budget in ([3]int{-1, 0, compress.DECODE_MAX_WORK+1}) {
-		r = gzip.decoder_step(&d, small_gzip, buffer[:], true, budget)
+		r = deflate.inflate_gzip_decoder_step(&d, small_gzip, buffer[:], true, budget)
 		testing.expect_value(t, r.err, .Invalid_Config)
 		testing.expect(t, bytes.equal(mem.byte_slice(&d, size_of(d)), mem.byte_slice(&before, size_of(before))))
 	}
-	r = gzip.decoder_step(&d, small_gzip[:1], buffer[:], true)
+	r = deflate.inflate_gzip_decoder_step(&d, small_gzip[:1], buffer[:], true)
 	testing.expect_value(t, r.err, .Truncated)
-	r = gzip.decoder_step(&d, small_gzip, buffer[:], false)
+	r = deflate.inflate_gzip_decoder_step(&d, small_gzip, buffer[:], false)
 	testing.expect_value(t, r.err, .Truncated)
-	_ = gzip.decoder_init(&d)
-	r = gzip.decoder_step(&d, small_gzip, buffer[:], false)
+	_ = deflate.inflate_gzip_decoder_init(&d)
+	r = deflate.inflate_gzip_decoder_step(&d, small_gzip, buffer[:], false)
 	testing.expect(t, r.err == .None && r.status == .Need_Input)
-	r = gzip.decoder_step(&d, nil, buffer[:], true)
+	r = deflate.inflate_gzip_decoder_step(&d, nil, buffer[:], true)
 	testing.expect(t, r.err == .None && r.status == .Done)
-	r = gzip.decoder_step(&d, nil, buffer[:], true)
+	r = deflate.inflate_gzip_decoder_step(&d, nil, buffer[:], true)
 	testing.expect(t, r.err == .None && r.status == .Done)
 	garbage := [1]u8{0}
-	r = gzip.decoder_step(&d, garbage[:], buffer[:], true)
+	r = deflate.inflate_gzip_decoder_step(&d, garbage[:], buffer[:], true)
 	testing.expect_value(t, r.err, .Trailing_Data)
 }

@@ -25,8 +25,7 @@ Decode_Result :: struct {
 }
 
 // One work unit is a bounded parser action, symbol, output byte, or Huffman
-// table construction phase (at most two tables, each with at most 288 symbols,
-// 512 fast entries and 16 code lengths).
+// table construction phase (at most two tables of at most 288 symbols each).
 // No step accepts an unbounded work budget.
 DECODE_MAX_WORK :: 65536
 
