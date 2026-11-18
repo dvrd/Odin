@@ -74,7 +74,6 @@ handshake_until :: proc(conn: ^Conn, deadline: time.Time) -> Handshake_Error {
 	return handshake_until_check(conn, effective)
 }
 
-@(private)
 handshake_until_internal :: proc(conn: ^Conn, deadline: time.Time) -> Handshake_Error {
 	if conn == nil do return {kind = .Invalid_State}
 
@@ -133,7 +132,6 @@ handshake_deadline_start :: proc(conn: ^Conn) -> (bool, Handshake_Error) {
 	return handshake_deadline_start_until(conn, {})
 }
 
-@(private)
 handshake_deadline_start_until :: proc(conn: ^Conn, deadline: time.Time) -> (bool, Handshake_Error) {
 	deadlines_set := false
 	if conn.transport.set_read_deadline != nil && conn.transport.set_write_deadline != nil {
@@ -500,7 +498,6 @@ encrypted_extensions_validate :: proc(message: []u8, server_name: string) -> Han
 	return error
 }
 
-@(private)
 encrypted_extensions_decode :: proc(
 	message: []u8,
 	server_name: string,
@@ -1113,7 +1110,7 @@ hello_retry_request_decode :: proc(wire: []u8) -> (cookie: []u8, err: Server_Hel
 
 	if wire[38] != 0 do return nil, .Session_ID_Mismatch
 
-	if retry_u16(wire, 39) != cast(u16)Cipher_Suite.AES_128_GCM_SHA256 {
+	if retry_u16(wire, 39) != cast(u16)Cipher_Suite.TLS_AES_128_GCM_SHA256 {
 		return nil, .Unoffered_Cipher
 	}
 
@@ -1249,7 +1246,7 @@ client_hello_retry_prepare :: proc(conn: ^Conn, retry: []u8, cookie: []u8) -> Se
 	first := conn.client_hello[:size]
 	layout, valid := client_hello_layout_decode(first)
 	if !valid || layout.session_size != 0 || layout.has_cookie ||
-	   !client_hello_layout_has_cipher(first, layout, u16(Cipher_Suite.AES_128_GCM_SHA256)) {
+	   !client_hello_layout_has_cipher(first, layout, u16(Cipher_Suite.TLS_AES_128_GCM_SHA256)) {
 		return .Invalid_Retry_Client_Hello
 	}
 	if len(cookie) == 0 || len(cookie) > MAX_RETRY_COOKIE_SIZE {
@@ -1555,13 +1552,11 @@ handshake_record_fail :: proc(
 
 // Asynchronous handshake operations
 
-@(private)
 async_handshake_fail :: proc(conn: ^Async_Conn, error: Handshake_Error) {
 	conn.protocol.handshake_error = error
 	async_terminal(conn, {kind = .Protocol_Failed}, {kind = .Handshake_Failed, handshake = error})
 }
 
-@(private)
 async_hello_send :: proc(conn: ^Async_Conn, retry: bool) {
 	message := conn.protocol.client_hello[:conn.protocol.client_hello_size]
 	version := LEGACY_TLS_1_0
@@ -1578,7 +1573,6 @@ async_hello_send :: proc(conn: ^Async_Conn, retry: bool) {
 	async_send_start(conn, kind, RECORD_HEADER_SIZE + len(message), conn.handshake_deadline)
 }
 
-@(private)
 async_handshake_drive :: proc(conn: ^Async_Conn) {
 	if conn.tx.pending || conn.tx_done do return
 	p := &conn.protocol
@@ -1753,7 +1747,6 @@ async_handshake_drive :: proc(conn: ^Async_Conn) {
 	async_queue(conn)
 }
 
-@(private)
 handshake_until_check :: proc(conn: ^Conn, deadline: time.Time) -> Handshake_Error {
 	if deadline != (time.Time{}) && time.diff(time.now(), deadline) <= 0 {
 		conn.handshake_complete = false

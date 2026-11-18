@@ -156,8 +156,8 @@ tls12_client_establish :: proc(conn: ^Conn) -> Handshake_Error {
 		return handshake_fail(conn, {kind = .Authentication_Failed, authentication = parse_error})
 	}
 	defer server_certificates_destroy(&certs)
-	groups := [?]Named_Group{.X25519, .SECP256R1}
-	schemes := [?]Signature_Scheme{.RSA_PSS_RSAE_SHA256, .ECDSA_SECP256R1_SHA256, .RSA_PKCS1_SHA256}
+	groups := [?]Named_Group{.X25519, .Secp256r1}
+	schemes := [?]Signature_Scheme{.Rsa_Pss_Rsae_Sha256, .Ecdsa_Secp256r1_Sha256, .Rsa_Pkcs1_Sha256}
 	view, authenticated := tls12_authenticate_server_key_exchange(
 		&certs,
 		exchange,
@@ -177,7 +177,7 @@ tls12_client_establish :: proc(conn: ^Conn) -> Handshake_Error {
 	point_len: int
 	if view.group == .X25519 {
 		curve, point_len = .X25519, 32
-	} else if view.group == .SECP256R1 {
+	} else if view.group == .Secp256r1 {
 		curve, point_len = .SECP256R1, 65
 	} else {
 		return handshake_fail(conn, {kind = .Authentication_Failed, message_type = TLS12_SERVER_KEY_EXCHANGE_TYPE})
@@ -266,7 +266,6 @@ tls12_client_establish :: proc(conn: ^Conn) -> Handshake_Error {
 	return {}
 }
 
-@(private)
 tls12_take_handshake :: proc(
 	conn: ^Conn,
 	framer: ^TLS12_Handshake_Framer,
@@ -298,7 +297,6 @@ tls12_take_handshake :: proc(
 	return copied, {}
 }
 
-@(private)
 tls12_next_handshake :: proc(
 	conn: ^Conn,
 	framer: ^TLS12_Handshake_Framer,
@@ -351,7 +349,6 @@ tls12_next_handshake :: proc(
 	}
 }
 
-@(private)
 tls12_plaintext_fail :: proc(conn: ^Conn, err: Record_Read_Error) -> Handshake_Error {
 	kind := Handshake_Record_Read_Error_Kind.Body_Read_Failed
 	if err.kind == .Header_Read_Failed do kind = .Header_Read_Failed
@@ -364,7 +361,6 @@ tls12_plaintext_fail :: proc(conn: ^Conn, err: Record_Read_Error) -> Handshake_E
 	})
 }
 
-@(private)
 tls12_send_plaintext :: proc(conn: ^Conn, content: TLS_Content_Type, body: []u8) -> Handshake_Error {
 	if len(body) > 256 {
 		return handshake_fail(conn, {kind = .Invalid_State})
@@ -380,7 +376,6 @@ tls12_send_plaintext :: proc(conn: ^Conn, content: TLS_Content_Type, body: []u8)
 	return {}
 }
 
-@(private)
 tls12_send_encrypted :: proc(conn: ^Conn, content: TLS_Content_Type, body: []u8) -> Handshake_Error {
 	wire: [RECORD_HEADER_SIZE + 256]u8
 	written, protection_error := tls12_record_seal(&conn.tls12.send, wire[:], content, body)
@@ -394,7 +389,6 @@ tls12_send_encrypted :: proc(conn: ^Conn, content: TLS_Content_Type, body: []u8)
 	return {}
 }
 
-@(private)
 tls12_expect_server_ccs :: proc(conn: ^Conn, scratch: []u8) -> Handshake_Error {
 	header, body, read_error := record_read_plaintext(conn.transport, scratch)
 	if read_error.kind != .None do return tls12_plaintext_fail(conn, read_error)
@@ -410,7 +404,6 @@ tls12_expect_server_ccs :: proc(conn: ^Conn, scratch: []u8) -> Handshake_Error {
 	return {}
 }
 
-@(private)
 tls12_read_encrypted :: proc(conn: ^Conn) -> (TLS_Content_Type, []u8, Handshake_Error) {
 	wire: [RECORD_HEADER_SIZE + TLS12_MAX_CIPHERTEXT_SIZE]u8
 	header_count, header_error := transport.read_exact(conn.transport, wire[:RECORD_HEADER_SIZE])
@@ -447,7 +440,6 @@ tls12_read_encrypted :: proc(conn: ^Conn) -> (TLS_Content_Type, []u8, Handshake_
 	return content, conn.application.inbound[:len(body)], {}
 }
 
-@(private)
 tls12_encrypted_alert :: proc(conn: ^Conn, body: []u8) -> Handshake_Error {
 	if len(body) < 2 {
 		return handshake_fail(conn, {kind = .Malformed_Message})
@@ -516,7 +508,6 @@ tls12_application_close_notify :: proc(conn: ^Conn) -> IO_Error {
 	return tls12_application_record_write(conn, .Alert, alert[:])
 }
 
-@(private)
 tls12_application_record_write :: proc(conn: ^Conn, content: TLS_Content_Type, payload: []u8) -> IO_Error {
 	wire: [RECORD_HEADER_SIZE + TLS12_MAX_CIPHERTEXT_SIZE]u8
 	size, protection_error := tls12_record_seal(&conn.tls12.send, wire[:], content, payload)
@@ -530,7 +521,6 @@ tls12_application_record_write :: proc(conn: ^Conn, content: TLS_Content_Type, p
 	return {}
 }
 
-@(private)
 tls12_application_record_read :: proc(conn: ^Conn) -> (TLS_Content_Type, []u8, IO_Error) {
 	wire: [RECORD_HEADER_SIZE + TLS12_MAX_CIPHERTEXT_SIZE]u8
 	header_count, header_error := transport.read_exact(conn.transport, wire[:RECORD_HEADER_SIZE])

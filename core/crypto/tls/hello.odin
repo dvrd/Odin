@@ -5,47 +5,13 @@ import "core:strings"
 
 // ClientHello wire format
 
-Handshake_Type :: enum u8 {
-	Client_Hello         = 1,
-	Server_Hello         = 2,
-	Encrypted_Extensions = 8,
-	Certificate          = 11,
-	Certificate_Request  = 13,
-	Certificate_Verify   = 15,
-	Finished             = 20,
-	Key_Update           = 24,
-}
+// Handshake_Type, Extension_Type, Cipher_Suite, Named_Group and
+// Signature_Scheme are the declarations in tls_internal.odin and
+// tls_params.odin. The values below are the ones this client needs that
+// those enumerations do not name.
 
-Extension_Type :: enum u16 {
-	Server_Name                            = 0,
-	Supported_Groups                       = 10,
-	EC_Point_Formats                       = 11,
-	Signature_Algorithms                   = 13,
-	Application_Layer_Protocol_Negotiation = 16,
-	Extended_Master_Secret                 = 23,
-	Supported_Versions                     = 43,
-	Signature_Algorithms_Cert              = 50,
-	Key_Share                              = 51,
-	Renegotiation_Info                     = 0xff01,
-}
-
-Cipher_Suite :: enum u16 {
-	AES_128_GCM_SHA256             = 0x1301,
-	ECDHE_RSA_AES_128_GCM_SHA256   = 0xc02f,
-	ECDHE_ECDSA_AES_128_GCM_SHA256 = 0xc02b,
-}
-
-Named_Group :: enum u16 {
-	SECP256R1 = 0x0017,
-	X25519 = 0x001d,
-}
-
-Signature_Scheme :: enum u16 {
-	RSA_PKCS1_SHA256       = 0x0401,
-	ECDSA_SECP256R1_SHA256 = 0x0403,
-	RSA_PSS_RSAE_SHA256    = 0x0804,
-	Ed25519                = 0x0807,
-}
+// extended_master_secret, RFC 7627. Offered only for the TLS 1.2 fallback.
+EXTENSION_EXTENDED_MASTER_SECRET :: Extension_Type(23)
 
 VERSION_TLS_1_3 :: cast(u16)0x0304
 MAX_SERVER_NAME_SIZE :: 253
@@ -155,7 +121,7 @@ client_hello_encode :: proc(
 	dst[written] = 0 // Empty legacy_session_id.
 	written += 1
 	hello_put_u16(dst, &written, 2)
-	hello_put_u16(dst, &written, cast(u16)Cipher_Suite.AES_128_GCM_SHA256)
+	hello_put_u16(dst, &written, cast(u16)Cipher_Suite.TLS_AES_128_GCM_SHA256)
 	dst[written] = 1 // One legacy compression method: null.
 	dst[written + 1] = 0
 	written += 2
@@ -195,12 +161,12 @@ client_hello_extensions_encode :: proc(dst: []u8, hello: Client_Hello, at: ^int)
 	hello_put_u16(dst, at, cast(u16)Named_Group.X25519)
 
 	// PKCS#1 is allowed for certificate signatures, but not CertificateVerify.
-	verify_schemes := [?]Signature_Scheme{.ECDSA_SECP256R1_SHA256, .RSA_PSS_RSAE_SHA256, .Ed25519}
+	verify_schemes := [?]Signature_Scheme{.Ecdsa_Secp256r1_Sha256, .Rsa_Pss_Rsae_Sha256, .Ed25519}
 	cert_schemes := [?]Signature_Scheme {
-		.ECDSA_SECP256R1_SHA256,
-		.RSA_PSS_RSAE_SHA256,
+		.Ecdsa_Secp256r1_Sha256,
+		.Rsa_Pss_Rsae_Sha256,
 		.Ed25519,
-		.RSA_PKCS1_SHA256,
+		.Rsa_Pkcs1_Sha256,
 	}
 	signature_extensions := [?]Extension_Type{.Signature_Algorithms, .Signature_Algorithms_Cert}
 	for extension in signature_extensions {
@@ -272,9 +238,9 @@ compatible_client_hello_encode :: proc(
 	dst[at] = 0
 	at += 1
 	hello_put_u16(dst, &at, 6)
-	hello_put_u16(dst, &at, u16(Cipher_Suite.AES_128_GCM_SHA256))
-	hello_put_u16(dst, &at, u16(Cipher_Suite.ECDHE_RSA_AES_128_GCM_SHA256))
-	hello_put_u16(dst, &at, u16(Cipher_Suite.ECDHE_ECDSA_AES_128_GCM_SHA256))
+	hello_put_u16(dst, &at, u16(Cipher_Suite.TLS_AES_128_GCM_SHA256))
+	hello_put_u16(dst, &at, u16(Tls12_Cipher_Suite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256))
+	hello_put_u16(dst, &at, u16(Tls12_Cipher_Suite.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256))
 	dst[at] = 1
 	dst[at+1] = 0
 	at += 2
@@ -296,17 +262,17 @@ compatible_client_hello_encode :: proc(
 	hello_put_extension(dst, &at, .Supported_Groups, 6)
 	hello_put_u16(dst, &at, 4)
 	hello_put_u16(dst, &at, u16(Named_Group.X25519))
-	hello_put_u16(dst, &at, u16(Named_Group.SECP256R1))
-	hello_put_extension(dst, &at, .EC_Point_Formats, 2)
+	hello_put_u16(dst, &at, u16(Named_Group.Secp256r1))
+	hello_put_extension(dst, &at, .Ec_Point_Formats, 2)
 	dst[at] = 1
 	at += 1
 	dst[at] = 0
 	at += 1
 	schemes := [?]Signature_Scheme {
-		.ECDSA_SECP256R1_SHA256,
-		.RSA_PSS_RSAE_SHA256,
+		.Ecdsa_Secp256r1_Sha256,
+		.Rsa_Pss_Rsae_Sha256,
 		.Ed25519,
-		.RSA_PKCS1_SHA256,
+		.Rsa_Pkcs1_Sha256,
 	}
 	hello_put_extension(dst, &at, .Signature_Algorithms, 2+2*len(schemes))
 	hello_put_u16(dst, &at, u16(2*len(schemes)))
@@ -326,8 +292,8 @@ compatible_client_hello_encode :: proc(
 		dst[at+i] = value
 	}
 	at += 32
-	hello_put_extension(dst, &at, .Extended_Master_Secret, 0)
-	hello_put_extension(dst, &at, .Renegotiation_Info, 1)
+	hello_put_extension(dst, &at, EXTENSION_EXTENDED_MASTER_SECRET, 0)
+	hello_put_extension(dst, &at, .Renegotiaton_Info, 1)
 	dst[at] = 0
 	at += 1
 	if alpn_size > 0 {
@@ -363,41 +329,6 @@ hello_put_extension :: proc(dst: []u8, at: ^int, extension: Extension_Type, size
 // handshake response is 90 bytes. Resumption adds a 6-byte pre_shared_key
 // extension and no early_data, so the cap is 96 including the handshake header.
 MAX_SERVER_HELLO_SIZE :: 96
-
-HELLO_RETRY_REQUEST_RANDOM :: [32]u8 {
-	0xcf,
-	0x21,
-	0xad,
-	0x74,
-	0xe5,
-	0x9a,
-	0x61,
-	0x11,
-	0xbe,
-	0x1d,
-	0x8c,
-	0x02,
-	0x1e,
-	0x65,
-	0xb8,
-	0x91,
-	0xc2,
-	0xa2,
-	0x11,
-	0x16,
-	0x7a,
-	0xbb,
-	0x8c,
-	0x5e,
-	0x07,
-	0x9e,
-	0x09,
-	0xe2,
-	0xc8,
-	0xa8,
-	0x33,
-	0x9c,
-}
 
 Server_Hello :: struct {
 	random:            [32]u8,
@@ -456,13 +387,13 @@ server_hello_decode :: proc(wire: []u8, allow_psk: bool = false) -> (hello: Serv
 
 	for i in 0 ..< 32 do hello.random[i] = wire[6 + i]
 
-	if hello.random == HELLO_RETRY_REQUEST_RANDOM {
+	if hello_is_retry(wire) {
 		return {}, .Hello_Retry_Unsupported
 	}
 
 	if wire[38] != 0 do return {}, .Session_ID_Mismatch
 
-	if hello_u16(wire, 39) != cast(u16)Cipher_Suite.AES_128_GCM_SHA256 {
+	if hello_u16(wire, 39) != cast(u16)Cipher_Suite.TLS_AES_128_GCM_SHA256 {
 		return {}, .Unoffered_Cipher
 	}
 
@@ -549,7 +480,7 @@ server_hello_extensions_decode :: proc(
 
 	if !share_seen do return {}, .Missing_Key_Share
 
-	hello.cipher_suite = .AES_128_GCM_SHA256
+	hello.cipher_suite = .TLS_AES_128_GCM_SHA256
 
 	return hello^, .None
 }

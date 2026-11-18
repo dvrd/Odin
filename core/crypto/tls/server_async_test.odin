@@ -393,8 +393,10 @@ server_async_key_usage_reservation_and_control_caps :: proc(t:^testing.T) {
 server_async_maximum_retry_budget_is_charged_and_erased :: proc(t:^testing.T) {
 	store:=flight_test_store(t);defer credential_store.destroy(&store)
 	first,second:[65536]u8
-	ch1:=retry_test_hello(first[:],.SECP256R1,false);retry_test_pad(first[:],ch1)
-	ch2:=retry_test_hello(second[:],.SECP256R1,true);retry_test_pad(second[:],ch2)
+	ch1 := retry_test_hello(first[:], .Secp256r1, false)
+	retry_test_pad(first[:], ch1)
+	ch2 := retry_test_hello(second[:], .Secp256r1, true)
+	retry_test_pad(second[:], ch2)
 	for limited in ([]bool{false,true}) {
 		stream:TCP_Test_Stream;defer tcp_test_destroy(&stream)
 		a:=TCP_Test_Audit{backing=context.allocator};s:Server_Async_Conn;config:Server_Async_Config

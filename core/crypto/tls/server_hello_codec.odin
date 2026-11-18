@@ -54,7 +54,6 @@ server_client_hello_size :: proc(prefix: []u8, limits := Server_Client_Hello_Lim
 	return size, .None
 }
 
-@(private)
 server_hello_vector :: proc(data: []u8, prefix: int, minimum: int, multiple: int) -> ([]u8, bool) {
 	if len(data) < prefix {return nil, false}
 	size := int(data[0])
@@ -202,7 +201,9 @@ server_client_hello_decode :: proc(wire: []u8, limits := Server_Client_Hello_Lim
 		length := int(hello_u16(hello.key_shares,n+2)); n += 4
 		if length == 0 || length > len(hello.key_shares)-n {return {}, .Malformed}
 		if group == u16(Named_Group.X25519) && length != 32 {return {}, .Malformed}
-		if group == u16(Named_Group.SECP256R1) && (length != 65 || hello.key_shares[n] != 4) {return {}, .Malformed}
+		if group == u16(Named_Group.Secp256r1) && (length != 65 || hello.key_shares[n] != 4) {
+			return {}, .Malformed
+		}
 		for group_cursor < len(hello.groups) && hello_u16(hello.groups,group_cursor) != group {group_cursor += 2}
 		if group_cursor == len(hello.groups) {return {}, .Malformed}
 		group_cursor += 2
@@ -214,7 +215,6 @@ server_client_hello_decode :: proc(wire: []u8, limits := Server_Client_Hello_Lim
 	return hello, .None
 }
 
-@(private)
 server_hello_dns_name_valid :: proc(name: []u8) -> bool {
 	if len(name) == 0 || len(name) > MAX_SERVER_NAME_SIZE || name[len(name)-1] == '.' {return false}
 	_, ip := net.parse_ip4_address(string(name))
@@ -234,7 +234,6 @@ server_hello_dns_name_valid :: proc(name: []u8) -> bool {
 	return label > 0 && name[len(name)-1] != '-'
 }
 
-@(private)
 server_hello_psk_valid :: proc(identities, binders: []u8) -> bool {
 	identity_count, binder_count := 0, 0
 	for n := 0; n < len(identities); {
@@ -259,21 +258,36 @@ server_hello_psk_valid :: proc(identities, binders: []u8) -> bool {
 // No PSK, 0-RTT, ALPN selection, QUIC binding, or HRR state is implemented here.
 server_client_hello_negotiate :: proc(hello: Server_Client_Hello_View) -> (Server_Client_Hello_Selection, Server_Hello_Codec_Status) {
 	if !server_hello_offer_contains(hello.versions, VERSION_TLS_1_3) ||
-	   !server_hello_offer_contains(hello.cipher_suites,u16(Cipher_Suite.AES_128_GCM_SHA256)) ||
-	   (!hello.has_psk && !server_hello_offer_contains(hello.signature_algorithms,u16(Signature_Scheme.RSA_PSS_RSAE_SHA256)) &&
-	    !server_hello_offer_contains(hello.signature_algorithms,u16(Signature_Scheme.ECDSA_SECP256R1_SHA256))) {return {}, .Unsupported}
+	   !server_hello_offer_contains(hello.cipher_suites, u16(Cipher_Suite.TLS_AES_128_GCM_SHA256)) ||
+	   (!hello.has_psk && !server_hello_offer_contains(hello.signature_algorithms, u16(Signature_Scheme.Rsa_Pss_Rsae_Sha256)) &&
+	    !server_hello_offer_contains(hello.signature_algorithms, u16(Signature_Scheme.Ecdsa_Secp256r1_Sha256))) {
+		return {}, .Unsupported
+	}
+
 	group: Named_Group
-	if server_hello_offer_contains(hello.groups,u16(Named_Group.X25519)) {group=.X25519} else if server_hello_offer_contains(hello.groups,u16(Named_Group.SECP256R1)) {group=.SECP256R1} else {return {},.Unsupported}
-	signature:=Signature_Scheme.RSA_PSS_RSAE_SHA256
-	if !server_hello_offer_contains(hello.signature_algorithms,u16(signature)) {signature=.ECDSA_SECP256R1_SHA256}
-	selection := Server_Client_Hello_Selection{version=VERSION_TLS_1_3, cipher=.AES_128_GCM_SHA256, group=group, signature=signature}
+	if server_hello_offer_contains(hello.groups, u16(Named_Group.X25519)) {
+		group = .X25519
+	} else if server_hello_offer_contains(hello.groups, u16(Named_Group.Secp256r1)) {
+		group = .Secp256r1
+	} else {
+		return {}, .Unsupported
+	}
+
+	signature := Signature_Scheme.Rsa_Pss_Rsae_Sha256
+	if !server_hello_offer_contains(hello.signature_algorithms, u16(signature)) {
+		signature = .Ecdsa_Secp256r1_Sha256
+	}
+
+	selection := Server_Client_Hello_Selection{version = VERSION_TLS_1_3, cipher = .TLS_AES_128_GCM_SHA256, group = group, signature = signature}
 	for n := 0; n < len(hello.key_shares); {
 		if len(hello.key_shares)-n < 4 {return {}, .Malformed}
 		group := hello_u16(hello.key_shares,n)
 		length := int(hello_u16(hello.key_shares,n+2)); n += 4
 		if length > len(hello.key_shares)-n {return {}, .Malformed}
 		if group == u16(selection.group) {
-			if selection.group == .X25519 && length != 32 || selection.group == .SECP256R1 && (length != 65 || hello.key_shares[n] != 4) {return {}, .Malformed}
+			if selection.group == .X25519 && length != 32 || selection.group == .Secp256r1 && (length != 65 || hello.key_shares[n] != 4) {
+				return {}, .Malformed
+			}
 			selection.peer_key_share = hello.key_shares[n:n+length]
 			return selection, .None
 		}

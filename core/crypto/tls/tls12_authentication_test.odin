@@ -46,7 +46,7 @@ tls12_auth_test_destroy :: proc(f: ^TLS12_Auth_Test_Fixture) {
  delete(f.certificate);delete(f.ske);delete(f.root_der);f^={}
 }
 tls12_auth_test_offers :: proc() -> ([2]Named_Group,[3]Signature_Scheme) {
- return {.X25519,.SECP256R1},{.RSA_PKCS1_SHA256,.RSA_PSS_RSAE_SHA256,.ECDSA_SECP256R1_SHA256}
+ return {.X25519,.Secp256r1},{.Rsa_Pkcs1_Sha256,.Rsa_Pss_Rsae_Sha256,.Ecdsa_Secp256r1_Sha256}
 }
 tls12_auth_test_put24 :: proc(dst: []u8,n: int) {dst[0],dst[1],dst[2]=u8(n>>16),u8(n>>8),u8(n)}
 
@@ -59,7 +59,7 @@ tls12_auth_openssl_certificate_and_ske :: proc(t: ^testing.T) {
   roots:=[1]^x509.Certificate{&f.root}
   view,e:=tls12_authenticate_server_key_exchange(&f.certs,f.ske,{server_name="fixture.test",root_cas=roots[:]},f.client,f.server,f.cipher,groups[:],schemes[:],f.now)
   testing.expect_value(t,e.kind,.None)
-  testing.expect(t,view.group==(.X25519 if i%2==0 else .SECP256R1))
+  testing.expect(t,view.group==(.X25519 if i%2==0 else .Secp256r1))
   testing.expect(t,bytes.alias(view.parameters,f.ske) && bytes.alias(view.public_key,f.ske) && bytes.alias(view.signature,f.ske))
   testing.expect_value(t,view.scheme,schemes[i/2])
   // Cryptographic signature and point checks allocate no backing.

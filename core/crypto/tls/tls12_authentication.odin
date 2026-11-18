@@ -92,14 +92,15 @@ tls12_server_key_exchange_parse :: proc(
 	view.group = Named_Group(authentication_u16(message, 5))
 	size := int(message[7])
 	curve: ecdh.Curve
-	switch view.group {
+	#partial switch view.group {
 	case .X25519:
 		if size != 32 {return {}, {kind = .Invalid_Point}}
 		curve = .X25519
-	case .SECP256R1:
+	case .Secp256r1:
 		if size != 65 {return {}, {kind = .Invalid_Point}}
 		curve = .SECP256R1
-	case: return {}, {kind = .Unsupported_Curve}
+	case:
+		return {}, {kind = .Unsupported_Curve}
 	}
 	if !tls12_group_offered(offered_groups, view.group) {return {}, {kind = .Unoffered_Curve}}
 	if len(message)-8 < size+4 {return {}, {kind = .Truncated}}
@@ -111,7 +112,7 @@ tls12_server_key_exchange_parse :: proc(
 	view.parameters = message[4:at]
 	view.scheme = Signature_Scheme(authentication_u16(message, at)); at += 2
 	#partial switch view.scheme {
-	case .RSA_PKCS1_SHA256, .RSA_PSS_RSAE_SHA256, .ECDSA_SECP256R1_SHA256:
+	case .Rsa_Pkcs1_Sha256, .Rsa_Pss_Rsae_Sha256, .Ecdsa_Secp256r1_Sha256:
 	case: return {}, {kind = .Unsupported_Signature}
 	}
 	if !tls12_scheme_offered(offered_schemes, view.scheme) {return {}, {kind = .Unoffered_Signature}}
@@ -146,7 +147,7 @@ tls12_verify_server_key_exchange :: proc(
 		return {}, {kind = .Invalid_Certificates, authentication = {kind = .Invalid_Certificate_Usage}}
 	}
 	if cipher_suite == TLS12_ECDHE_RSA_AES128_GCM_SHA256 {
-		if leaf.public_key_algorithm != .RSA || (view.scheme != .RSA_PKCS1_SHA256 && view.scheme != .RSA_PSS_RSAE_SHA256) {
+		if leaf.public_key_algorithm != .RSA || (view.scheme != .Rsa_Pkcs1_Sha256 && view.scheme != .Rsa_Pss_Rsae_Sha256) {
 			return {}, {kind = .Cipher_Key_Mismatch}
 		}
 		// RFC9325 section4.5 requires at least2048 RSA bits for authentication.
@@ -155,7 +156,7 @@ tls12_verify_server_key_exchange :: proc(
 			return {}, {kind = .Invalid_Certificates, authentication = {kind = .Invalid_Public_Key}}
 		}
 	} else if cipher_suite == TLS12_ECDHE_ECDSA_AES128_GCM_SHA256 {
-		if leaf.public_key_algorithm != .ECDSA_P256 || view.scheme != .ECDSA_SECP256R1_SHA256 {
+		if leaf.public_key_algorithm != .ECDSA_P256 || view.scheme != .Ecdsa_Secp256r1_Sha256 {
 			return {}, {kind = .Cipher_Key_Mismatch}
 		}
 	} else {return {}, {kind = .Cipher_Key_Mismatch}}
@@ -165,7 +166,7 @@ tls12_verify_server_key_exchange :: proc(
 	copy(signed[64:], view.parameters)
 	message_to_verify := signed[:64+len(view.parameters)]
 	valid: bool
-	if view.scheme == .RSA_PKCS1_SHA256 {
+	if view.scheme == .Rsa_Pkcs1_Sha256 {
 		key: rsa.Public_Key
 		defer rsa.public_key_clear(&key)
 		if !rsa.public_key_set_bytes(&key, leaf.rsa_n, leaf.rsa_e) {
@@ -201,12 +202,10 @@ tls12_authenticate_server_key_exchange :: proc(
 	return tls12_verify_server_key_exchange(certs, message, client_random, server_random, cipher_suite, offered_groups, offered_schemes)
 }
 
-@(private)
 tls12_group_offered :: proc(groups: []Named_Group, group: Named_Group) -> bool {
 	for offered in groups {if offered == group {return true}}
 	return false
 }
-@(private)
 tls12_scheme_offered :: proc(schemes: []Signature_Scheme, scheme: Signature_Scheme) -> bool {
 	for offered in schemes {if offered == scheme {return true}}
 	return false

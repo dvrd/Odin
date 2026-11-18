@@ -6,8 +6,17 @@ import "core:strings"
 // TLS 1.2 hello codec. The live client offers these suites on the same
 // connection as TLS 1.3; this encoder itself stays TLS 1.2-only for tests.
 TLS12_VERSION :: u16(0x0303)
-TLS12_ECDHE_RSA_AES128_GCM_SHA256 :: u16(0xc02f)
-TLS12_ECDHE_ECDSA_AES128_GCM_SHA256 :: u16(0xc02b)
+
+// The TLS 1.2 suites of the fallback profile. Cipher_Suite holds the TLS 1.3
+// suites only, and its tables are indexed by every member, so these stay in
+// their own enumeration.
+Tls12_Cipher_Suite :: enum u16 {
+	TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 = 0xc02b,
+	TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256   = 0xc02f,
+}
+
+TLS12_ECDHE_RSA_AES128_GCM_SHA256 :: u16(Tls12_Cipher_Suite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256)
+TLS12_ECDHE_ECDSA_AES128_GCM_SHA256 :: u16(Tls12_Cipher_Suite.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256)
 TLS12_MAX_CLIENT_HELLO_SIZE :: 512 + MAX_ALPN_OFFER_BYTES
 TLS12_MAX_SERVER_HELLO_SIZE :: 1024
 
@@ -89,7 +98,6 @@ tls12_client_hello_encode :: proc(
 	return at,.None
 }
 
-@(private)
 tls12_hello_extension :: proc(dst: []u8, at: ^int, kind: u16, size: int) {
 	hello_put_u16(dst,at,kind); hello_put_u16(dst,at,u16(size))
 }

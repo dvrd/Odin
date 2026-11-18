@@ -208,5 +208,5 @@ blocking_go_interoperability :: proc(t: ^testing.T) {
 	testing.expect_value(t, read_error.kind, .None)
 	testing.expect_value(t, read, 3)
 	testing.expect_value(t, buffer, [3]u8{1, 2, 3})
-	testing.expect_value(t, tls.close(conn).kind, .None)
+	testing.expect_value(t, tls.conn_close(conn).kind, .None)
 }

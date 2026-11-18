@@ -5,9 +5,7 @@ import "core:crypto/x509"
 import "core:time"
 import "core:mem"
 
-@(private)
 Server_Client_Auth_Stage :: enum {Certificate,Verify,Finished}
-@(private)
 Server_Client_Auth :: struct {
  stage:Server_Client_Auth_Stage,
  certificate:[]u8,
@@ -18,7 +16,6 @@ server_handshake_peer_identity :: proc(owner:^Server_Handshake)->Peer_Identity {
  if !server_handshake_valid(owner)||owner._phase!=.Complete {return {}}
  return owner._peer_identity
 }
-@(private)
 server_client_auth_clear :: proc(owner:^Server_Handshake) {
  if owner._client_auth==nil {return}
  state:=owner._client_auth
@@ -30,7 +27,6 @@ server_client_auth_clear :: proc(owner:^Server_Handshake) {
  server_handshake_wipe_free(owner,mem.byte_slice(state,size_of(Server_Client_Auth)),align_of(Server_Client_Auth))
  owner._client_auth=nil
 }
-@(private)
 server_client_auth_verify_chain :: proc(owner:^Server_Handshake,message:[]u8)->bool {
  auth:=owner._client_auth
  previous:=context.allocator;context.allocator=owner._allocator;defer context.allocator=previous
@@ -46,17 +42,17 @@ server_client_auth_verify_chain :: proc(owner:^Server_Handshake,message:[]u8)->b
  if ce!=.None {return false};delete(chain)
  return true
 }
-@(private)
 server_client_auth_verify_signature :: proc(owner:^Server_Handshake,message:[]u8)->bool {
  if len(message)<8||message[0]!=15||handshake_body_size(message)+4!=len(message) {return false}
  n:=int(authentication_u16(message,6));if n==0||n!=len(message)-8 {return false}
  scheme:=Signature_Scheme(authentication_u16(message,4))
- if scheme!=.RSA_PSS_RSAE_SHA256&&scheme!=.ECDSA_SECP256R1_SHA256&&scheme!=.Ed25519 {return false}
+ if scheme != .Rsa_Pss_Rsae_Sha256 && scheme != .Ecdsa_Secp256r1_Sha256 && scheme != .Ed25519 {
+  return false
+ }
  signed:=certificate_verify_input(transcript_snapshot(&owner._transcript),false)
  valid,e:=authentication_signature_check(&owner._client_auth.certs.chain[0],scheme,signed[:],message[8:])
  return valid&&e.kind==.None
 }
-@(private)
 server_client_auth_feed :: proc(owner:^Server_Handshake,level:Server_Handshake_Level,input:[]u8)->(consumed:int,status:Server_Handshake_Status,error:Server_Handshake_Error) {
  if level!=.Handshake {server_handshake_fail(owner,.Wrong_Level);return 0,.Terminal,.Wrong_Level}
  if owner._client_auth==nil {

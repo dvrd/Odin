@@ -178,7 +178,7 @@ authentication_signature_check :: proc(
 
 		defer ed25519.public_key_clear(&pub)
 		valid = ed25519.verify(&pub, signed, signature)
-	case .ECDSA_SECP256R1_SHA256:
+	case .Ecdsa_Secp256r1_Sha256:
 		if leaf.public_key_algorithm != .ECDSA_P256 {
 			return false, {kind = .Signature_Key_Mismatch}
 		}
@@ -190,7 +190,7 @@ authentication_signature_check :: proc(
 
 		defer ecdsa.public_key_clear(&pub)
 		valid = ecdsa.verify_asn1(&pub, .SHA256, signed, signature)
-	case .RSA_PSS_RSAE_SHA256:
+	case .Rsa_Pss_Rsae_Sha256:
 		if leaf.public_key_algorithm != .RSA {
 			return false, {kind = .Signature_Key_Mismatch}
 		}

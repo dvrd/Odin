@@ -39,11 +39,8 @@ Server_Async_Stats :: struct {
 	read_records, written_records, received_key_updates, sent_key_updates: int,
 	engine: Server_Handshake_Stats, // Subset of owned bytes, not additional bytes.
 }
-@(private)
 Server_Async_Phase :: enum {Uninitialized, Ready, Handshaking, Established, Closed}
-@(private)
 Server_Async_Send :: enum {None, Handshake, Data, Key_Update, Notify, Fatal_Alert}
-@(private)
 Server_Async_Keys :: struct {
 	read, write: Record_Protection,
 	application_read, application_write: [32]u8,
@@ -99,7 +96,6 @@ Server_Async_Conn :: struct {
 	_resumed:bool,
 }
 
-@(private)
 server_async_valid :: proc(s:^Server_Async_Conn) -> bool {return s!=nil && s._self==s}
 
 server_async_server :: proc(s:^Server_Async_Conn, transport:net.Async_Connection, executor:net.Async_Executor, source:Server_Async_Config, allocator:mem.Allocator) -> Server_Async_Init_Error {
@@ -157,7 +153,7 @@ server_async_connection :: proc(s:^Server_Async_Conn) -> net.Async_Connection {
 }
 server_async_connection_state :: proc(s:^Server_Async_Conn) -> Connection_State {
 	if !server_async_valid(s) || s._phase!=.Established || s._failure.kind!=.None || s._closing {return {}}
-	return {handshake_complete=true,version=VERSION_TLS_1_3,cipher_suite=.AES_128_GCM_SHA256,
+	return {handshake_complete=true,version=VERSION_TLS_1_3,cipher_suite=.TLS_AES_128_GCM_SHA256,
 		server_name=string(s._name[:s._name_size]),negotiated_protocol=string(s._alpn[:s._alpn_size]),peer_identity=s._peer_identity,resumed=s._resumed}
 }
 server_async_failure :: proc(s:^Server_Async_Conn) -> Server_Async_Failure {
@@ -179,7 +175,6 @@ server_async_key_update :: proc(s:^Server_Async_Conn, request_peer:=false) -> ne
 	server_async_queue(s);return {}
 }
 
-@(private)
 server_async_allocator :: proc(data:rawptr, mode:mem.Allocator_Mode, size,alignment:int, old:rawptr,old_size:int,loc:=#caller_location) -> ([]u8,mem.Allocator_Error) {
 	s:=cast(^Server_Async_Conn)data
 	#partial switch mode {
@@ -200,25 +195,20 @@ server_async_allocator :: proc(data:rawptr, mode:mem.Allocator_Mode, size,alignm
 	case: return nil,.Mode_Not_Implemented
 	}
 }
-@(private)
 server_async_grant :: proc(s:^Server_Async_Conn,slot:^[]u8,size:int,alignment:=1) -> bool {
 	if len(slot^)!=0 {return true}
 	grant,e:=server_async_allocator(s,.Alloc,size,alignment,nil,0)
 	if e!=nil {server_async_fail(s,{kind=.Protocol_Failed},{kind=.Limit,engine=.Allocation_Failed});return false}
 	slot^=grant;return true
 }
-@(private)
 server_async_free :: proc(s:^Server_Async_Conn,slot:^[]u8,alignment:=1) {
 	if raw_data(slot^)==nil {return}
 	_,_=server_async_allocator(s,.Free,0,alignment,raw_data(slot^),len(slot^));slot^=nil
 }
-@(private)
 server_async_keys :: proc(s:^Server_Async_Conn) -> ^Server_Async_Keys {return cast(^Server_Async_Keys)raw_data(s._key_grant)}
-@(private)
 server_async_queue :: proc(s:^Server_Async_Conn) {
 	if !s._queued {s._queued=true;s._executor.schedule(s._executor.data,server_async_pump,s)}
 }
-@(private)
 server_async_fail :: proc(s:^Server_Async_Conn,e:net.Connection_Error,detail:Server_Async_Failure) {
 	if s._failure.kind==.None {
 		s._failure,s._detail=e,detail
@@ -229,18 +219,15 @@ server_async_fail :: proc(s:^Server_Async_Conn,e:net.Connection_Error,detail:Ser
 	}
 	server_async_queue(s)
 }
-@(private)
 server_async_emit :: proc(s:^Server_Async_Conn,kind:net.Async_Operation_Kind,e:net.Connection_Error) {
 	op:=s._read_op if kind==.Read else s._write_op;if op==nil {return}
 	if kind==.Read {s._read_op=nil;s._read_buffer=nil} else {s._write_op=nil;s._write_buffer=nil}
 	op.pending,op._owner,op.result.err=false,nil,e;op.callback(op)
 }
-@(private)
 server_async_handshake_emit :: proc(s:^Server_Async_Conn,e:net.Connection_Error) {
 	op:=s._handshake_op;if op==nil {return};s._handshake_op=nil
 	op.pending,op.err,op.result=false,e,s._detail;op.callback(op)
 }
-@(private)
 server_async_submit :: proc(data:rawptr,op:^net.Async_Operation,kind:net.Async_Operation_Kind,buffer:[]u8,deadline:time.Time) -> net.Connection_Error {
 	s:=cast(^Server_Async_Conn)data
 	if !server_async_valid(s) {return {kind=.Invalid_Connection}}
@@ -265,7 +252,6 @@ server_async_submit :: proc(data:rawptr,op:^net.Async_Operation,kind:net.Async_O
 	op.kind,op.pending,op.result,op._owner=kind,true,{},s
 	server_async_queue(s);return {}
 }
-@(private)
 server_async_cancel :: proc(data:rawptr,op:^net.Async_Operation) -> net.Connection_Error {
 	s:=cast(^Server_Async_Conn)data
 	if !server_async_valid(s) {return {kind=.Invalid_Connection}}
@@ -276,7 +262,6 @@ server_async_cancel :: proc(data:rawptr,op:^net.Async_Operation) -> net.Connecti
 	} else {return {kind=.Invalid_Operation}}
 	server_async_queue(s);return {}
 }
-@(private)
 server_async_pump :: proc(data:rawptr) {
 	s:=cast(^Server_Async_Conn)data;s._queued=false
 	if s._tx_done {s._tx_done=false;server_async_send_process(s)}
@@ -287,12 +272,10 @@ server_async_pump :: proc(data:rawptr) {
 		server_async_application_drive(s)
 	}
 }
-@(private)
 server_async_shutdown_done :: proc(op:^net.Async_Operation) {
 	s:=cast(^Server_Async_Conn)op.user_data;s._transport_closed=true
 	if s._close_error.kind==.None {s._close_error=op.result.err};server_async_queue(s)
 }
-@(private)
 server_async_cleanup :: proc(s:^Server_Async_Conn) {
 	if s._cleaned {return};s._cleaned=true
 	_=server_handshake_destroy(&s._engine)
@@ -304,7 +287,6 @@ server_async_cleanup :: proc(s:^Server_Async_Conn) {
 	s._read_keys,s._write_keys,s._key_update_pending,s._key_update_request=false,false,false,false
 	s._config={};s._phase=.Closed
 }
-@(private)
 server_async_shutdown_drive :: proc(s:^Server_Async_Conn) {
 	if s._rx.pending {_=net.async_cancel(s._transport,&s._rx)}
 	if s._tx.pending {if s._tx_kind!=.Notify && s._tx_kind!=.Fatal_Alert {_=net.async_cancel(s._transport,&s._tx)};return}
@@ -334,7 +316,6 @@ server_async_shutdown_drive :: proc(s:^Server_Async_Conn) {
 	}
 }
 
-@(private)
 server_async_alert :: proc(detail:Server_Async_Failure) -> u8 {
 	if detail.kind==.Limit {return 80}
 	if detail.kind==.Post_Handshake {return 10}

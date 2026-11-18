@@ -60,7 +60,7 @@ Calling raw transport operations after transferring ownership is unsupported.
 
 ## Blocking connections
 
-The existing `client`, `handshake`, `dial`, `read`, `write`, `close`, `abort`
+The existing `client`, `handshake`, `dial`, `read`, `write`, `conn_close`, `abort`
 and deadline procedures remain available. These operations require serialized
 access. `client` wraps without I/O and the first read/write performs a lazy
 handshake. Do not mix the blocking and asynchronous interfaces on a connection.

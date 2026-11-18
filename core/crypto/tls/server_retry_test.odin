@@ -41,7 +41,7 @@ server_retry_owner_size_every_split_and_transcript :: proc(t:^testing.T) {
 	// Retry storage replaces application secrets, never enlarges them.
 	testing.expect_value(t,size_of(type_of(Server_Flight{}.transient)),size_of(Application_Secrets))
 	fmt.printf("retry fixed owner=%d event=%d flight transient=%d\n",size_of(Server_Handshake),size_of(Server_Handshake_Event),size_of(Application_Secrets))
-	for group in ([]Named_Group{.X25519,.SECP256R1}) {
+	for group in ([]Named_Group{.X25519,.Secp256r1}) {
 		first,second:[1024]u8
 		ch1:=retry_test_hello(first[:],group,false,nil,[]u8{1,2,3})
 		ch2:=retry_test_hello(second[:],group,true,nil,[]u8{1,2,3})
@@ -84,7 +84,7 @@ server_retry_rejects_changed_or_second_retry_hellos :: proc(t:^testing.T) {
 	for mode in 0..<15 {
 		a:=Owner_Test_Audit{backing=context.allocator};o:Server_Handshake;first,second:[2048]u8
 		original:=[]Hello_Test_Extension{{0xbaba,[]u8{1,2,3}}}
-		ch1:=retry_test_hello(first[:],.SECP256R1,false,original,[]u8{1,2})
+		ch1:=retry_test_hello(first[:],.Secp256r1,false,original,[]u8{1,2})
 		event:=retry_test_begin(t,&o,&a,ch1);server_handshake_accept(&o,event.id)
 		extra:=original
 		if mode==5 {extra=[]Hello_Test_Extension{{0xbaba,[]u8{1,2,3}},{16,[]u8{0,2,1,'x'}}}}
@@ -93,7 +93,10 @@ server_retry_rejects_changed_or_second_retry_hellos :: proc(t:^testing.T) {
 		if mode==10 {extra=nil}
 		if mode==11 {extra=[]Hello_Test_Extension{{0xbaba,[]u8{1,2,3}},{21,[]u8{1}}}}
 		if mode==12 {extra=[]Hello_Test_Extension{{0xbaba,[]u8{1,2,3}},{0xcccc,nil}}}
-		group:=Named_Group.SECP256R1;if mode==7 {group=.X25519}
+		group := Named_Group.Secp256r1
+		if mode == 7 {
+			group = .X25519
+		}
 		ch2:=retry_test_hello(second[:],group,mode!=6,extra,[]u8{1,2})
 		hello,decoded:=server_client_hello_decode(ch2)
 		if decoded==.None {
@@ -116,7 +119,9 @@ server_retry_rejects_changed_or_second_retry_hellos :: proc(t:^testing.T) {
 
 @(test)
 server_retry_partial_cancel_allocation_failure_and_limits :: proc(t:^testing.T) {
-	first,second:[1024]u8;ch1:=retry_test_hello(first[:],.SECP256R1,false);ch2:=retry_test_hello(second[:],.SECP256R1,true)
+	first, second: [1024]u8
+	ch1 := retry_test_hello(first[:], .Secp256r1, false)
+	ch2 := retry_test_hello(second[:], .Secp256r1, true)
 	for stop in 0..=len(ch2) {
 		a:=Owner_Test_Audit{backing=context.allocator};o:Server_Handshake
 		event:=retry_test_begin(t,&o,&a,ch1)
@@ -160,8 +165,10 @@ retry_test_pad :: proc(storage:[]u8,wire:[]u8) {
 @(test)
 server_retry_maximum_grants_and_invalid_p256_point :: proc(t:^testing.T) {
 	a:=Owner_Test_Audit{backing=context.allocator};o:Server_Handshake;first,second:[65536]u8
-	ch1:=retry_test_hello(first[:],.SECP256R1,false);retry_test_pad(first[:],ch1)
-	ch2:=retry_test_hello(second[:],.SECP256R1,true);retry_test_pad(second[:],ch2)
+	ch1 := retry_test_hello(first[:], .Secp256r1, false)
+	retry_test_pad(first[:], ch1)
+	ch2 := retry_test_hello(second[:], .Secp256r1, true)
+	retry_test_pad(second[:], ch2)
 	event:=retry_test_begin(t,&o,&a,first[:]);server_handshake_accept(&o,event.id)
 	n,_,e:=server_handshake_feed(&o,.Initial,second[:]);testing.expect_value(t,n,65536);testing.expect_value(t,e,.None)
 	testing.expect_value(t,a.peak,133120);testing.expect_value(t,a.calls,3)
@@ -170,7 +177,7 @@ server_retry_maximum_grants_and_invalid_p256_point :: proc(t:^testing.T) {
 	store:=flight_test_store(t);defer credential_store.destroy(&store)
 	for mode in 0..<3 {
 		b:=Owner_Test_Audit{backing=context.allocator};p:Server_Handshake;storage:[1024]u8
-		wire:=retry_test_hello(storage[:],.SECP256R1,true)
+		wire:=retry_test_hello(storage[:],.Secp256r1,true)
 		hello,_:=server_client_hello_decode(wire);point:=retry_test_mutate_extension(hello,51)[6:]
 		if mode==0 {for &b in point[1:] {b=0}}
 		if mode==1 {for &b in point[1:] {b=0xff}}
@@ -215,13 +222,13 @@ server_retry_psk_age_binder_removal_and_padding_rules :: proc(t:^testing.T) {
 		if mode==7 {ext2=[]Hello_Test_Extension{{45,[]u8{1,1}},{42,nil},{41,body2}}}
 		if mode==8 {ext2=[]Hello_Test_Extension{{45,[]u8{1,1}},{21,[]u8{1}},{41,body2}}}
 		if mode==9 {ext1=[]Hello_Test_Extension{{45,[]u8{1,1}}}}
-		ch1:=retry_test_hello(first[:],.SECP256R1,false,ext1)
-		ch2:=retry_test_hello(second[:],.SECP256R1,true,ext2)
+		ch1:=retry_test_hello(first[:],.Secp256r1,false,ext1)
+		ch2:=retry_test_hello(second[:],.Secp256r1,true,ext2)
 		h1,e1:=server_client_hello_decode(ch1);h2,e2:=server_client_hello_decode(ch2)
 		testing.expect_value(t,e1,.None)
 		if mode==8 {testing.expect_value(t,e2,.Malformed);continue}
 		testing.expect_value(t,e2,.None)
-		testing.expect_value(t,server_retry_invariants(h1,h2,.SECP256R1),mode==0 || mode==1 || mode==10)
+		testing.expect_value(t,server_retry_invariants(h1,h2,.Secp256r1),mode==0 || mode==1 || mode==10)
 	}
 }
 
@@ -229,7 +236,7 @@ server_retry_psk_age_binder_removal_and_padding_rules :: proc(t:^testing.T) {
 server_retry_failure_preserves_last_available_event_identity :: proc(t:^testing.T) {
 	for retry in ([]bool{true,false}) {
 		a:=Owner_Test_Audit{backing=context.allocator};o:Server_Handshake;storage:[1024]u8
-		wire:=retry_test_hello(storage[:],.SECP256R1,!retry)
+		wire:=retry_test_hello(storage[:],.Secp256r1,!retry)
 		server_handshake_init(&o,SERVER_HANDSHAKE_DEFAULT_CONFIG,owner_test_allocator(&a))
 		if retry {
 			server_handshake_feed(&o,.Initial,wire[:len(wire)-1])

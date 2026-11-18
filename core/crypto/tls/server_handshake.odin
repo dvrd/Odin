@@ -41,7 +41,6 @@ Server_Handshake_Stats :: struct {
 	requested_bytes, peak_bytes, live_bytes: int,
 	allocation_attempts: int,
 }
-@(private)
 Server_Handshake_Phase :: enum {Uninitialized, Client_Hello, Retry_Client_Hello, Await_Flight, Await_Client_Finished, Complete, Failed, Aborted, Destroyed}
 
 // Initialize zeroed storage once, at its final address. No copies, concurrent
@@ -85,17 +84,14 @@ server_handshake_init :: proc(owner: ^Server_Handshake, config: Server_Handshake
 	transcript_init(&owner._transcript)
 	return .None
 }
-@(private)
 server_handshake_valid :: proc(owner: ^Server_Handshake) -> bool {
 	return owner != nil && owner._self == owner
 }
-@(private)
 server_handshake_wipe_free :: proc(owner: ^Server_Handshake, grant: []u8, alignment:int=1) {
 	if raw_data(grant) == nil {return}
 	crypto.zero_explicit(raw_data(grant), len(grant))
 	_, _ = owner._allocator.procedure(owner._allocator.data, .Free, 0, alignment, raw_data(grant), len(grant))
 }
-@(private)
 server_handshake_allocate :: proc(owner: ^Server_Handshake, size: int, alignment:int=1) -> ([]u8, bool) {
 	owner._stats.allocation_attempts += 1
 	owner._stats.requested_bytes += size
@@ -111,7 +107,6 @@ server_handshake_allocate :: proc(owner: ^Server_Handshake, size: int, alignment
 	owner._stats.peak_bytes = max(owner._stats.peak_bytes, owner._stats.live_bytes)
 	return grant, true
 }
-@(private)
 server_handshake_release_input :: proc(owner: ^Server_Handshake) {
 	owner._hello, owner._selection = {}, {}
 	owner._stats.live_bytes -= len(owner._input)
@@ -120,13 +115,11 @@ server_handshake_release_input :: proc(owner: ^Server_Handshake) {
 	crypto.zero_explicit(&owner._header, size_of(owner._header))
 	owner._received, owner._message_size = 0, 0
 }
-@(private)
 server_handshake_clear_event :: proc(owner: ^Server_Handshake) {
 	crypto.zero_explicit(&owner._secret, size_of(owner._secret))
 	if len(owner._output) > 0 {crypto.zero_explicit(raw_data(owner._output), len(owner._output))}
 	owner._event = {}
 }
-@(private)
 server_handshake_cleanup :: proc(owner: ^Server_Handshake, keep_parameters := false) {
 	if !keep_parameters {server_resumption_clear(owner);server_parameters_clear(owner);owner._peer_identity={};owner._resumed=false;owner._peer_expires=0}
 	server_handshake_clear_event(owner)
@@ -138,13 +131,11 @@ server_handshake_cleanup :: proc(owner: ^Server_Handshake, keep_parameters := fa
 	owner._output = nil
 	crypto.zero_explicit(&owner._transcript, size_of(owner._transcript))
 }
-@(private)
 server_handshake_id :: proc(owner: ^Server_Handshake) -> bool {
 	if owner._next_id == max(u64) {return false}
 	owner._next_id += 1
 	return true
 }
-@(private)
 server_handshake_fail :: proc(owner: ^Server_Handshake, error: Server_Handshake_Error) {
 	// A producer may already have published failure. Preserve that borrow/ID.
 	if owner._phase == .Failed {return}
@@ -284,7 +275,6 @@ server_handshake_stats :: proc(owner: ^Server_Handshake) -> (Server_Handshake_St
 // manufacture success or install keys through the event consumer interface.
 // A borrowed DER chunk must remain pinned by its producer through acceptance
 // or cleanup. The flight producer owns that pin.
-@(private)
 server_handshake_publish :: proc(owner: ^Server_Handshake, source: Server_Handshake_Event, borrow_bytes := false) -> Server_Handshake_Error {
 	event := source
 	if !server_handshake_valid(owner) {return .Invalid_Owner}
@@ -302,7 +292,9 @@ server_handshake_publish :: proc(owner: ^Server_Handshake, source: Server_Handsh
 			event.bytes = owner._output[:len(event.bytes)]
 		}
 	case .Traffic_Secret:
-		if len(event.secret) != 32 || event.level == .Initial || event.cipher != .AES_128_GCM_SHA256 {return .Invalid_Event}
+		if len(event.secret) != 32 || event.level == .Initial || event.cipher != .TLS_AES_128_GCM_SHA256 {
+			return .Invalid_Event
+		}
 		copy(owner._secret[:], event.secret)
 		event.secret = owner._secret[:]
 	case .Complete: return .Invalid_Event // Only Finished verification can publish success.

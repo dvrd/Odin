@@ -175,7 +175,7 @@ server_owner_events_order_and_exact_hash :: proc(t: ^testing.T) {
 	testing.expect(t,mem.check_zero(o._output))
 	for direction in ([]Server_Handshake_Direction{.Read,.Write}) {
 		secret: [32]u8; for &v in secret[:] {v=0x77}
-		testing.expect_value(t,server_handshake_publish(&o,{kind=.Traffic_Secret,level=.Handshake,direction=direction,cipher=.AES_128_GCM_SHA256,secret=secret[:]}),.None)
+		testing.expect_value(t,server_handshake_publish(&o,{kind=.Traffic_Secret,level=.Handshake,direction=direction,cipher=.TLS_AES_128_GCM_SHA256,secret=secret[:]}),.None)
 		key,_ := server_handshake_peek(&o)
 		testing.expect(t,key.id>event.id); testing.expect_value(t,key.direction,direction)
 		for &v in secret[:] {v=0}
@@ -203,7 +203,7 @@ server_owner_pending_event_cancellation :: proc(t: ^testing.T) {
 				event,_:=server_handshake_peek(&o); server_handshake_accept(&o,event.id)
 				secret:[32]u8; secret[0]=0x77
 				if kind == .Fatal {server_handshake_fail(&o,.Unsupported)} else {
-					testing.expect_value(t,server_handshake_publish(&o,{kind=kind,level=.Handshake,cipher=.AES_128_GCM_SHA256,bytes=([]u8){11,0,0,0},secret=secret[:]}),.None)
+					testing.expect_value(t,server_handshake_publish(&o,{kind=kind,level=.Handshake,cipher=.TLS_AES_128_GCM_SHA256,bytes=([]u8){11,0,0,0},secret=secret[:]}),.None)
 				}
 			}
 			event,_ := server_handshake_peek(&o)

@@ -191,7 +191,7 @@ write :: proc(conn: ^Conn, src: []u8) -> (written: int, error: IO_Error) {
 
 // Sends close_notify under the current application keys, then always closes
 // the transport once and destroys key material. It does not wait for a reply.
-close :: proc(conn: ^Conn) -> IO_Error {
+conn_close :: proc(conn: ^Conn) -> IO_Error {
 	if conn == nil do return {kind = .Invalid_State}
 
 	if conn.phase == .Closed do return {}
@@ -504,7 +504,6 @@ application_fail :: proc(conn: ^Conn, err: IO_Error) -> IO_Error {
 
 // Asynchronous application operations
 
-@(private)
 async_application_drive :: proc(conn: ^Async_Conn) {
 	p := &conn.protocol
 	state := &p.application

@@ -67,7 +67,8 @@ main :: proc() {
    assert(error.kind==.None);assert(tls.connection_state(&client).resumed==(i==1))
    buffer:[2]u8;at:=0
    for at<2 {n,re:=tls.read(&client,buffer[at:]);assert(re.kind==.None&&n>0);at+=n};assert(string(buffer[:])=="OK")
-   tls.close(&client);fmt.println("PASS native client",i)
+   tls.conn_close(&client)
+   fmt.println("PASS native client",i)
   };return
  }
  owner:=load_store(dir,"server");defer store.destroy(&owner)
