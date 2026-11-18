@@ -87,6 +87,10 @@ Socket_State :: struct {
 	// The peer asked for new keys in the send direction: recv notes
 	// it here, and the sender answers before its next record.
 	key_update_owed: bool,
+	// A direction that ended without an error to report: its calls
+	// fail with `io.Error.Unknown`.
+	rx_dead: bool,
+	tx_dead: bool,
 
 	// send and recv may be called from two threads at once: each
 	// direction of the engine is serialized by its own lock.

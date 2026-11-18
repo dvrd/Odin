@@ -699,6 +699,8 @@ async_send_process :: proc(conn: ^Async_Conn) {
 		application_rotate_send_key(&conn.protocol)
 	case .Notify:
 		conn.notify_sent = true
+	case .Alert:
+		// The handshake has failed; shutdown continues from the pump.
 	case .None:
 	}
 }

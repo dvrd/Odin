@@ -93,6 +93,21 @@ verify_server_certificates :: proc(
 		return {kind = .Invalid_Certificate_Usage, x509 = .Incompatible_Usage}
 	}
 
+	return verify_server_chain(certs, server_name, roots, now)
+}
+
+// Path validation alone: the leaf chains to one of roots through the other
+// certificates of the message, is valid at now, allows server authentication
+// and names server_name (x509.verify_chain decides what an empty name or an
+// IP address means). certs holds at least the leaf.
+verify_server_chain :: proc(
+	certs: ^Server_Certificates,
+	server_name: string,
+	roots: []^x509.Certificate,
+	now: time.Time,
+) -> Authentication_Error {
+	leaf := &certs.chain[0]
+
 	intermediates: [MAX_SERVER_CERTIFICATES - 1]^x509.Certificate
 	for i in 1 ..< certs.count do intermediates[i - 1] = &certs.chain[i]
 	chain, err := x509.verify_chain(
@@ -150,8 +165,12 @@ verify_certificate_signature :: proc(
 
 	scheme := cast(Signature_Scheme)authentication_u16(message, 4)
 	signature_size := cast(int)authentication_u16(message, 6)
-	if signature_size == 0 || signature_size != len(message) - 8 {
+	if signature_size != len(message) - 8 {
 		return {kind = .Length_Mismatch}
+	}
+
+	if signature_size == 0 {
+		return {kind = .Invalid_Signature, x509 = .Signature_Invalid}
 	}
 
 	// Only a scheme the verifier offered may sign (RFC 8446 section 4.4.3).

@@ -8,6 +8,8 @@ import "core:time"
 // Bounds memory and processing for peers that never produce application data.
 MAX_NEW_SESSION_TICKET_BODY_SIZE :: 4 + 4 + 1 + 255 + 2 + 65535 + 2 + 65534
 MAX_NON_APPLICATION_RECORDS :: 1024
+// Upstream's client gives up a recv after this many records without data.
+UPSTREAM_MAX_USELESS_RECORDS :: 16
 NEW_SESSION_TICKET_TYPE :: cast(u8)4
 
 IO_Error_Kind :: enum {
@@ -81,7 +83,9 @@ application_init_schedule :: proc(
 
 	application_clear(state)
 	state.secrets = secrets^
-	state.secrets.unsafe_secret_logger = nil
+	// The key log moves with the secrets: later KeyUpdates are logged too,
+	// and application_clear closes the file, as upstream's close does.
+	secrets.unsafe_secret_logger = nil
 	record_protection_init(&state.send, &state.secrets.client_aead)
 	record_protection_init(&state.receive, &state.secrets.server_aead)
 	aead.reset(&secrets.client_aead.ctx)
@@ -126,6 +130,7 @@ application_init_secrets :: proc(
 
 application_clear :: proc(state: ^Application_State) {
 	if state != nil {
+		clear_connection_secrets(&state.secrets)
 		crypto.zero_explicit(state, size_of(Application_State))
 	}
 }
@@ -169,7 +174,12 @@ application_read_records :: proc(conn: ^Conn, dst: []u8) -> (received: int, erro
 		return 0, {kind = .EOF}
 	}
 
-	for _ in 0 ..< MAX_NON_APPLICATION_RECORDS {
+	limit := MAX_NON_APPLICATION_RECORDS
+	if conn.upstream_client {
+		limit = UPSTREAM_MAX_USELESS_RECORDS
+	}
+
+	for useless := 0; useless < limit; useless += 1 {
 		content_type, content, record_err := application_record_read(conn)
 		if record_err.kind != .None {
 			return 0, record_err
@@ -195,6 +205,11 @@ application_read_records :: proc(conn: ^Conn, dst: []u8) -> (received: int, erro
 		case .Handshake:
 			if err := application_post_handshake(conn, content); err.kind != .None {
 				return 0, err
+			}
+
+			// Upstream counts empty records and user_canceled, not KeyUpdates.
+			if conn.upstream_client {
+				useless -= 1
 			}
 		case:
 			return 0, {kind = .Unexpected_Content_Type}
@@ -276,7 +291,7 @@ conn_close :: proc(conn: ^Conn) -> IO_Error {
 	}
 
 	err: IO_Error
-	if conn.phase == .Established && conn.application.initialized {
+	if conn.phase == .Established && conn.application.initialized && !conn.send_ended {
 		alert := [?]u8{1, 0}
 		if conn.tls12.negotiated {
 			err = tls12_application_close_notify(conn)
@@ -405,6 +420,12 @@ application_record_wire_read :: proc(conn: ^Conn, wire: []u8) -> (int, IO_Error)
 
 application_post_handshake :: proc(conn: ^Conn, content: []u8) -> IO_Error {
 	state := &conn.application
+
+	// Upstream's client takes one whole KeyUpdate per handshake record.
+	if conn.upstream_client && len(content) < 4 {
+		return {kind = .Record_Boundary_Violation}
+	}
+
 	at := 0
 	for at < len(content) {
 		if state.post_used < 4 {
@@ -415,6 +436,12 @@ application_post_handshake :: proc(conn: ^Conn, content: []u8) -> IO_Error {
 			if state.post_used < 4 do return {}
 
 			if header_error := application_post_header_validate(state); header_error.kind != .None do return header_error
+
+			// Upstream's client offers no resumption and takes a ticket for
+			// a protocol error.
+			if conn.upstream_client && state.post_handshake[0] != u8(Handshake_Type.Key_Update) {
+				return {kind = .Invalid_Post_Handshake}
+			}
 		}
 
 		count := min(state.post_expected - state.post_used, len(content) - at)
@@ -422,6 +449,9 @@ application_post_handshake :: proc(conn: ^Conn, content: []u8) -> IO_Error {
 		state.post_used += count
 		at += count
 		if state.post_used < state.post_expected {
+			if conn.upstream_client {
+				return {kind = .Record_Boundary_Violation}
+			}
 			return {}
 		}
 

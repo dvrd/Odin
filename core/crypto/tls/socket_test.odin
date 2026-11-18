@@ -40,6 +40,8 @@ Socket_Test_Server :: struct {
 	clean_close:  bool,
 	key_updates:  int,
 	echoed:       int,
+	// The alert the client ended the connection with, if any.
+	peer_alert:   u8,
 }
 
 Socket_Test_Peer :: struct {
@@ -127,6 +129,9 @@ socket_test_serve :: proc(server: ^Socket_Test_Server) {
 
 	server.key_updates = server_async_stats(engine).received_key_updates
 	server.clean_close = engine._peer_closed
+	if detail := server_async_failure(engine); detail.kind == .Peer_Alert {
+		server.peer_alert = detail.alert_description
+	}
 
 	closed: TCP_Test_Result
 	closing := tcp_test_op(&closed)
@@ -339,17 +344,19 @@ socket_verifies_the_chain_against_the_trust_roots :: proc(t: ^testing.T) {
 	matrix_roots(&strangers, true)
 	defer root_pool_destroy(&strangers)
 
+	// alert is what the server is told: upstream names its error to the peer.
 	Case :: struct {
 		host:     string,
 		roots:    []^x509.Certificate,
 		expected: Error,
+		alert:    Alert_Description,
 	}
 	cases := [?]Case {
-		{"localhost", strangers.roots[:strangers.count], Protocol_Error.Unknown_Ca},
-		{"localhost", nil, Protocol_Error.Unknown_Ca},
-		{"other.example", roots.roots[:roots.count], Protocol_Error.Bad_Certificate},
-		{"not a host name", roots.roots[:roots.count], General_Error.Invalid_SNI_Hostname},
-		{strings.repeat("a", SNI_MAX_HOSTNAME_SIZE + 1, context.temp_allocator), roots.roots[:roots.count], General_Error.Invalid_SNI_Hostname},
+		{"localhost", strangers.roots[:strangers.count], Protocol_Error.Unknown_Ca, .Unknown_Ca},
+		{"localhost", nil, Protocol_Error.Unknown_Ca, .Unknown_Ca},
+		{"other.example", roots.roots[:roots.count], Protocol_Error.Bad_Certificate, .Bad_Certificate},
+		// Refused before any I/O.
+		{strings.repeat("a", SNI_MAX_HOSTNAME_SIZE + 1, context.temp_allocator), roots.roots[:roots.count], General_Error.Invalid_SNI_Hostname, .Close_Notify},
 	}
 
 	for entry in cases {
@@ -382,6 +389,7 @@ socket_verifies_the_chain_against_the_trust_roots :: proc(t: ^testing.T) {
 
 		socket_test_join(&server)
 		testing.expect(t, !server.established)
+		testing.expectf(t, server.peer_alert == u8(entry.alert), "%q: alert %v", entry.host, server.peer_alert)
 	}
 }
 
@@ -392,7 +400,9 @@ socket_skips_verification_and_omits_sni_for_an_address :: proc(t: ^testing.T) {
 	Case :: struct {
 		host, sni: string,
 	}
-	for entry in ([?]Case{{"127.0.0.1", ""}, {"::1", ""}, {"unknown.example", "unknown.example"}}) {
+	// The name is upstream's to send as given: none for an address or an
+	// empty name, anything else verbatim.
+	for entry in ([?]Case{{"127.0.0.1", ""}, {"::1", ""}, {"", ""}, {"unknown.example", "unknown.example"}}) {
 		server: Socket_Test_Server
 		if !socket_test_start(t, &server, .Echo) {
 			return
@@ -567,7 +577,7 @@ socket_logs_secrets_to_the_callers_file :: proc(t: ^testing.T) {
 	testing.set_fail_timeout(t, 20 * time.Second)
 
 	server: Socket_Test_Server
-	if !socket_test_start(t, &server, .Echo) {
+	if !socket_test_start(t, &server, .Echo_After_Key_Update_Request) {
 		return
 	}
 
@@ -589,11 +599,20 @@ socket_logs_secrets_to_the_callers_file :: proc(t: ^testing.T) {
 	close(&socket)
 	socket_test_join(&server)
 
-	// The connection closed the file; all four secrets of the handshake are in it.
+	// close closed the file. All four secrets of the handshake are in it,
+	// and as upstream logs them, those of the key updates that followed.
 	log, read_error := os.read_entire_file(path, context.allocator)
 	defer delete(log)
 	testing.expect(t, read_error == nil)
-	for label in ([?]string{"CLIENT_HANDSHAKE_TRAFFIC_SECRET ", "SERVER_HANDSHAKE_TRAFFIC_SECRET ", "CLIENT_TRAFFIC_SECRET_0 ", "SERVER_TRAFFIC_SECRET_0 "}) {
+	labels := [?]string {
+		"CLIENT_HANDSHAKE_TRAFFIC_SECRET ",
+		"SERVER_HANDSHAKE_TRAFFIC_SECRET ",
+		"CLIENT_TRAFFIC_SECRET_0 ",
+		"SERVER_TRAFFIC_SECRET_0 ",
+		"CLIENT_TRAFFIC_SECRET_1 ",
+		"SERVER_TRAFFIC_SECRET_1 ",
+	}
+	for label in labels {
 		testing.expectf(t, strings.contains(string(log), label), "missing %s", label)
 	}
 }
@@ -610,24 +629,41 @@ socket_errors_map_to_upstreams :: proc(t: ^testing.T) {
 	handshakes := [?]Handshake_Case {
 		{{kind = .Client_Hello_Failed, client_hello = {kind = .Entropy_Unavailable}}, General_Error.Failed_Key_Share_Generation},
 		{{kind = .Client_Hello_Failed, client_hello = {kind = .Write_Failed, transport = refused}}, net.TCP_Send_Error.Connection_Closed},
-		{{kind = .Server_Hello_Failed, server_hello = {kind = .Peer_Alert, alert_level = 2, alert_description = 40}}, Protocol_Error.Handshake_Failure},
-		{{kind = .Server_Hello_Failed, server_hello = {kind = .Peer_Alert, alert_level = 2, alert_description = 70}}, Protocol_Error.Protocol_Version},
+		// Upstream expects a handshake record: the peer's alert is not one.
+		{{kind = .Server_Hello_Failed, server_hello = {kind = .Peer_Alert, alert_level = 2, alert_description = 40}}, Protocol_Error.Unexpected_Message},
+		{{kind = .Server_Hello_Failed, server_hello = {kind = .Too_Many_Change_Cipher_Specs}}, Protocol_Error.Unexpected_Message},
+		{{kind = .Server_Hello_Failed, server_hello = {kind = .Record_Read_Failed, record = {kind = .Invalid_Header, record = .Record_Oversized}}}, Protocol_Error.Record_Overflow},
+		{{kind = .Server_Hello_Failed, server_hello = {kind = .Record_Read_Failed, record = {kind = .Invalid_Header, record = .Unknown_Content_Type}}}, Protocol_Error.Unexpected_Message},
 		{{kind = .Server_Hello_Failed, server_hello = {kind = .Record_Read_Failed, record = {transport = reset}}}, net.TCP_Recv_Error.Connection_Closed},
 		{{kind = .Server_Hello_Failed, server_hello = {kind = .Record_Read_Failed, record = {transport = {kind = .Peer_Closed}}}}, net.TCP_Recv_Error.Connection_Closed},
-		{{kind = .Server_Hello_Failed, server_hello = {kind = .Invalid_Server_Hello, decode = .Unsupported_Version}}, Protocol_Error.Protocol_Version},
+		{{kind = .Server_Hello_Failed, server_hello = {kind = .Invalid_Server_Hello, decode = .Invalid_Legacy_Version}}, Protocol_Error.Protocol_Version},
+		{{kind = .Server_Hello_Failed, server_hello = {kind = .Invalid_Server_Hello, decode = .Unsupported_Version}}, Protocol_Error.Illegal_Parameter},
+		{{kind = .Server_Hello_Failed, server_hello = {kind = .Invalid_Server_Hello, decode = .Missing_Supported_Versions}}, Protocol_Error.Illegal_Parameter},
+		{{kind = .Server_Hello_Failed, server_hello = {kind = .Invalid_Server_Hello, decode = .Session_ID_Mismatch}}, Protocol_Error.Illegal_Parameter},
+		{{kind = .Server_Hello_Failed, server_hello = {kind = .Invalid_Server_Hello, decode = .Hello_Retry_Unsupported}}, Protocol_Error.Unexpected_Message},
+		{{kind = .Server_Hello_Failed, server_hello = {kind = .Invalid_Server_Hello, decode = .Unsupported_Extension}}, Protocol_Error.Unsupported_Extension},
+		{{kind = .Server_Hello_Failed, server_hello = {kind = .Invalid_Server_Hello, decode = .Unoffered_Group}}, Protocol_Error.General_Error},
+		{{kind = .Server_Hello_Failed, server_hello = {kind = .Invalid_Server_Hello, decode = .Key_Share_Size_Mismatch}}, Protocol_Error.General_Error},
+		{{kind = .Server_Hello_Failed, server_hello = {kind = .Invalid_Server_Hello, decode = .Invalid_Key_Share_Length}}, Protocol_Error.Decode_Error},
 		{{kind = .Server_Hello_Failed, server_hello = {kind = .Invalid_Server_Hello, decode = .Unoffered_Cipher}}, Protocol_Error.Illegal_Parameter},
 		{{kind = .Server_Hello_Failed, server_hello = {kind = .Invalid_Server_Hello, decode = .Truncated}}, Protocol_Error.Decode_Error},
 		{{kind = .Server_Hello_Failed, server_hello = {kind = .Invalid_Server_Hello, decode = .Missing_Key_Share}}, Protocol_Error.Missing_Extension},
-		{{kind = .Server_Hello_Failed, server_hello = {kind = .Invalid_Key_Share}}, Protocol_Error.Illegal_Parameter},
+		{{kind = .Server_Hello_Failed, server_hello = {kind = .Invalid_Key_Share}}, Protocol_Error.General_Error},
 		{{kind = .Key_Derivation_Failed}, Protocol_Error.Illegal_Parameter},
 		{{kind = .Server_Flight_Read_Failed, record = {kind = .Decryption_Failed}}, Protocol_Error.Bad_Record_Mac},
+		{{kind = .Server_Flight_Read_Failed, record = {kind = .Decryption_Failed, protection = .Ciphertext_Too_Short}}, Protocol_Error.Decode_Error},
+		{{kind = .Server_Flight_Read_Failed, record = {kind = .Decryption_Failed, protection = .Empty_Handshake}}, Protocol_Error.Unexpected_Message},
+		{{kind = .Server_Flight_Read_Failed, record = {kind = .Invalid_Header, record = .Record_Oversized}}, Protocol_Error.Record_Overflow},
+		{{kind = .Server_Flight_Read_Failed, record = {kind = .Too_Many_Change_Cipher_Specs}}, Protocol_Error.Unexpected_Message},
+		{{kind = .Server_Flight_Read_Failed, record = {kind = .Invalid_Change_Cipher_Spec}}, Protocol_Error.Illegal_Parameter},
+		{{kind = .Server_Flight_Read_Failed, record = {kind = .Invalid_Change_Cipher_Spec, record = .Invalid_Change_Cipher_Spec_Length}}, Protocol_Error.Decode_Error},
 		{{kind = .Server_Flight_Read_Failed, record = {kind = .Peer_Alert, alert_level = 2, alert_description = 80}}, Protocol_Error.Internal_Error},
 		{{kind = .Server_Flight_Read_Failed, record = {kind = .Body_Read_Failed, transport = reset}}, net.TCP_Recv_Error.Connection_Closed},
 		{{kind = .Unexpected_Handshake_Message}, Protocol_Error.Unexpected_Message},
 		{{kind = .Malformed_Message}, Protocol_Error.Decode_Error},
 		{{kind = .Unsupported_Extension}, Protocol_Error.Illegal_Parameter},
 		{{kind = .Invalid_ALPN}, Protocol_Error.Illegal_Parameter},
-		{{kind = .Client_Authentication_Unsupported}, General_Error.Unsupported_Client_Certificate_Requested},
+		{{kind = .Client_Authentication_Unsupported}, Protocol_Error.Unexpected_Message},
 		{{kind = .Authentication_Failed, authentication = {kind = .Certificate_Chain_Invalid, x509 = .Expired}}, Protocol_Error.Certificate_Expired},
 		{{kind = .Authentication_Failed, authentication = {kind = .Certificate_Chain_Invalid, x509 = .Signature_Invalid}}, Protocol_Error.Certificate_Expired},
 		{{kind = .Authentication_Failed, authentication = {kind = .Certificate_Chain_Invalid, x509 = .Unknown_Authority}}, Protocol_Error.Unknown_Ca},
@@ -635,6 +671,7 @@ socket_errors_map_to_upstreams :: proc(t: ^testing.T) {
 		{{kind = .Authentication_Failed, authentication = {kind = .Certificate_Chain_Invalid, x509 = .Hostname_Mismatch}}, Protocol_Error.Bad_Certificate},
 		{{kind = .Authentication_Failed, authentication = {kind = .Invalid_Certificate}}, Protocol_Error.Bad_Certificate},
 		{{kind = .Authentication_Failed, authentication = {kind = .Empty_Certificate_List}}, Protocol_Error.Illegal_Parameter},
+		{{kind = .Authentication_Failed, authentication = {kind = .Unsupported_Certificate_Extension}}, Protocol_Error.Illegal_Parameter},
 		{{kind = .Authentication_Failed, authentication = {kind = .Invalid_Signature}}, Protocol_Error.Decrypt_Error},
 		{{kind = .Authentication_Failed, authentication = {kind = .Unsupported_Signature_Scheme}}, Protocol_Error.Decrypt_Error},
 		{{kind = .Finished_Failed, finished = .Verification_Failed}, Protocol_Error.Decrypt_Error},
@@ -660,7 +697,9 @@ socket_errors_map_to_upstreams :: proc(t: ^testing.T) {
 		{{kind = .Peer_Alert, alert_level = 9, alert_description = 80}, Protocol_Error.Decode_Error},
 		{{kind = .Decryption_Failed}, Protocol_Error.Bad_Record_Mac},
 		{{kind = .Invalid_Record, record = .Record_Oversized}, Protocol_Error.Record_Overflow},
-		{{kind = .Invalid_Record, record = .Unknown_Content_Type}, Protocol_Error.Decode_Error},
+		{{kind = .Invalid_Record, record = .Unknown_Content_Type}, Protocol_Error.Unexpected_Message},
+		{{kind = .Record_Boundary_Violation}, Protocol_Error.Decode_Error},
+		{{kind = .No_Progress}, io.Error.No_Progress},
 		{{kind = .Unexpected_Content_Type}, Protocol_Error.Unexpected_Message},
 		{{kind = .Invalid_Post_Handshake}, Protocol_Error.Decode_Error},
 	}
@@ -668,8 +707,41 @@ socket_errors_map_to_upstreams :: proc(t: ^testing.T) {
 		testing.expectf(t, socket_io_error(entry.failure) == entry.expected, "%v/%v: %v", entry.failure.kind, entry.expected, socket_io_error(entry.failure))
 	}
 
-	testing.expect_value(t, socket_config_error(.Invalid_Server_Name), Error(General_Error.Invalid_SNI_Hostname))
-	testing.expect_value(t, socket_config_error(.Invalid_ALPN), Error(Protocol_Error.Internal_Error))
+
+	// The alert that goes with each failure: the error's own, except where
+	// upstream sends none or another.
+	Alert_Case :: struct {
+		failure:   Handshake_Error,
+		alert:     Alert_Description,
+		plaintext: bool,
+		send:      bool,
+	}
+	alerts := [?]Alert_Case {
+		{{kind = .Client_Hello_Failed, client_hello = {kind = .Write_Failed, transport = refused}}, {}, false, false},
+		{{kind = .Server_Hello_Failed, server_hello = {kind = .Record_Read_Failed, record = {transport = reset}}}, {}, false, false},
+		{{kind = .Server_Hello_Failed, server_hello = {kind = .Peer_Alert, alert_level = 2, alert_description = 40}}, .Unexpected_Message, false, true},
+		{{kind = .Server_Hello_Failed, server_hello = {kind = .Invalid_Server_Hello, decode = .Hello_Retry_Unsupported}}, .Unexpected_Message, false, true},
+		{{kind = .Server_Hello_Failed, server_hello = {kind = .Invalid_Key_Share}}, .General_Error, false, true},
+		{{kind = .Server_Flight_Read_Failed, record = {kind = .Body_Read_Failed, transport = reset}}, {}, false, false},
+		{{kind = .Server_Flight_Read_Failed, record = {kind = .Peer_Alert, alert_level = 2, alert_description = 80}}, {}, false, false},
+		{{kind = .Server_Flight_Read_Failed, record = {kind = .Unexpected_Content_Type, content_type = .Alert}}, {}, false, false},
+		{{kind = .Server_Flight_Read_Failed, record = {kind = .Unexpected_Content_Type, content_type = .Handshake}}, .Unexpected_Message, false, true},
+		{{kind = .Server_Flight_Read_Failed, record = {kind = .Decryption_Failed}}, .Bad_Record_Mac, false, true},
+		{{kind = .Malformed_Message}, .Decode_Error, false, true},
+		{{kind = .Malformed_Message, plaintext_alert = true}, .Decode_Error, true, true},
+		{{kind = .Unsupported_Extension}, .Illegal_Parameter, false, true},
+		{{kind = .Authentication_Failed, authentication = {kind = .Certificate_Chain_Invalid, x509 = .Unknown_Authority}}, .Unknown_Ca, false, true},
+		{{kind = .Authentication_Failed, authentication = {kind = .Certificate_Chain_Invalid, x509 = .Expired}}, .Certificate_Expired, false, true},
+		{{kind = .Authentication_Failed, authentication = {kind = .Length_Mismatch}}, .Decode_Error, false, true},
+		{{kind = .Authentication_Failed, authentication = {kind = .Length_Mismatch}, message_type = u8(Handshake_Type.Certificate_Verify)}, .Decrypt_Error, false, true},
+		{{kind = .Finished_Failed, finished = .Verification_Failed}, .Decrypt_Error, false, true},
+		{{kind = .Finished_Write_Failed, transport = refused}, {}, false, false},
+		{{kind = .Allocation_Failed, allocation = .Out_Of_Memory}, .Internal_Error, false, true},
+	}
+	for entry in alerts {
+		alert, plaintext, send := socket_handshake_alert(entry.failure)
+		testing.expectf(t, send == entry.send && plaintext == entry.plaintext && (!send || alert == entry.alert), "%v: %v %v %v", entry.failure, alert, plaintext, send)
+	}
 }
 
 // close is one name for both connection types.
@@ -719,4 +791,136 @@ close_resolves_for_socket_and_conn :: proc(t: ^testing.T) {
 
 	socket_test_join(&server)
 	testing.expect(t, server.clean_close)
+}
+
+// The extension types of a ClientHello message, in order, and the size of
+// its legacy session id.
+socket_test_hello_shape :: proc(hello: []u8, types: ^[dynamic]u16) -> (session_size: int) {
+	at := 4 + 2 + 32
+	session_size = int(hello[at])
+	at += 1 + session_size
+	at += 2 + int(hello_u16(hello, at))
+	at += 1 + int(hello[at])
+	at += 2
+	for at < len(hello) {
+		append(types, hello_u16(hello, at))
+		at += 4 + int(hello_u16(hello, at + 2))
+	}
+	return
+}
+
+@(test)
+socket_offers_upstreams_client_hello :: proc(t: ^testing.T) {
+	// More protocols than the engine's own limit, and a name it would refuse.
+	protocols: [20]string
+	for &protocol in protocols {
+		protocol = "h2"
+	}
+
+	conn := new(Conn)
+	defer free(conn)
+	defer handshake_keys_clear(conn)
+	conn.phase = .Handshake_Pending
+	conn.upstream_client = true
+	conn.config = {server_name = "under_score.example", offer = .Upstream, alpn_protocols = protocols[:]}
+	testing.expect_value(t, client_hello_prepare(conn).kind, Client_Hello_Send_Error_Kind.None)
+
+	types: [dynamic]u16
+	defer delete(types)
+	hello := conn.client_hello[:conn.client_hello_size]
+	testing.expect_value(t, socket_test_hello_shape(hello, &types), LEGACY_SESSION_ID_SIZE)
+	testing.expect_value(t, len(handshake_session_id(conn)), LEGACY_SESSION_ID_SIZE)
+
+	// supported_versions, server_name, signature_algorithms, supported_groups,
+	// key_share, ALPN, renegotiation_info, ec_point_formats.
+	expected := [?]u16{43, 0, 13, 10, 51, 16, 65281, 11}
+	testing.expect_value(t, len(types), len(expected))
+	for type, i in expected {
+		if i < len(types) {
+			testing.expect_value(t, types[i], type)
+		}
+	}
+	testing.expect(t, strings.contains(string(hello), "under_score.example"))
+
+	// The engine's own offer keeps an empty session id and sends no
+	// compatibility ChangeCipherSpec.
+	compatible := new(Conn)
+	defer free(compatible)
+	defer handshake_keys_clear(compatible)
+	compatible.phase = .Handshake_Pending
+	compatible.config = {server_name = "example.com"}
+	testing.expect_value(t, client_hello_prepare(compatible).kind, Client_Hello_Send_Error_Kind.None)
+	clear(&types)
+	testing.expect_value(t, socket_test_hello_shape(compatible.client_hello[:compatible.client_hello_size], &types), 0)
+	storage: [8]u8
+	testing.expect_value(t, handshake_ccs_encode(compatible, storage[:]), 0)
+	testing.expect_value(t, handshake_ccs_encode(conn, storage[:]), len(CHANGE_CIPHER_SPEC_RECORD))
+}
+
+@(test)
+socket_refuses_what_upstream_refuses :: proc(t: ^testing.T) {
+	// A protocol without a name cannot be encoded; nothing is sent.
+	socket: Socket
+	unnamed := [?]Alpn_Protocols{.Http_2, .None}
+	failure := client_handshake(&socket, net.TCP_Socket{}, "localhost", nil, unnamed[:])
+	testing.expect_value(t, failure, Error(io.Error.Short_Buffer))
+
+	Case :: struct {
+		extensions: []u8,
+		kind:       Handshake_Error_Kind,
+		expected:   Error,
+		plaintext:  bool,
+	}
+
+	// EncryptedExtensions, for the name "localhost" and an offer of h2.
+	offers := [?]string{"h2"}
+	encrypted := [?]Case {
+		{{}, .None, nil, false},
+		{{0, 0, 0, 0}, .None, nil, false},
+		{{0, 16, 0, 5, 0, 3, 2, 'h', '2'}, .None, nil, false},
+		{{0, 0, 0, 0, 0, 0, 0, 0}, .Unsupported_Extension, Protocol_Error.Illegal_Parameter, false},
+		{{0, 0, 0, 1, 0}, .Unsupported_Extension, Protocol_Error.Illegal_Parameter, false},
+		// supported_groups is legal there, and upstream refuses it.
+		{{0, 10, 0, 4, 0, 2, 0, 29}, .Unsupported_Extension, Protocol_Error.Illegal_Parameter, false},
+		{{0, 16, 0, 5, 0, 3, 2, 'h', '3'}, .Invalid_ALPN, Protocol_Error.Illegal_Parameter, false},
+		{{0, 16, 0, 2, 0, 0}, .Malformed_Message, Protocol_Error.Decode_Error, false},
+		{{0, 16, 0, 9, 0, 3, 2, 'h', '2'}, .Malformed_Message, Protocol_Error.Decode_Error, true},
+		{{0, 0, 0}, .Malformed_Message, Protocol_Error.Decode_Error, false},
+	}
+	message: [64]u8
+	for entry in encrypted {
+		size := socket_test_message(message[:], .Encrypted_Extensions, nil, entry.extensions)
+		got := socket_encrypted_extensions_check(message[:size], "localhost", offers[:])
+		testing.expectf(t, got.kind == entry.kind && got.plaintext_alert == entry.plaintext, "%v: %v", entry.extensions, got)
+		testing.expectf(t, socket_handshake_error(got) == entry.expected, "%v: %v", entry.extensions, socket_handshake_error(got))
+	}
+
+	// CertificateRequest.
+	requests := [?]Case {
+		{{0, 13, 0, 4, 0, 2, 8, 7}, .None, nil, false},
+		{{0, 13, 0, 4, 0, 2, 8, 7, 0, 47, 0, 0, 119, 119, 0, 0, 119, 119, 0, 0}, .None, nil, false},
+		{{}, .Malformed_Message, Protocol_Error.Missing_Extension, false},
+		{{0, 13, 0, 4, 0, 2, 8, 7, 0, 13, 0, 4, 0, 2, 8, 7}, .Malformed_Message, Protocol_Error.Missing_Extension, false},
+		{{0, 13, 0, 4, 0, 2, 8, 7, 0, 5, 0, 0, 0, 5, 0, 0}, .Malformed_Message, Protocol_Error.Illegal_Parameter, false},
+		{{0, 13, 0, 4, 0, 2, 8, 7, 0, 10, 0, 0}, .Unsupported_Extension, Protocol_Error.Unsupported_Extension, false},
+		{{0, 13, 0, 3, 0, 1, 8}, .Malformed_Message, Protocol_Error.Decode_Error, false},
+		{{0, 13, 0, 4, 0, 2, 8, 7, 0}, .Malformed_Message, Protocol_Error.Decode_Error, false},
+	}
+	for entry in requests {
+		size := socket_test_message(message[:], .Certificate_Request, {0}, entry.extensions)
+		got := socket_certificate_request_check(message[:size])
+		testing.expectf(t, got.kind == entry.kind, "%v: %v", entry.extensions, got)
+		testing.expectf(t, socket_handshake_error(got) == entry.expected, "%v: %v", entry.extensions, socket_handshake_error(got))
+	}
+}
+
+// A handshake message of prefix and a vector of extensions.
+socket_test_message :: proc(dst: []u8, type: Handshake_Type, prefix: []u8, extensions: []u8) -> int {
+	at := 4
+	at += copy(dst[at:], prefix)
+	hello_put_u16(dst, &at, u16(len(extensions)))
+	at += copy(dst[at:], extensions)
+	dst[0] = u8(type)
+	server_flight_put24(dst[1:4], at - 4)
+	return at
 }

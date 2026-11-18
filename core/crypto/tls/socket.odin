@@ -13,6 +13,15 @@ import "core:time"
 // thread; no worker threads exist. send and recv keep upstream's promise
 // that one thread may send while another receives: the engine's two record
 // directions share no state, and each is serialized by its own lock.
+//
+// What the peer and the caller observe is upstream's client: its ClientHello
+// (the Upstream offer), its compatibility ChangeCipherSpec, the alert it
+// sends for each failure and the Error it returns. Conn.upstream_client makes
+// the engine refuse what upstream refuses (a HelloRetryRequest, a
+// ChangeCipherSpec before the ServerHello or a second one after it, any
+// EncryptedExtensions extension but server_name and ALPN, a
+// NewSessionTicket) and accept what it accepts (any host name of at most
+// SNI_MAX_HOSTNAME_SIZE bytes, any number of ALPN protocols).
 
 // client_handshake performs a TLS handshake given an established
 // TCP connection (`net_socket`).  `trust_roots` is expected to be
@@ -78,6 +87,8 @@ socket_engine_handshake :: proc(
 	state.conn = nil
 	sync.atomic_store(&state.closing, false)
 	sync.atomic_store(&state.key_update_owed, false)
+	sync.atomic_store(&state.rx_dead, false)
+	sync.atomic_store(&state.tx_dead, false)
 
 	// The engine's handshake allocations follow the caller's allocator.
 	context.allocator = allocator
@@ -86,9 +97,18 @@ socket_engine_handshake :: proc(
 	defer delete(names, allocator)
 	for protocol, i in alpn_protocols {
 		names[i] = ALPN_STRINGS[protocol]
+
+		// Upstream cannot encode a protocol without a name (`.None`).
+		if len(names[i]) == 0 {
+			return io.Error.Short_Buffer
+		}
 	}
 
-	config := Config {
+	// The configuration is taken as given: upstream validates no more than
+	// the length of the host name.
+	conn := new(Conn, allocator) or_return
+	conn.transport = {data = socket, read = socket_transport_read, write = socket_transport_write, close = socket_transport_close}
+	conn.config = {
 		server_name          = host_name,
 		root_cas             = trust_roots,
 		alpn_protocols       = names,
@@ -97,14 +117,8 @@ socket_engine_handshake :: proc(
 		unsafe_secret_logger = unsafe_secret_logger,
 		no_system_roots      = true,
 	}
-	if invalid := config_validate(config); invalid != .None {
-		return socket_config_error(invalid)
-	}
-
-	conn := new(Conn, allocator) or_return
-	conn.transport = {data = socket, read = socket_transport_read, write = socket_transport_write, close = socket_transport_close}
-	conn.config = config
 	conn.phase = .Handshake_Pending
+	conn.upstream_client = true
 	// A KeyUpdate request read by recv is left for the sender to answer.
 	conn.defer_key_updates = true
 
@@ -150,6 +164,10 @@ socket_engine_send :: proc(socket: ^Socket, buf: []byte) -> (n: int, err: Error)
 		return 0, io.Error.Closed
 	}
 
+	if sync.atomic_load(&state.tx_dead) {
+		return 0, io.Error.Unknown
+	}
+
 	// Record by record, so that a KeyUpdate owed to the peer goes out in
 	// the middle of a long send instead of after it.
 	for n < len(buf) {
@@ -159,7 +177,7 @@ socket_engine_send :: proc(socket: ^Socket, buf: []byte) -> (n: int, err: Error)
 		written, failure := application_write_records(state.conn, buf[n:][:count])
 		n += written
 		if failure.kind != .None {
-			return n, socket_engine_failure(socket, failure)
+			return n, socket_engine_failure(socket, socket_io_error(failure))
 		}
 	}
 	return n, nil
@@ -173,6 +191,10 @@ socket_engine_recv :: proc(socket: ^Socket, buf: []byte) -> (n: int, err: Error)
 	conn := state.conn
 	if conn == nil {
 		return 0, io.Error.Closed
+	}
+
+	if sync.atomic_load(&state.rx_dead) {
+		return 0, io.Error.Unknown
 	}
 
 	received, failure := application_read_records(conn, buf)
@@ -192,18 +214,32 @@ socket_engine_recv :: proc(socket: ^Socket, buf: []byte) -> (n: int, err: Error)
 		}
 	}
 
-	switch failure.kind {
+	#partial switch failure.kind {
 	case .None:
 		return received, nil
 	case .EOF:
 		// Not sticky: the socket can still send.
 		return 0, Protocol_Error.Close_Notify
-	case .Closed, .Invalid_State, .Handshake_Failed, .Transport_Read_Failed, .Transport_Write_Failed,
-	     .Transport_Close_Failed, .Unexpected_EOF, .Invalid_Record, .Encryption_Failed, .Decryption_Failed,
-	     .Unexpected_Content_Type, .Peer_Alert, .Interleaved_Record, .Record_Boundary_Violation,
-	     .Invalid_Post_Handshake, .Post_Handshake_Oversized, .No_Progress:
+	case .No_Progress:
+		// Upstream's receiver gives up without recording an error.
+		sync.atomic_store(&state.rx_dead, true)
+		return 0, io.Error.No_Progress
+	case .Invalid_Post_Handshake, .Post_Handshake_Oversized:
+		// A handshake message other than KeyUpdate ends upstream's socket
+		// with an alert to the peer and no error of its own.
+		if conn.application.post_handshake[0] != u8(Handshake_Type.Key_Update) {
+			socket_engine_alert(socket, .Internal_Error)
+			sync.atomic_store(&state.rx_dead, true)
+			sync.atomic_store(&state.tx_dead, true)
+			return 0, io.Error.Unknown
+		}
 	}
-	return 0, socket_engine_failure(socket, failure)
+
+	// Upstream names every failed recv to the peer: its own alert echoed
+	// back, internal_error for a lost connection.
+	err = socket_recv_error(conn, failure)
+	socket_engine_alert(socket, error_to_alert(err))
+	return 0, socket_engine_failure(socket, err)
 }
 
 // Sends the KeyUpdate the peer asked for, if one is owed. The caller holds
@@ -216,19 +252,34 @@ socket_engine_owed_key_update :: proc(socket: ^Socket) -> Error {
 	}
 
 	if failure := application_send_key_update(state.conn); failure.kind != .None {
-		return socket_engine_failure(socket, failure)
+		return socket_engine_failure(socket, socket_io_error(failure))
 	}
 	return nil
 }
 
-// Records the engine's failure as the socket's error, unless close is what
-// interrupted the call.
+// Tells the peer why recv gave up, as upstream's receiver does through its
+// sender: best effort, and never behind a send in progress.
+@(private)
+socket_engine_alert :: proc(socket: ^Socket, alert: Alert_Description) {
+	state := &socket._state
+	if sync.atomic_load(&state.closing) || !sync.mutex_try_lock(&state.tx_lock) {
+		return
+	}
+
+	content := [2]u8{u8(alert_to_level(alert)), u8(alert)}
+	application_record_write(state.conn, .Alert, content[:])
+	state.conn.send_ended = true
+	sync.mutex_unlock(&state.tx_lock)
+}
+
+// Records err as the socket's error, unless close is what interrupted the
+// call.
 @(private, require_results)
-socket_engine_failure :: proc(socket: ^Socket, failure: IO_Error) -> Error {
+socket_engine_failure :: proc(socket: ^Socket, err: Error) -> Error {
 	if sync.atomic_load(&socket._state.closing) {
 		return io.Error.Closed
 	}
-	return socket_set_error(socket, socket_io_error(failure))
+	return socket_set_error(socket, err)
 }
 
 // Closes the engine once no other thread is inside it: conn_close sends
@@ -313,8 +364,9 @@ socket_transport_close :: proc(data: rawptr) -> net.Connection_Error {
 	return {}
 }
 
-// The engine's errors in upstream's Error. A TCP failure keeps its cause; a
-// protocol failure becomes the alert upstream reports for it.
+// The engine's failures as upstream's client reports them: the Error it
+// returns and the alert it sends to the peer. A TCP failure keeps its cause
+// and sends nothing.
 
 @(private, require_results)
 socket_transport_error :: proc(failure: net.Connection_Error) -> Error {
@@ -337,17 +389,215 @@ socket_peer_alert_error :: proc(level, description: u8) -> Error {
 	return alert_to_error(Alert_Level(level), Alert_Description(description))
 }
 
+// Upstream's validation of EncryptedExtensions: a server_name
+// acknowledgement (empty, once, and only when a name was sent) and one ALPN
+// selection among the offers; anything else is an illegal parameter.
 @(private, require_results)
-socket_config_error :: proc(invalid: Client_Error) -> Error {
-	#partial switch invalid {
-	case .Missing_Server_Name, .Invalid_Server_Name:
-		return General_Error.Invalid_SNI_Hostname
+socket_encrypted_extensions_check :: proc(message: []u8, host_name: string, offers: []string) -> Handshake_Error {
+	body := message[4:]
+	if len(body) < 2 || int(hello_u16(body, 0)) != len(body) - 2 {
+		return {kind = .Malformed_Message}
 	}
-	return Protocol_Error.Internal_Error
+
+	sni_sent := len(host_name) > 0 && net.parse_address(host_name) == nil
+	got_sni, got_alpn: bool
+	at := 2
+	for len(body) - at >= 4 {
+		extension := Extension_Type(hello_u16(body, at))
+		size := int(hello_u16(body, at + 2))
+		at += 4
+		if size > len(body) - at {
+			return {kind = .Malformed_Message, plaintext_alert = true}
+		}
+
+		data := body[at:at + size]
+		at += size
+
+		#partial switch extension {
+		case .Server_Name:
+			if got_sni || !sni_sent || len(data) != 0 {
+				return {kind = .Unsupported_Extension}
+			}
+			got_sni = true
+		case .Application_Layer_Protocol_Negotiation:
+			if len(data) < 3 || len(offers) == 0 {
+				return {kind = .Malformed_Message}
+			}
+
+			if got_alpn {
+				return {kind = .Invalid_ALPN}
+			}
+
+			if int(hello_u16(data, 0)) != len(data) - 2 || int(data[2]) != len(data) - 3 {
+				return {kind = .Malformed_Message}
+			}
+
+			if !socket_alpn_offered(offers, string(data[3:])) {
+				return {kind = .Invalid_ALPN}
+			}
+			got_alpn = true
+		case:
+			return {kind = .Unsupported_Extension}
+		}
+	}
+
+	if at != len(body) {
+		return {kind = .Malformed_Message}
+	}
+	return {}
+}
+
+// Upstream's validation of CertificateRequest: any context, no extension
+// that TLS 1.3 forbids there, signature_algorithms exactly once and none of
+// the extensions it knows twice. Extensions it does not know are ignored.
+@(private, require_results)
+socket_certificate_request_check :: proc(message: []u8) -> Handshake_Error {
+	body := message[4:]
+	if len(body) < 1 || len(body) < 3 + int(body[0]) {
+		return {kind = .Malformed_Message}
+	}
+
+	at := 1 + int(body[0])
+	if int(hello_u16(body, at)) != len(body) - at - 2 {
+		return {kind = .Malformed_Message}
+	}
+	at += 2
+
+	got_signature_algorithms, got_duplicate: bool
+	seen: bit_set[0 ..< 7]
+	extension_loop: for len(body) - at >= 4 {
+		extension := Extension_Type(hello_u16(body, at))
+		size := int(hello_u16(body, at + 2))
+		at += 4
+		if size > len(body) - at {
+			return {kind = .Malformed_Message}
+		}
+
+		data := body[at:at + size]
+		at += size
+		if socket_certificate_request_forbids(extension) {
+			return {kind = .Unsupported_Extension, upstream_alert = .Unsupported_Extension}
+		}
+
+		index := -1
+		#partial switch extension {
+		case .Signature_Algorithms:
+			// A second one counts as none.
+			if got_signature_algorithms {
+				got_signature_algorithms = false
+				break extension_loop
+			}
+
+			got_signature_algorithms = true
+			if size % 2 != 0 || size < 4 || int(hello_u16(data, 0)) != size - 2 {
+				return {kind = .Malformed_Message}
+			}
+		case .Status_Request:
+			index = 0
+		case .Compress_Certificate:
+			index = 1
+		case .Delegated_Credential:
+			index = 2
+		case .Certificate_Authorities:
+			index = 3
+		case .Oid_Filters:
+			index = 4
+		case .Signature_Algorithms_Cert:
+			index = 5
+		case .Transparency_Info:
+			index = 6
+		}
+
+		if index >= 0 {
+			if index in seen {
+				got_duplicate = true
+				break extension_loop
+			}
+			seen += {index}
+		}
+	}
+
+	if !got_signature_algorithms {
+		return {kind = .Malformed_Message, upstream_alert = .Missing_Extension}
+	}
+
+	if got_duplicate {
+		return {kind = .Malformed_Message, upstream_alert = .Illegal_Parameter}
+	}
+
+	if at != len(body) {
+		return {kind = .Malformed_Message}
+	}
+
+	// Upstream echoes a context; the engine's Certificate carries none.
+	if body[0] != 0 {
+		return {kind = .Malformed_Message}
+	}
+	return {}
+}
+
+@(private, require_results)
+socket_certificate_request_forbids :: proc(extension: Extension_Type) -> bool {
+	for known in Extension_Type {
+		if known == extension {
+			return CERTIFICATE_FORBIDDEN_EXTENSIONS[extension]
+		}
+	}
+	return false
+}
+
+@(private, require_results)
+socket_alpn_offered :: proc(offers: []string, protocol: string) -> bool {
+	for offer in offers {
+		if offer == protocol {
+			return true
+		}
+	}
+	return false
+}
+
+// The alert upstream's client sends for a failed handshake, if any. Its
+// alerts name the error it returns, with these exceptions: nothing answers a
+// lost connection or the peer's own alert once records are protected, and a
+// CertificateVerify whose signature length disagrees with the message is
+// reported as a decode error but alerted as a decrypt error.
+@(private, require_results)
+socket_handshake_alert :: proc(failure: Handshake_Error) -> (alert: Alert_Description, plaintext: bool, send: bool) {
+	#partial switch failure.kind {
+	case .None, .Invalid_State, .Client_Hello_Failed, .Finished_Write_Failed, .Deadline_Failed:
+		return
+	case .Server_Hello_Failed:
+		if failure.server_hello.kind == .Record_Read_Failed && failure.server_hello.record.transport.kind != .None {
+			return
+		}
+	case .Server_Flight_Read_Failed:
+		#partial switch failure.record.kind {
+		case .None, .Header_Read_Failed, .Body_Read_Failed, .Peer_Alert:
+			return
+		case .Unexpected_Content_Type:
+			if failure.record.content_type == .Alert {
+				return
+			}
+		}
+	case .Authentication_Failed:
+		if socket_signature_length_mismatch(failure) {
+			return .Decrypt_Error, false, true
+		}
+	}
+	return error_to_alert(socket_handshake_error(failure)), failure.plaintext_alert, true
+}
+
+@(private, require_results)
+socket_signature_length_mismatch :: proc(failure: Handshake_Error) -> bool {
+	return failure.authentication.kind == .Length_Mismatch && failure.message_type == u8(Handshake_Type.Certificate_Verify)
 }
 
 @(private, require_results)
 socket_handshake_error :: proc(failure: Handshake_Error) -> Error {
+	if failure.upstream_alert != .Close_Notify {
+		return alert_to_error(.Fatal, failure.upstream_alert)
+	}
+
 	switch failure.kind {
 	case .None:
 		return nil
@@ -355,18 +605,14 @@ socket_handshake_error :: proc(failure: Handshake_Error) -> Error {
 		return socket_client_hello_error(failure.client_hello)
 	case .Server_Hello_Failed:
 		return socket_server_hello_error(failure.server_hello)
-	case .Key_Derivation_Failed:
-		return Protocol_Error.Illegal_Parameter
 	case .Server_Flight_Read_Failed:
 		return socket_flight_read_error(failure.record)
-	case .Unexpected_Handshake_Message:
+	case .Unexpected_Handshake_Message, .Client_Authentication_Unsupported:
 		return Protocol_Error.Unexpected_Message
 	case .Malformed_Message:
 		return Protocol_Error.Decode_Error
-	case .Unsupported_Extension, .Invalid_ALPN:
+	case .Key_Derivation_Failed, .Unsupported_Extension, .Invalid_ALPN, .Early_Data_Disabled:
 		return Protocol_Error.Illegal_Parameter
-	case .Client_Authentication_Unsupported:
-		return General_Error.Unsupported_Client_Certificate_Requested
 	case .Authentication_Failed:
 		return socket_authentication_error(failure.authentication)
 	case .Finished_Failed:
@@ -378,7 +624,7 @@ socket_handshake_error :: proc(failure: Handshake_Error) -> Error {
 		return socket_transport_error(failure.transport)
 	case .Allocation_Failed:
 		return failure.allocation
-	case .Invalid_State, .Server_Flight_Oversized, .Early_Data_Disabled:
+	case .Invalid_State, .Server_Flight_Oversized:
 	}
 	return Protocol_Error.Internal_Error
 }
@@ -391,7 +637,12 @@ socket_client_hello_error :: proc(failure: Client_Hello_Send_Error) -> Error {
 	case .Write_Failed:
 		return socket_transport_error(failure.transport)
 	case .Encode_Failed:
-		return General_Error.Invalid_SNI_Hostname
+		// The only name upstream refuses is one too long to send; what
+		// else does not fit its ClientHello is a short buffer.
+		if failure.encode == .Invalid_Server_Name {
+			return General_Error.Invalid_SNI_Hostname
+		}
+		return io.Error.Short_Buffer
 	case .None, .Invalid_State, .Invalid_Retry:
 	}
 	return Protocol_Error.Internal_Error
@@ -404,17 +655,24 @@ socket_server_hello_error :: proc(failure: Server_Hello_Read_Error) -> Error {
 		if failure.record.transport.kind != .None {
 			return socket_transport_error(failure.record.transport)
 		}
-		return Protocol_Error.Decode_Error
-	case .Peer_Alert:
-		return socket_peer_alert_error(failure.alert_level, failure.alert_description)
-	case .Invalid_Change_Cipher_Spec, .Too_Many_Change_Cipher_Specs, .Interleaved_Record, .Record_Boundary_Violation:
+
+		#partial switch failure.record.record {
+		case .Record_Oversized:
+			return Protocol_Error.Record_Overflow
+		case .Empty_Handshake:
+			return Protocol_Error.Decode_Error
+		}
 		return Protocol_Error.Unexpected_Message
-	case .Message_Oversized:
+	case .Peer_Alert, .Invalid_Change_Cipher_Spec, .Too_Many_Change_Cipher_Specs, .Interleaved_Record:
+		// Before the ServerHello upstream expects a handshake record and
+		// nothing else: the peer's alert is an unexpected message too.
+		return Protocol_Error.Unexpected_Message
+	case .Message_Oversized, .Record_Boundary_Violation:
 		return Protocol_Error.Decode_Error
 	case .Invalid_Server_Hello:
 		return socket_server_hello_decode_error(failure.decode)
 	case .Invalid_Key_Share:
-		return Protocol_Error.Illegal_Parameter
+		return Protocol_Error.General_Error
 	case .None, .Invalid_State:
 	}
 	return Protocol_Error.Internal_Error
@@ -422,19 +680,26 @@ socket_server_hello_error :: proc(failure: Server_Hello_Read_Error) -> Error {
 
 @(private, require_results)
 socket_server_hello_decode_error :: proc(failure: Server_Hello_Error) -> Error {
-	#partial switch failure {
+	switch failure {
+	case .None:
+		return nil
 	case .Truncated, .Length_Mismatch, .Extension_Length_Mismatch, .Invalid_Key_Share_Length:
 		return Protocol_Error.Decode_Error
-	case .Unexpected_Handshake_Type:
+	case .Unexpected_Handshake_Type, .Hello_Retry_Unsupported, .Invalid_Hello_Retry_Request, .Missing_Retry_Cookie,
+	     .Invalid_Retry_Cookie, .Retry_Cookie_Oversized, .Invalid_Retry_Group, .Repeated_Hello_Retry,
+	     .Invalid_Retry_Client_Hello:
 		return Protocol_Error.Unexpected_Message
-	case .Invalid_Legacy_Version, .Unsupported_Version, .Missing_Supported_Versions:
+	case .Invalid_Legacy_Version:
 		return Protocol_Error.Protocol_Version
 	case .Unsupported_Extension:
 		return Protocol_Error.Unsupported_Extension
-	case .Missing_Key_Share, .Missing_Retry_Cookie:
+	case .Missing_Key_Share:
 		return Protocol_Error.Missing_Extension
-	case .Repeated_Hello_Retry:
-		return Protocol_Error.Unexpected_Message
+	case .Unoffered_Group, .Key_Share_Size_Mismatch:
+		// Upstream finds these when the key agreement fails.
+		return Protocol_Error.General_Error
+	case .Session_ID_Mismatch, .Unoffered_Cipher, .Invalid_Compression, .Duplicate_Extension, .Missing_Supported_Versions,
+	     .Unsupported_Version:
 	}
 	return Protocol_Error.Illegal_Parameter
 }
@@ -447,18 +712,41 @@ socket_flight_read_error :: proc(failure: Handshake_Record_Read_Error) -> Error 
 	case .Peer_Alert:
 		return socket_peer_alert_error(failure.alert_level, failure.alert_description)
 	case .Decryption_Failed:
-		return Protocol_Error.Bad_Record_Mac
+		return socket_protection_error(failure.protection, .Unexpected_Message)
 	case .Invalid_Header:
 		if failure.record == .Record_Oversized {
 			return Protocol_Error.Record_Overflow
 		}
-		return Protocol_Error.Decode_Error
-	case .Unexpected_Content_Type, .Invalid_Change_Cipher_Spec, .Too_Many_Change_Cipher_Specs,
-	     .Interleaved_Record, .Record_Boundary_Violation:
+		return Protocol_Error.Unexpected_Message
+	case .Invalid_Change_Cipher_Spec:
+		if failure.record == .Invalid_Change_Cipher_Spec_Length {
+			return Protocol_Error.Decode_Error
+		}
+		return Protocol_Error.Illegal_Parameter
+	case .Unexpected_Content_Type, .Too_Many_Change_Cipher_Specs, .Interleaved_Record, .Record_Boundary_Violation:
 		return Protocol_Error.Unexpected_Message
 	case .None, .Invalid_State, .Destination_Undersized:
 	}
 	return Protocol_Error.Internal_Error
+}
+
+// A protected record the engine refused. empty_handshake is upstream's
+// answer to a handshake record without content, which depends on the stage.
+@(private, require_results)
+socket_protection_error :: proc(failure: Record_Protection_Error, empty_handshake: Protocol_Error) -> Error {
+	#partial switch failure {
+	case .Ciphertext_Too_Short:
+		return Protocol_Error.Decode_Error
+	case .Record_Oversized, .Inner_Plaintext_Oversized:
+		return Protocol_Error.Record_Overflow
+	case .Unexpected_Inner_Content_Type:
+		return Protocol_Error.Unexpected_Message
+	case .Empty_Handshake:
+		return empty_handshake
+	case .Invalid_State, .Key_Usage_Limit, .Destination_Undersized, .Overlapping_Buffers:
+		return Protocol_Error.Internal_Error
+	}
+	return Protocol_Error.Bad_Record_Mac
 }
 
 @(private, require_results)
@@ -470,12 +758,10 @@ socket_authentication_error :: proc(failure: Authentication_Error) -> Error {
 		return Protocol_Error.Unknown_Ca
 	case .Invalid_Certificate:
 		return Protocol_Error.Bad_Certificate
-	case .Empty_Certificate_List, .Invalid_Certificate_Context:
+	case .Empty_Certificate_List, .Invalid_Certificate_Context, .Unsupported_Certificate_Extension:
 		return Protocol_Error.Illegal_Parameter
 	case .Truncated, .Length_Mismatch, .Message_Oversized, .Too_Many_Certificates:
 		return Protocol_Error.Decode_Error
-	case .Unsupported_Certificate_Extension:
-		return Protocol_Error.Unsupported_Extension
 	case .Unexpected_Handshake_Type:
 		return Protocol_Error.Unexpected_Message
 	case .Invalid_Server_Name:
@@ -504,6 +790,23 @@ socket_chain_error :: proc(failure: x509.Error) -> Error {
 	return alert_to_error(.Fatal, alert)
 }
 
+// A failed recv. After the handshake upstream takes handshake records one
+// at a time: a KeyUpdate has to be alone in its record and whole.
+@(private, require_results)
+socket_recv_error :: proc(conn: ^Conn, failure: IO_Error) -> Error {
+	#partial switch failure.kind {
+	case .Invalid_Post_Handshake:
+		state := &conn.application
+		if state.post_used >= 5 && state.post_expected == 5 && state.post_handshake[4] > 1 {
+			return Protocol_Error.Illegal_Parameter
+		}
+		return Protocol_Error.Decode_Error
+	case .Decryption_Failed:
+		return socket_protection_error(failure.protection, .Decode_Error)
+	}
+	return socket_io_error(failure)
+}
+
 @(private, require_results)
 socket_io_error :: proc(failure: IO_Error) -> Error {
 	switch failure.kind {
@@ -523,11 +826,13 @@ socket_io_error :: proc(failure: IO_Error) -> Error {
 		if failure.record == .Record_Oversized {
 			return Protocol_Error.Record_Overflow
 		}
-		return Protocol_Error.Decode_Error
-	case .Unexpected_Content_Type, .Interleaved_Record, .Record_Boundary_Violation, .No_Progress:
 		return Protocol_Error.Unexpected_Message
-	case .Invalid_Post_Handshake, .Post_Handshake_Oversized:
+	case .Unexpected_Content_Type:
+		return Protocol_Error.Unexpected_Message
+	case .Interleaved_Record, .Record_Boundary_Violation, .Invalid_Post_Handshake, .Post_Handshake_Oversized:
 		return Protocol_Error.Decode_Error
+	case .No_Progress:
+		return io.Error.No_Progress
 	case .Handshake_Failed:
 		return socket_handshake_error(failure.handshake)
 	case .Invalid_State, .Encryption_Failed:

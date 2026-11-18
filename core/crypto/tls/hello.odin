@@ -25,10 +25,11 @@ MAX_SERVER_NAME_SIZE :: 253
 // a key share for each of the five groups.
 MAX_CLIENT_HELLO_SIZE :: MAX_UPSTREAM_OFFER_SIZE + MAX_SERVER_NAME_SIZE + 6 + MAX_ALPN_OFFER_BYTES + 32 + MAX_RESUMPTION_EXTENSION + 4
 
-// Header, version, random, empty session, suites, compression, extension
+// Header, version, random, session id, suites, compression, extension
 // length, supported_versions, server_name framing, signature_algorithms,
-// supported_groups and key_share for the Upstream offer.
-MAX_UPSTREAM_OFFER_SIZE :: 4 + 2 + 32 + 1 + 2 + 2 * 3 + 2 + 2 + 7 + 9 + 6 + 2 * 16 + 6 + 2 * 5 + 6 + 5 * 4 + 1216 + 56 + 97 + 32 + 65
+// supported_groups, key_share, renegotiation_info and ec_point_formats for
+// the Upstream offer.
+MAX_UPSTREAM_OFFER_SIZE :: 4 + 2 + 32 + 1 + LEGACY_SESSION_ID_SIZE + 2 + 2 * 3 + 2 + 2 + 7 + 9 + 6 + 2 * 16 + 6 + 2 * 5 + 6 + 5 * 4 + 1216 + 56 + 97 + 32 + 65 + 5 + 6
 
 Client_Hello :: struct {
 	server_name:       string,
@@ -320,29 +321,49 @@ compatible_client_hello_encode :: proc(
 	return at, .None
 }
 
-// First flight of the Upstream offer: upstream's ClientHello (suites in the
-// given order, supported_versions 1.3 only, server_name, SIGNATURE_SCHEMES,
-// every group of keys with its key share, ALPN) without its legacy session
-// id. hello.x25519_public_key is ignored: the shares come from keys.
+// First flight of the Upstream offer, laid out as upstream's ClientHello:
+// session_id as the legacy session id (middlebox compatibility), suites in
+// the given order, then supported_versions (1.3 only), server_name,
+// SIGNATURE_SCHEMES, every group of keys, its key share, ALPN,
+// renegotiation_info and ec_point_formats. hello.x25519_public_key is
+// ignored: the shares come from keys.
+//
+// verbatim is how upstream's client treats its arguments: the name is sent
+// as given unless it is an IP address (an empty name sends no server_name),
+// and the number of ALPN names is not limited.
 upstream_client_hello_encode :: proc(
 	dst: []u8,
 	hello: Client_Hello,
 	suites: []Cipher_Suite,
 	keys: ^Ephemeral_Keys,
+	session_id: []u8 = nil,
+	verbatim: bool = false,
 ) -> (
 	written: int,
 	err: Client_Hello_Error,
 ) {
-	if !server_name_valid(hello.server_name) {
+	if !verbatim && !server_name_valid(hello.server_name) {
 		return 0, .Invalid_Server_Name
 	}
 
-	alpn_size, alpn_valid := alpn_protocols_size(hello.alpn_protocols)
+	if len(hello.server_name) > MAX_SERVER_NAME_SIZE || len(session_id) > LEGACY_SESSION_ID_SIZE {
+		return 0, .Invalid_Server_Name
+	}
+
+	max_protocols := MAX_ALPN_PROTOCOLS
+	if verbatim {
+		max_protocols = max(int)
+	}
+
+	alpn_size, alpn_valid := alpn_protocols_size(hello.alpn_protocols, max_protocols)
 	if !alpn_valid {
 		return 0, .Invalid_ALPN
 	}
 
-	name := strings.trim_suffix(hello.server_name, ".")
+	name := hello.server_name
+	if !verbatim {
+		name = strings.trim_suffix(name, ".")
+	}
 	if net.parse_address(hello.server_name) != nil {
 		name = ""
 	}
@@ -353,7 +374,7 @@ upstream_client_hello_encode :: proc(
 		shares_size += 4 + named_group_share_size(group, false)
 	}
 
-	extensions_size := 7 + 6 + 2 * len(SIGNATURE_SCHEMES) + 6 + 2 * len(groups) + 6 + shares_size
+	extensions_size := 7 + 6 + 2 * len(SIGNATURE_SCHEMES) + 6 + 2 * len(groups) + 6 + shares_size + 5 + 6
 	if len(name) > 0 {
 		extensions_size += 9 + len(name)
 	}
@@ -361,7 +382,7 @@ upstream_client_hello_encode :: proc(
 		extensions_size += 6 + alpn_size
 	}
 
-	body_size := 2 + 32 + 1 + 2 + 2 * len(suites) + 2 + 2 + extensions_size
+	body_size := 2 + 32 + 1 + len(session_id) + 2 + 2 * len(suites) + 2 + 2 + extensions_size
 	if len(dst) < 4 + body_size || extensions_size > 0xffff {
 		return 0, .Destination_Undersized
 	}
@@ -375,8 +396,9 @@ upstream_client_hello_encode :: proc(
 	hello_put_u16(dst, &at, u16(LEGACY_TLS_1_2))
 	random := hello.random
 	at += copy(dst[at:], random[:])
-	dst[at] = 0 // Empty legacy_session_id.
+	dst[at] = u8(len(session_id))
 	at += 1
+	at += copy(dst[at:], session_id)
 
 	hello_put_u16(dst, &at, u16(2 * len(suites)))
 	for suite in suites {
@@ -433,6 +455,15 @@ upstream_client_hello_encode :: proc(
 		}
 	}
 
+	// TLS 1.2 backward compatibility, as upstream sends it.
+	hello_put_extension(dst, &at, .Renegotiaton_Info, 1)
+	dst[at] = 0
+	at += 1
+	hello_put_extension(dst, &at, .Ec_Point_Formats, 2)
+	dst[at] = 1
+	dst[at + 1] = 0
+	at += 2
+
 	if at != 4 + body_size {
 		return 0, .Destination_Undersized
 	}
@@ -459,8 +490,9 @@ CLIENT_HELLO_RANDOM_OFFSET :: 4 + 2
 // handshake response is 90 bytes. Resumption adds a 6-byte pre_shared_key
 // extension and no early_data, so the cap is 96 including the handshake header.
 MAX_SERVER_HELLO_SIZE :: 96
-// The same message with the largest key_share of the Upstream offer.
-MAX_UPSTREAM_SERVER_HELLO_SIZE :: MAX_SERVER_HELLO_SIZE - 32 + MAX_KEY_SHARE_SIZE
+// The same message with the echoed session id and the largest key_share of
+// the Upstream offer.
+MAX_UPSTREAM_SERVER_HELLO_SIZE :: MAX_SERVER_HELLO_SIZE + LEGACY_SESSION_ID_SIZE - 32 + MAX_KEY_SHARE_SIZE
 
 Server_Hello :: struct {
 	random:            [32]u8,
@@ -501,6 +533,8 @@ Server_Hello_Error :: enum {
 	Invalid_Retry_Group,
 	Repeated_Hello_Retry,
 	Invalid_Retry_Client_Hello,
+	// The share is well framed but not the size its group requires.
+	Key_Share_Size_Mismatch,
 }
 
 // RFC 8446 sections 4.1.3, 4.1.4, 4.2.1, and 4.2.8. Validates against the
@@ -510,12 +544,14 @@ server_hello_decode :: proc(wire: []u8, allow_psk: bool = false) -> (hello: Serv
 }
 
 // The same validation against an offer: the suite and the group must be ones
-// the client offered, and the share must have the size of its group.
+// the client offered, the share must have the size of its group, and the
+// legacy session id must echo session_id (empty for the Compatible offer).
 server_hello_decode_offered :: proc(
 	wire: []u8,
 	suites: []Cipher_Suite,
 	groups: []Named_Group,
 	allow_psk: bool = false,
+	session_id: []u8 = nil,
 ) -> (
 	hello: Server_Hello,
 	err: Server_Hello_Error,
@@ -530,7 +566,9 @@ server_hello_decode_offered :: proc(
 		return {}, .Length_Mismatch
 	}
 
-	if len(wire) < 44 do return {}, .Truncated
+	if len(wire) < 44 + len(session_id) {
+		return {}, .Truncated
+	}
 
 	if hello_u16(wire, 4) != cast(u16)LEGACY_TLS_1_2 {
 		return {}, .Invalid_Legacy_Version
@@ -542,21 +580,41 @@ server_hello_decode_offered :: proc(
 		return {}, .Hello_Retry_Unsupported
 	}
 
-	if wire[38] != 0 do return {}, .Session_ID_Mismatch
+	if !hello_session_echoed(wire, session_id) {
+		return {}, .Session_ID_Mismatch
+	}
 
-	suite := Cipher_Suite(hello_u16(wire, 39))
+	at := 39 + len(session_id)
+	suite := Cipher_Suite(hello_u16(wire, at))
 	if !cipher_suite_offered(suites, suite) {
 		return {}, .Unoffered_Cipher
 	}
 
-	if wire[41] != 0 do return {}, .Invalid_Compression
+	if wire[at + 2] != 0 {
+		return {}, .Invalid_Compression
+	}
 
-	if cast(int)hello_u16(wire, 42) != len(wire) - 44 {
+	if cast(int)hello_u16(wire, at + 3) != len(wire) - (at + 5) {
 		return {}, .Extension_Length_Mismatch
 	}
 
 	hello.cipher_suite = suite
-	return server_hello_extensions_decode(wire, &hello, allow_psk, groups)
+	return server_hello_extensions_decode(wire, &hello, allow_psk, groups, at + 5)
+}
+
+// Whether a ServerHello or HelloRetryRequest of at least 39 bytes carries
+// exactly session_id as its legacy_session_id_echo.
+hello_session_echoed :: proc(wire: []u8, session_id: []u8) -> bool {
+	if int(wire[38]) != len(session_id) || len(wire) < 39 + len(session_id) {
+		return false
+	}
+
+	for value, i in session_id {
+		if wire[39 + i] != value {
+			return false
+		}
+	}
+	return true
 }
 
 server_hello_extensions_decode :: proc(
@@ -564,12 +622,13 @@ server_hello_extensions_decode :: proc(
 	hello: ^Server_Hello,
 	allow_psk: bool = false,
 	groups: []Named_Group = COMPATIBLE_GROUPS,
+	extensions_at: int = 44,
 ) -> (
 	Server_Hello,
 	Server_Hello_Error,
 ) {
 	version_seen, share_seen, psk_seen: bool
-	at := 44
+	at := extensions_at
 	for at < len(wire) {
 		if len(wire) - at < 4 do return {}, .Truncated
 
@@ -601,7 +660,7 @@ server_hello_extensions_decode :: proc(
 
 			share_seen = true
 
-			if size < 4 {
+			if size < 4 || int(hello_u16(wire, at + 2)) != size - 4 {
 				return {}, .Invalid_Key_Share_Length
 			}
 
@@ -611,8 +670,8 @@ server_hello_extensions_decode :: proc(
 			}
 
 			share_size := named_group_share_size(group, true)
-			if share_size == 0 || size != 4 + share_size || int(hello_u16(wire, at + 2)) != share_size {
-				return {}, .Invalid_Key_Share_Length
+			if share_size == 0 || size != 4 + share_size {
+				return {}, .Key_Share_Size_Mismatch
 			}
 
 			hello.group = group

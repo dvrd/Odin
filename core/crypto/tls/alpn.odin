@@ -7,8 +7,8 @@ MAX_ALPN_PROTOCOL_SIZE :: 255
 MAX_ALPN_OFFER_BYTES :: 1024
 
 @(private)
-alpn_protocols_size :: proc(protocols: []string) -> (int, bool) {
-	if len(protocols) > MAX_ALPN_PROTOCOLS {return 0,false}
+alpn_protocols_size :: proc(protocols: []string, max_protocols: int = MAX_ALPN_PROTOCOLS) -> (int, bool) {
+	if len(protocols) > max_protocols {return 0,false}
 	size := 0
 	for protocol in protocols {
 		if len(protocol) == 0 || len(protocol) > MAX_ALPN_PROTOCOL_SIZE {return 0,false}

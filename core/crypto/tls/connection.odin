@@ -92,12 +92,30 @@ Conn :: struct {
 	transport:                    trans.Connection,
 	// The asynchronous driver queues control writes instead of blocking.
 	defer_key_updates:            bool,
+	// Set by the Socket facade: the engine then accepts and refuses exactly
+	// what upstream's client does (see socket.odin).
+	upstream_client:              bool,
+	// Socket facade only: the send direction ended with an alert, after
+	// which upstream's sender is gone and close says nothing more.
+	send_ended:                   bool,
 	config:                       Config,
 	phase:                        Conn_Phase,
 	// Internal handshake material. Only the handshake message (no record
 	// header) participates in transcript authentication.
 	client_hello:                 [MAX_CLIENT_HELLO_SIZE]u8,
 	client_hello_size:            int,
+	// The ClientHello's legacy session id: random for the Upstream offer
+	// (middlebox compatibility), empty for the Compatible offer. The server
+	// must echo it.
+	legacy_session_id:            [LEGACY_SESSION_ID_SIZE]u8,
+	legacy_session_id_size:       int,
+	// The Upstream offer's compatibility ChangeCipherSpec records.
+	ccs_sent:                     bool,
+	ccs_received:                 int,
+	// The fatal alert of a failed handshake, until the driver writes it.
+	alert_wire:                   [HANDSHAKE_ALERT_WIRE_SIZE]u8,
+	alert_size:                   int,
+	alert_staged:                 bool,
 	// One private key per offered group, until ServerHello selects one.
 	ephemeral:                    Ephemeral_Keys,
 	client_hello_error:           Client_Hello_Send_Error,
@@ -502,6 +520,7 @@ Async_Send_Kind :: enum {
 	Data,
 	Key_Update,
 	Notify,
+	Alert,
 }
 
 // Wraps without I/O. Success transfers transport ownership; failure leaves it
@@ -722,7 +741,9 @@ async_handshake_complete :: proc(conn: ^Async_Conn, error: net.Connection_Error)
 async_shutdown_drive :: proc(conn: ^Async_Conn) {
 	if conn.rx.pending do net.async_cancel(conn.transport, &conn.rx)
 	if conn.tx.pending {
-		if conn.tx_kind != .Notify do net.async_cancel(conn.transport, &conn.tx)
+		if conn.tx_kind != .Notify && conn.tx_kind != .Alert {
+			net.async_cancel(conn.transport, &conn.tx)
+		}
 		return
 	}
 	if conn.rx.pending do return

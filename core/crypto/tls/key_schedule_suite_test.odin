@@ -218,15 +218,16 @@ schedule_message_hash_follows_the_suite_hash :: proc(t: ^testing.T) {
 	}
 }
 
-// A cookie-only HelloRetryRequest naming suite, as hello_retry_request_decode
-// accepts it.
-schedule_suite_retry :: proc(dst: []u8, suite: Cipher_Suite, cookie: []u8) -> []u8 {
+// A cookie-only HelloRetryRequest naming suite and echoing session_id, as
+// hello_retry_request_decode accepts it.
+schedule_suite_retry :: proc(dst: []u8, suite: Cipher_Suite, cookie: []u8, session_id: []u8) -> []u8 {
 	at := 4
 	hello_put_u16(dst, &at, u16(LEGACY_TLS_1_2))
 	random := HELLO_RETRY_REQUEST_RANDOM
 	at += copy(dst[at:], random[:])
-	dst[at] = 0
+	dst[at] = u8(len(session_id))
 	at += 1
+	at += copy(dst[at:], session_id)
 	hello_put_u16(dst, &at, u16(suite))
 	dst[at] = 0
 	at += 1
@@ -259,11 +260,21 @@ schedule_retry_binds_the_transcript_to_the_retry_suite :: proc(t: ^testing.T) {
 
 	// A retry for a suite outside the offer is refused before any state moves.
 	storage: [128]u8
-	unoffered := schedule_suite_retry(storage[:], .TLS_AES_128_GCM_SHA256, cookie[:])
-	_, unoffered_error := hello_retry_request_decode(unoffered, config_cipher_suites(&conn.config))
+	session_id := handshake_session_id(conn)
+	testing.expect_value(t, len(session_id), LEGACY_SESSION_ID_SIZE)
+	unoffered := schedule_suite_retry(storage[:], .TLS_AES_128_GCM_SHA256, cookie[:], session_id)
+	_, unoffered_error := hello_retry_request_decode(unoffered, config_cipher_suites(&conn.config), session_id)
 	testing.expect_value(t, unoffered_error, Server_Hello_Error.Unoffered_Cipher)
 
-	retry := schedule_suite_retry(storage[:], .TLS_AES_256_GCM_SHA384, cookie[:])
+	// The retry has to echo the legacy session id of the ClientHello.
+	other: [LEGACY_SESSION_ID_SIZE]u8
+	copy(other[:], session_id)
+	other[0] ~= 1
+	unechoed := schedule_suite_retry(storage[:], .TLS_AES_256_GCM_SHA384, cookie[:], other[:])
+	_, unechoed_error := hello_retry_request_decode(unechoed, config_cipher_suites(&conn.config), session_id)
+	testing.expect_value(t, unechoed_error, Server_Hello_Error.Session_ID_Mismatch)
+
+	retry := schedule_suite_retry(storage[:], .TLS_AES_256_GCM_SHA384, cookie[:], session_id)
 	testing.expect_value(t, server_hello_retry_accept(conn, retry).kind, Server_Hello_Read_Error_Kind.None)
 	testing.expect_value(t, conn.phase, Conn_Phase.Hello_Retry_Received)
 	testing.expect_value(t, conn.retry_message_hash_size, 4 + 48)

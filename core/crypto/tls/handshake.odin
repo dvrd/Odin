@@ -44,6 +44,12 @@ Handshake_Error :: struct {
 	transport:      transport.Connection_Error,
 	message_type:   u8,
 	allocation:     mem.Allocator_Error,
+	// Socket facade only: an extension of EncryptedExtensions overran the
+	// message, which upstream's client answers with an unprotected alert.
+	plaintext_alert: bool,
+	// Socket facade only: the alert upstream's client names for a failure
+	// of its own checks, where the kind does not say. Zero is none.
+	upstream_alert: Alert_Description,
 }
 
 // Authenticate the server, verify Finished, then send our Finished before
@@ -94,6 +100,7 @@ handshake_until_internal :: proc(conn: ^Conn, deadline: time.Time) -> Handshake_
 	if deadline_error.kind != .None do return deadline_error
 
 	defer {
+		handshake_alert_flush(conn)
 		if deadlines_set {
 			transport.set_deadline(conn.transport, {})
 		}
@@ -249,6 +256,12 @@ handshake_server_flight_verify :: proc(conn: ^Conn, flight: []u8) -> Handshake_E
 		return handshake_fail(conn, message_err)
 	}
 
+	if conn.upstream_client {
+		if check_error := socket_encrypted_extensions_check(encrypted_extensions, conn.config.server_name, conn.config.alpn_protocols); check_error.kind != .None {
+			return handshake_fail(conn, check_error)
+		}
+	}
+
 	allow_early := conn.early_offered && conn.config.early_data != nil && conn.config.early_data.allow != nil
 	selected, early_accepted, extension_error := encrypted_extensions_decode(
 		encrypted_extensions,
@@ -267,7 +280,13 @@ handshake_server_flight_verify :: proc(conn: ^Conn, flight: []u8) -> Handshake_E
 			return handshake_fail(conn, e)
 		}
 
-		if e = client_auth_request_decode(conn, request); e.kind != .None {
+		if conn.upstream_client {
+			// Upstream answers any well-formed request with no certificate.
+			if e = socket_certificate_request_check(request); e.kind != .None {
+				return handshake_fail(conn, e)
+			}
+			conn.client_auth_requested = true
+		} else if e = client_auth_request_decode(conn, request); e.kind != .None {
 			return handshake_fail(conn, e)
 		}
 
@@ -336,7 +355,13 @@ handshake_flight_certificates_verify :: proc(
 
 	defer server_certificates_destroy(&certs)
 	if !conn.config.unsafe_skip_verify {
-		err := verify_server_certificates(&certs, conn.config.server_name, conn.config.root_cas, time.now())
+		// Upstream's client verifies the chain for the name exactly as given.
+		err: Authentication_Error
+		if conn.upstream_client {
+			err = verify_server_chain(&certs, conn.config.server_name, conn.config.root_cas, time.now())
+		} else {
+			err = verify_server_certificates(&certs, conn.config.server_name, conn.config.root_cas, time.now())
+		}
 		if err.kind != .None {
 			return handshake_fail(conn, {kind = .Authentication_Failed, authentication = err})
 		}
@@ -367,7 +392,10 @@ handshake_flight_signature_verify :: proc(
 	schemes := client_offer_signature_schemes(conn.config.offer)
 	if err := verify_certificate_signature(certs, certificate_verify, digest, true, schemes);
 	   err.kind != .None {
-		return handshake_fail(conn, {kind = .Authentication_Failed, authentication = err})
+		return handshake_fail(
+			conn,
+			{kind = .Authentication_Failed, authentication = err, message_type = u8(Handshake_Type.Certificate_Verify)},
+		)
 	}
 
 	transcript_update(transcript, certificate_verify)
@@ -454,6 +482,12 @@ handshake_client_finished_send :: proc(conn: ^Conn) -> Handshake_Error {
 	}
 
 	wire: [RECORD_HEADER_SIZE + MAX_CIPHERTEXT_SIZE]u8
+	if size := handshake_ccs_encode(conn, wire[:]); size > 0 {
+		if _, write_error := transport.write_all(conn.transport, wire[:size]); write_error.kind != .None {
+			return handshake_fail(conn, {kind = .Finished_Write_Failed, transport = write_error})
+		}
+	}
+
 	for conn.client_auth_offset < len(conn.client_auth_flight) {
 		at := conn.client_auth_offset
 		end := min(len(conn.client_auth_flight), at + MAX_PLAINTEXT_SIZE)
@@ -518,6 +552,7 @@ handshake_sni_offered :: proc(server_name: string) -> bool {
 }
 
 handshake_fail :: proc(conn: ^Conn, err: Handshake_Error) -> Handshake_Error {
+	handshake_alert_stage(conn, err)
 	conn.phase = .Failed
 	alpn_clear(conn)
 	conn.handshake_error = err
@@ -529,6 +564,81 @@ handshake_fail :: proc(conn: ^Conn, err: Handshake_Error) -> Handshake_Error {
 	handshake_keys_clear(conn)
 	application_clear(&conn.application)
 	return err
+}
+
+// Size of a sealed or plaintext alert record.
+HANDSHAKE_ALERT_WIRE_SIZE :: RECORD_HEADER_SIZE + 2 + 1 + GCM_TAG_SIZE
+
+// The Upstream offer tells the peer why the handshake failed, as upstream's
+// client does: the fatal alert of the first failure is sealed here, while
+// the handshake keys still exist (plaintext before them), and the driver
+// writes it out. The Compatible offer sends no alert.
+handshake_alert_stage :: proc(conn: ^Conn, err: Handshake_Error) {
+	if conn.alert_staged || conn.config.offer != .Upstream {
+		return
+	}
+	conn.alert_staged = true
+
+	description, plaintext, send := socket_handshake_alert(err)
+	if !send {
+		return
+	}
+
+	content := [2]u8{u8(alert_to_level(description)), u8(description)}
+	if conn.handshake_send.initialized && !plaintext {
+		size, seal_error := record_seal(&conn.handshake_send, conn.alert_wire[:], .Alert, content[:])
+		if seal_error == .None {
+			conn.alert_size = size
+		}
+		return
+	}
+
+	header := record_header_encode({content_type = .Alert, legacy_version = LEGACY_TLS_1_2, length = len(content)})
+	copy(conn.alert_wire[:], header[:])
+	copy(conn.alert_wire[RECORD_HEADER_SIZE:], content[:])
+	conn.alert_size = RECORD_HEADER_SIZE + len(content)
+}
+
+// Best effort: the handshake has already failed.
+handshake_alert_flush :: proc(conn: ^Conn) {
+	if conn.alert_size == 0 {
+		return
+	}
+
+	transport.write_all(conn.transport, conn.alert_wire[:conn.alert_size])
+	conn.alert_size = 0
+}
+
+// ChangeCipherSpec of the Upstream offer's middlebox compatibility mode: sent
+// once, immediately before the client's encrypted flight.
+CHANGE_CIPHER_SPEC_RECORD :: [RECORD_HEADER_SIZE + 1]u8{u8(TLS_Content_Type.Change_Cipher_Spec), 3, 3, 0, 1, 1}
+
+// Writes the compatibility ChangeCipherSpec to dst when the offer of conn
+// owes one; returns the bytes written.
+handshake_ccs_encode :: proc(conn: ^Conn, dst: []u8) -> int {
+	if conn.config.offer != .Upstream || conn.ccs_sent {
+		return 0
+	}
+
+	conn.ccs_sent = true
+	record := CHANGE_CIPHER_SPEC_RECORD
+	return copy(dst, record[:])
+}
+
+// Upstream's client accepts no ChangeCipherSpec before the ServerHello and a
+// single one after it; the engine otherwise tolerates
+// MAX_IGNORED_CHANGE_CIPHER_SPECS at either point.
+handshake_ccs_refused :: proc(conn: ^Conn) -> bool {
+	if !conn.upstream_client {
+		return false
+	}
+
+	if conn.phase != .Handshake_Keys_Ready || conn.ccs_received > 0 {
+		return true
+	}
+
+	conn.ccs_received += 1
+	return false
 }
 
 handshake_next_message :: proc(
@@ -688,6 +798,13 @@ client_hello_prepare :: proc(conn: ^Conn) -> Client_Hello_Send_Error {
 	crypto.rand_bytes(hello.random[:])
 	conn.tls12.client_random = hello.random
 
+	// Upstream's hello carries a random legacy session id.
+	conn.legacy_session_id_size = 0
+	if conn.config.offer == .Upstream {
+		crypto.rand_bytes(conn.legacy_session_id[:])
+		conn.legacy_session_id_size = len(conn.legacy_session_id)
+	}
+
 	clear_ephemeral_keys(&conn.ephemeral)
 	if !init_ephemeral_keys(&conn.ephemeral, config_groups(&conn.config)) {
 		return client_hello_fail(conn, {kind = .Entropy_Unavailable})
@@ -734,11 +851,23 @@ client_hello_prepare :: proc(conn: ^Conn) -> Client_Hello_Send_Error {
 // keys of conn.
 client_hello_offer_encode :: proc(conn: ^Conn, hello: ^Client_Hello) -> (int, Client_Hello_Error) {
 	if conn.config.offer == .Upstream {
-		return upstream_client_hello_encode(conn.client_hello[:], hello^, config_cipher_suites(&conn.config), &conn.ephemeral)
+		return upstream_client_hello_encode(
+			conn.client_hello[:],
+			hello^,
+			config_cipher_suites(&conn.config),
+			&conn.ephemeral,
+			handshake_session_id(conn),
+			conn.upstream_client,
+		)
 	}
 
 	client_key_share_bytes(&conn.ephemeral, .X25519, hello.x25519_public_key[:])
 	return compatible_client_hello_encode(conn.client_hello[:], hello^)
+}
+
+// The legacy session id the ClientHello of conn carried.
+handshake_session_id :: proc(conn: ^Conn) -> []u8 {
+	return conn.legacy_session_id[:conn.legacy_session_id_size]
 }
 
 // The largest ServerHello the offer of conn can be answered with.
@@ -997,6 +1126,10 @@ server_hello_message_read :: proc(conn: ^Conn, message: []u8) -> (int, Server_He
 		case .Alert:
 			return 0, {kind = .Peer_Alert, alert_level = body[0], alert_description = body[1]}
 		case .Change_Cipher_Spec:
+			if handshake_ccs_refused(conn) {
+				return 0, {kind = .Too_Many_Change_Cipher_Specs}
+			}
+
 			if ccs_error := server_hello_ccs_validate(body, &ignored_ccs); ccs_error.kind != .None do return 0, ccs_error
 			continue
 		case .Handshake:
@@ -1023,6 +1156,11 @@ server_hello_message_read :: proc(conn: ^Conn, message: []u8) -> (int, Server_He
 }
 
 server_hello_retry_accept :: proc(conn: ^Conn, message: []u8) -> Server_Hello_Read_Error {
+	// Upstream's client sends every key share and treats a retry as an error.
+	if conn.upstream_client {
+		return server_hello_fail(conn, {kind = .Invalid_Server_Hello, decode = .Hello_Retry_Unsupported})
+	}
+
 	if conn.retry_transcript_size != 0 {
 		return server_hello_fail(
 			conn,
@@ -1030,7 +1168,7 @@ server_hello_retry_accept :: proc(conn: ^Conn, message: []u8) -> Server_Hello_Re
 		)
 	}
 
-	cookie, cookie_error := hello_retry_request_decode(message, config_cipher_suites(&conn.config))
+	cookie, cookie_error := hello_retry_request_decode(message, config_cipher_suites(&conn.config), handshake_session_id(conn))
 	if cookie_error != .None {
 		return server_hello_fail(conn, {kind = .Invalid_Server_Hello, decode = cookie_error})
 	}
@@ -1051,6 +1189,7 @@ server_hello_accept :: proc(conn: ^Conn, message: []u8) -> Server_Hello_Read_Err
 		config_cipher_suites(&conn.config),
 		config_groups(&conn.config),
 		conn.psk_offered,
+		handshake_session_id(conn),
 	)
 	defer crypto.zero_explicit(&parameters, size_of(parameters))
 	if decode_err != .None {
@@ -1258,7 +1397,7 @@ handshake_effective_client_hello :: proc(conn: ^Conn) -> []u8 {
 // Resource policy: accept cookie-only retries up to 1024 cookie bytes. Our
 // fixed X25519 share rules out any legitimate HRR key_share selection.
 MAX_RETRY_COOKIE_SIZE :: 1024
-MAX_HELLO_RETRY_REQUEST_SIZE :: 44 + 6 + 6 + MAX_RETRY_COOKIE_SIZE
+MAX_HELLO_RETRY_REQUEST_SIZE :: 44 + LEGACY_SESSION_ID_SIZE + 6 + 6 + MAX_RETRY_COOKIE_SIZE
 MAX_RETRY_TRANSCRIPT_SIZE :: MAX_MESSAGE_HASH_SIZE + MAX_HELLO_RETRY_REQUEST_SIZE
 MAX_RETRY_CLIENT_HELLO_SIZE :: MAX_CLIENT_HELLO_SIZE + 6 + MAX_RETRY_COOKIE_SIZE
 // Reassembly storage for a ServerHello of any offer or a HelloRetryRequest.
@@ -1272,11 +1411,14 @@ RETRY_COOKIE_EXTENSION :: cast(u16)44
 hello_retry_request_decode :: proc(
 	wire: []u8,
 	suites: []Cipher_Suite = COMPATIBLE_CIPHER_SUITES,
+	session_id: []u8 = nil,
 ) -> (
 	cookie: []u8,
 	err: Server_Hello_Error,
 ) {
-	if len(wire) < 44 do return nil, .Truncated
+	if len(wire) < 44 + len(session_id) {
+		return nil, .Truncated
+	}
 
 	if wire[0] != cast(u8)Handshake_Type.Server_Hello {
 		return nil, .Unexpected_Handshake_Type
@@ -1294,24 +1436,29 @@ hello_retry_request_decode :: proc(
 		return nil, .Invalid_Hello_Retry_Request
 	}
 
-	if wire[38] != 0 do return nil, .Session_ID_Mismatch
+	if !hello_session_echoed(wire, session_id) {
+		return nil, .Session_ID_Mismatch
+	}
 
-	if !cipher_suite_offered(suites, Cipher_Suite(retry_u16(wire, 39))) {
+	at := 39 + len(session_id)
+	if !cipher_suite_offered(suites, Cipher_Suite(retry_u16(wire, at))) {
 		return nil, .Unoffered_Cipher
 	}
 
-	if wire[41] != 0 do return nil, .Invalid_Compression
+	if wire[at + 2] != 0 {
+		return nil, .Invalid_Compression
+	}
 
-	if cast(int)retry_u16(wire, 42) != len(wire) - 44 {
+	if cast(int)retry_u16(wire, at + 3) != len(wire) - (at + 5) {
 		return nil, .Extension_Length_Mismatch
 	}
 
-	return hello_retry_extensions_decode(wire)
+	return hello_retry_extensions_decode(wire, at + 5)
 }
 
-hello_retry_extensions_decode :: proc(wire: []u8) -> (cookie: []u8, err: Server_Hello_Error) {
+hello_retry_extensions_decode :: proc(wire: []u8, extensions_at: int = 44) -> (cookie: []u8, err: Server_Hello_Error) {
 	version_seen, cookie_seen: bool
-	at := 44
+	at := extensions_at
 	for at < len(wire) {
 		if len(wire) - at < 4 do return nil, .Truncated
 
@@ -1431,7 +1578,7 @@ client_hello_retry_prepare :: proc(conn: ^Conn, retry: []u8, cookie: []u8) -> Se
 	}
 	first := conn.client_hello[:size]
 	layout, valid := client_hello_layout_decode(first)
-	if !valid || layout.session_size != 0 || layout.has_cookie {
+	if !valid || layout.session_size != conn.legacy_session_id_size || layout.has_cookie {
 		return .Invalid_Retry_Client_Hello
 	}
 	if len(cookie) == 0 || len(cookie) > MAX_RETRY_COOKIE_SIZE {
@@ -1469,14 +1616,14 @@ client_hello_retry_prepare :: proc(conn: ^Conn, retry: []u8, cookie: []u8) -> Se
 	return .None
 }
 
-// The suite a decoded retry names (its legacy session id is empty). A retry
+// The suite a decoded retry names, after its legacy session id echo. A retry
 // too short to name one counts as TLS_AES_128_GCM_SHA256, the suite of every
 // offer, so this step stays total; the retry decoder rejects such input.
 client_hello_retry_suite :: proc(retry: []u8) -> Cipher_Suite {
-	if len(retry) < 41 {
+	if len(retry) < 39 || len(retry) < 41 + int(retry[38]) {
 		return .TLS_AES_128_GCM_SHA256
 	}
-	return Cipher_Suite(retry_u16(retry, 39))
+	return Cipher_Suite(retry_u16(retry, 39 + int(retry[38])))
 }
 
 // The hash of message_hash is the hash of the suite the retry names.
@@ -1549,6 +1696,9 @@ Handshake_Record_Read_Error :: struct {
 	received:          int,
 	alert_level:       u8,
 	alert_description: u8,
+	// Unexpected_Content_Type: the outer type of the offending record, or
+	// Application_Data when the type inside a protected record was wrong.
+	content_type:      TLS_Content_Type,
 }
 
 // Reads and authenticates one encrypted handshake record. Returned bytes
@@ -1588,6 +1738,10 @@ handshake_record_read :: proc(
 		if wire_error.kind != .None do return handshake_record_fail(conn, wire_error)
 
 		if header.content_type == .Change_Cipher_Spec {
+			if handshake_ccs_refused(conn) {
+				return handshake_record_fail(conn, {kind = .Too_Many_Change_Cipher_Specs})
+			}
+
 			if wire[RECORD_HEADER_SIZE] != 1 {
 				return handshake_record_fail(conn, {kind = .Invalid_Change_Cipher_Spec})
 			}
@@ -1614,10 +1768,10 @@ handshake_record_header_validate :: proc(
 		}
 
 		if header.length != 1 {
-			return {kind = .Invalid_Change_Cipher_Spec}
+			return {kind = .Invalid_Change_Cipher_Spec, record = .Invalid_Change_Cipher_Spec_Length}
 		}
 	} else if header.content_type != .Application_Data {
-		return {kind = .Unexpected_Content_Type}
+		return {kind = .Unexpected_Content_Type, content_type = header.content_type}
 	}
 
 	if cast(int)header.length > MAX_CIPHERTEXT_SIZE {
@@ -1690,7 +1844,7 @@ handshake_record_decrypt :: proc(
 
 	if content_type != .Handshake {
 		crypto.zero_explicit(raw_data(content), len(content))
-		return handshake_record_fail(conn, {kind = .Unexpected_Content_Type})
+		return handshake_record_fail(conn, {kind = .Unexpected_Content_Type, content_type = .Application_Data})
 	}
 
 	if !handshake_record_track(conn, content) {
@@ -1763,6 +1917,7 @@ handshake_record_fail :: proc(
 	[]u8,
 	Handshake_Record_Read_Error,
 ) {
+	handshake_alert_stage(conn, {kind = .Server_Flight_Read_Failed, record = err})
 	conn.phase = .Failed
 	alpn_clear(conn)
 	conn.handshake_record_error = err
@@ -1774,6 +1929,14 @@ handshake_record_fail :: proc(
 // Asynchronous handshake operations
 
 async_handshake_fail :: proc(conn: ^Async_Conn, error: Handshake_Error) {
+	p := &conn.protocol
+	handshake_alert_stage(p, error)
+	if p.alert_size > 0 && !conn.tx.pending && !conn.tx_done {
+		size := copy(conn.tx_wire[:], p.alert_wire[:p.alert_size])
+		p.alert_size = 0
+		async_send_start(conn, .Alert, size, conn.handshake_deadline)
+	}
+
 	conn.protocol.handshake_error = error
 	async_terminal(conn, {kind = .Protocol_Failed}, {kind = .Handshake_Failed, handshake = error})
 }
@@ -1829,24 +1992,26 @@ async_handshake_drive :: proc(conn: ^Async_Conn) {
 		if p.client_auth_offset < len(p.client_auth_flight) {
 			at := p.client_auth_offset
 			end := min(len(p.client_auth_flight), at + MAX_PLAINTEXT_SIZE)
-			n, e := record_seal(&p.handshake_send, conn.tx_wire[:], .Handshake, p.client_auth_flight[at:end])
+			prefix := handshake_ccs_encode(p, conn.tx_wire[:])
+			n, e := record_seal(&p.handshake_send, conn.tx_wire[prefix:], .Handshake, p.client_auth_flight[at:end])
 			if e != .None {
 				async_handshake_fail(conn, {kind = .Finished_Write_Failed, protection = e})
 				return
 			}
 
 			p.client_auth_offset = end
-			async_send_start(conn, .Client_Auth, n, conn.handshake_deadline)
+			async_send_start(conn, .Client_Auth, prefix + n, conn.handshake_deadline)
 			return
 		}
 
-		size, e := handshake_client_finished_encode(p, conn.tx_wire[:])
+		prefix := handshake_ccs_encode(p, conn.tx_wire[:])
+		size, e := handshake_client_finished_encode(p, conn.tx_wire[prefix:])
 		if e.kind != .None {
 			async_handshake_fail(conn, e)
 			return
 		}
 
-		async_send_start(conn, .Finished, size, conn.handshake_deadline)
+		async_send_start(conn, .Finished, prefix + size, conn.handshake_deadline)
 		return
 	}
 	if p.phase != .Awaiting_Server_Hello && p.phase != .Handshake_Keys_Ready {
@@ -1876,6 +2041,11 @@ async_handshake_drive :: proc(conn: ^Async_Conn) {
 		}
 		#partial switch header.content_type {
 		case .Change_Cipher_Spec:
+			if handshake_ccs_refused(p) {
+				async_handshake_fail(conn, {kind = .Server_Hello_Failed, server_hello = {kind = .Too_Many_Change_Cipher_Specs}})
+				return
+			}
+
 			if err := server_hello_ccs_validate(body, &conn.ignored_ccs); err.kind != .None {
 				async_handshake_fail(conn, {kind = .Server_Hello_Failed, server_hello = err})
 				return
@@ -1943,6 +2113,11 @@ async_handshake_drive :: proc(conn: ^Async_Conn) {
 			return
 		}
 		if header.content_type == .Change_Cipher_Spec {
+			if handshake_ccs_refused(p) {
+				async_handshake_fail(conn, {kind = .Server_Flight_Read_Failed, record = {kind = .Too_Many_Change_Cipher_Specs}})
+				return
+			}
+
 			if err := server_hello_ccs_validate(body, &conn.ignored_ccs); err.kind != .None {
 				async_handshake_fail(conn, {kind = .Server_Hello_Failed, server_hello = err})
 				return
