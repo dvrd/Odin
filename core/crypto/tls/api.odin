@@ -99,12 +99,15 @@ Socket_State :: struct {
 // Stream is a handshaked Socket wrapped in an `io.Stream`.
 Stream :: io.Stream
 
+// close closes a Socket (`socket_close`) or a Conn (`conn_close`).
+close :: proc{socket_close, conn_close}
+
 // close will close a Socket, and release related resources.  This will
 // also close the underlying TCP socket.
 //
 // Warning: Once a Socket is successfully initialized, close MUST be
 // called to free resources and sanitize secrets.
-close :: proc(socket: ^Socket, max_close_wait := 100 * time.Millisecond) {
+socket_close :: proc(socket: ^Socket, max_close_wait := 100 * time.Millisecond) {
 	orig_err := socket_error(socket)
 	switch orig_err {
 	case nil:
@@ -122,8 +125,8 @@ close :: proc(socket: ^Socket, max_close_wait := 100 * time.Millisecond) {
 		return
 	}
 
-	// Try to send a Close_Notify, close the TCP socket, and wait for
-	// send/recv calls on other threads to leave the engine.
+	// Wait for send/recv calls on other threads to leave the engine,
+	// then close it: Close_Notify, and the TCP socket.
 	socket_engine_close(socket, max_close_wait)
 
 	socket.fd = net.TCP_Socket{}
@@ -237,7 +240,7 @@ stream_proc :: proc(
 	case .Flush:
 		return 0, nil
 	case .Close, .Destroy:
-		close(socket)
+		socket_close(socket)
 		return 0, nil
 	case .Query:
 		return io.query_utility({.Read, .Write, .Flush, .Close, .Destroy, .Query})

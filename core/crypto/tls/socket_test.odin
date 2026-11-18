@@ -671,3 +671,52 @@ socket_errors_map_to_upstreams :: proc(t: ^testing.T) {
 	testing.expect_value(t, socket_config_error(.Invalid_Server_Name), Error(General_Error.Invalid_SNI_Hostname))
 	testing.expect_value(t, socket_config_error(.Invalid_ALPN), Error(Protocol_Error.Internal_Error))
 }
+
+// close is one name for both connection types.
+@(test)
+close_resolves_for_socket_and_conn :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 20 * time.Second)
+
+	roots: Root_Pool
+	matrix_roots(&roots, false)
+	defer root_pool_destroy(&roots)
+
+	// ^Socket, with and without upstream's max_close_wait.
+	for wait in ([?]time.Duration{0, 10 * time.Millisecond}) {
+		server: Socket_Test_Server
+		if !socket_test_start(t, &server, .Sink) {
+			return
+		}
+
+		socket: Socket
+		established := client_handshake(&socket, socket_test_dial(t, &server), "localhost", roots.roots[:roots.count])
+		testing.expect_value(t, established, nil)
+		if wait == 0 {
+			close(&socket)
+		} else {
+			close(&socket, wait)
+		}
+		testing.expect_value(t, socket_error(&socket), Error(io.Error.Closed))
+
+		socket_test_join(&server)
+		testing.expect(t, server.clean_close)
+	}
+
+	// ^Conn: conn_close under the shared name, result included.
+	server: Socket_Test_Server
+	if !socket_test_start(t, &server, .Sink) {
+		return
+	}
+
+	conn := new(Conn)
+	defer free(conn)
+	config := Config{root_cas = roots.roots[:roots.count], offer = .Upstream}
+	dialed := dial(conn, "localhost", server.endpoint.port, config)
+	testing.expect_value(t, dialed.kind, Dial_Error_Kind.None)
+	testing.expect_value(t, close(conn).kind, IO_Error_Kind.None)
+	testing.expect_value(t, conn.phase, Conn_Phase.Closed)
+	testing.expect_value(t, close(conn), conn_close(conn))
+
+	socket_test_join(&server)
+	testing.expect(t, server.clean_close)
+}

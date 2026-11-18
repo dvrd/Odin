@@ -231,32 +231,33 @@ socket_engine_failure :: proc(socket: ^Socket, failure: IO_Error) -> Error {
 	return socket_set_error(socket, socket_io_error(failure))
 }
 
-// Sends close_notify, closes the TCP socket and frees the engine. A sender
-// blocked in the TCP stack is waited for at most max_close_wait; after that
-// the connection is shut down under it, which is what makes it return.
+// Closes the engine once no other thread is inside it: conn_close sends
+// close_notify, sanitizes the keys and closes the TCP socket through the
+// transport. A sender blocked in the TCP stack is waited for at most
+// max_close_wait; after that the connection is shut down under it, which is
+// what makes it return (and costs the close_notify).
 @(private)
 socket_engine_close :: proc(socket: ^Socket, max_close_wait: time.Duration) {
 	state := &socket._state
 
 	sending := socket_lock_within(&state.tx_lock, max_close_wait)
-	if sending && state.conn != nil {
-		alert := [2]u8{u8(Alert_Level.Warning), u8(Alert_Description.Close_Notify)}
-		application_record_write(state.conn, .Alert, alert[:])
-	}
-
 	sync.atomic_store(&state.closing, true)
 
-	// Wakes a thread blocked in send or recv; the descriptor itself is
-	// closed only once both directions have left the engine.
-	net.shutdown(socket.fd, .Both)
-	if !sending {
+	// Wakes a thread blocked in recv; the send direction stays open for
+	// close_notify unless a blocked sender has to be woken as well.
+	if sending {
+		net.shutdown(socket.fd, .Receive)
+	} else {
+		net.shutdown(socket.fd, .Both)
 		sync.lock(&state.tx_lock)
 	}
 	sync.lock(&state.rx_lock)
 
-	net.close(socket.fd)
-	socket_engine_release(state.conn, state.allocator)
-	state.conn = nil
+	if state.conn != nil {
+		conn_close(state.conn)
+		free(state.conn, state.allocator)
+		state.conn = nil
+	}
 
 	sync.unlock(&state.rx_lock)
 	sync.unlock(&state.tx_lock)
@@ -303,9 +304,12 @@ socket_transport_write :: proc(data: rawptr, src: []u8) -> (int, net.Connection_
 	return n, {}
 }
 
-// close owns the descriptor, as upstream's close does.
+// Reached through conn_close only: a failed handshake releases the engine
+// without closing, and the descriptor stays the caller's until close.
 @(private)
 socket_transport_close :: proc(data: rawptr) -> net.Connection_Error {
+	socket := cast(^Socket)data
+	net.close(socket.fd)
 	return {}
 }
 
