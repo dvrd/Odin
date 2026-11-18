@@ -48,7 +48,7 @@ async_idle_state :: proc(conn:^Async_Conn)->Async_Idle_State {
  }
  // These directions cannot process another old-key record. Do not invoke
  // protection_state_validate: its key-usage failure path mutates the owner.
- if state.send.sequence>=MAX_RECORDS_PER_KEY || state.receive.sequence>=MAX_RECORDS_PER_KEY {
+ if state.send.seq>=record_protection_limit(&state.send) || state.receive.seq>=record_protection_limit(&state.receive) {
   return .Closed
  }
  if conn.handshake_op!=nil || conn.read_op!=nil || conn.write_op!=nil || conn.close_op!=nil ||
@@ -56,7 +56,7 @@ async_idle_state :: proc(conn:^Async_Conn)->Async_Idle_State {
   return .Busy
  }
  if state.inbound_at!=state.inbound_size || state.post_used!=0 || state.post_expected!=0 ||
-    state.key_update_pending || state.send.sequence>=MAX_RECORDS_PER_KEY-1 ||
+    state.key_update_pending || application_send_key_exhausted(state) ||
     conn.rx_used!=0 || conn.rx_expected!=0 || conn.rx_error.kind!=.None ||
     conn.tx_kind!=.None || conn.notify_allowed || raw_data(conn.read_buffer)!=nil || raw_data(conn.write_buffer)!=nil ||
     raw_data(conn.flight)!=nil || conn.hello_used!=0 ||

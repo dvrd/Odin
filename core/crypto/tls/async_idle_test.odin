@@ -17,8 +17,8 @@ idle_test_ready :: proc()->Async_Conn {
  result.protocol.phase=.Established
  result.protocol.handshake_complete=true
  result.protocol.application.initialized=true
- result.protocol.application.send.initialized=true
- result.protocol.application.receive.initialized=true
+ record_protection_init(&result.protocol.application.send,[16]u8{},[12]u8{})
+ record_protection_init(&result.protocol.application.receive,[16]u8{},[12]u8{})
  return result
 }
 idle_test_expect :: proc(t:^testing.T,c:^Async_Conn,want:Async_Idle_State) {
@@ -117,7 +117,7 @@ async_idle_partial_plaintext_records_control_and_key_update_are_buffered :: proc
   case 12:c.protocol.server_handshake_header_used=1
   case 13:c.protocol.server_handshake_remaining=1
   case 14:c.protocol.handshake_receive.initialized=true
-  case 15:c.protocol.application.send.sequence=MAX_RECORDS_PER_KEY-1
+  case 15:c.protocol.application.send.seq=MAX_RECORDS_PER_KEY-1
   }
   idle_test_expect(t,&c,.Buffered)
  }
@@ -136,8 +136,8 @@ async_idle_terminal_state_precedes_busy_and_never_means_callbacks_drained :: pro
   case 4:c.protocol.application.peer_closed=true
   case 5:c.failure.kind=.Cancelled
   case 6:c.close_error.kind=.Timeout
-  case 7:c.protocol.application.send.sequence=MAX_RECORDS_PER_KEY
-  case 8:c.protocol.application.receive.sequence=MAX_RECORDS_PER_KEY
+  case 7:c.protocol.application.send.seq=MAX_RECORDS_PER_KEY
+  case 8:c.protocol.application.receive.seq=MAX_RECORDS_PER_KEY
   }
   idle_test_expect(t,&c,.Closed)
  }

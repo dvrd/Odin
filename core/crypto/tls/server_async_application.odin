@@ -57,7 +57,7 @@ server_async_application_drive :: proc(s:^Server_Async_Conn) {
 	}
 	if s._closing || s._failure.kind!=.None || s._tx.pending || s._tx_done {return}
 	keys:=server_async_keys(s)
-	if s._key_update_pending || s._write_op!=nil && keys.write.sequence>=MAX_RECORDS_PER_KEY-1 {
+	if s._key_update_pending || s._write_op!=nil && keys.write.seq>=record_protection_limit(&keys.write)-1 {
 		request:=u8(1) if s._key_update_request else u8(0)
 		s._key_update_pending,s._key_update_request=false,false
 		deadline:=time.time_add(time.now(),s._config.close_timeout)

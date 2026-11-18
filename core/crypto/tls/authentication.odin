@@ -120,6 +120,18 @@ verify_server_certificate_signature :: proc(
 	message: []u8,
 	transcript_hash: [32]u8,
 ) -> Authentication_Error {
+	digest := transcript_hash
+	return verify_certificate_signature(certs, message, digest[:], true)
+}
+
+// CertificateVerify of either role over a transcript digest of the suite's
+// hash. server names the signer.
+verify_certificate_signature :: proc(
+	certs: ^Server_Certificates,
+	message: []u8,
+	transcript_digest: []u8,
+	server: bool,
+) -> Authentication_Error {
 	if certs == nil || certs.count < 1 || certs.count > MAX_SERVER_CERTIFICATES {
 		return {kind = .Empty_Certificate_List}
 	}
@@ -141,11 +153,12 @@ verify_server_certificate_signature :: proc(
 	}
 
 	signature := message[8:]
-	signed := certificate_verify_input(transcript_hash, server = true)
+	signed_storage: [MAX_CERTIFICATE_VERIFY_INPUT_SIZE]u8
+	signed := certificate_verify_content(signed_storage[:], transcript_digest, server)
 	valid, signature_error := authentication_signature_check(
 		&certs.chain[0],
 		scheme,
-		signed[:],
+		signed,
 		signature,
 	)
 	if signature_error.kind != .None do return signature_error

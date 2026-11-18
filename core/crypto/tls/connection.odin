@@ -1,7 +1,6 @@
 package tls
 
 import "core:crypto"
-import "core:crypto/sha2"
 import "core:crypto/x509"
 import credential_store "credentials/store"
 import "core:mem"
@@ -88,7 +87,10 @@ Conn :: struct {
 	server_parameters:            Server_Hello,
 	shared_secret:                [32]u8,
 	server_hello_error:           Server_Hello_Read_Error,
-	handshake_secrets:            Handshake_Secrets,
+	// Upstream's schedule state: the stage secret, then the traffic secrets
+	// of the negotiated suite. Record keys live in the protections below.
+	keys:                         Handshake_Keys,
+	secrets:                      Connection_Secrets,
 	handshake_send:               Record_Protection,
 	handshake_receive:            Record_Protection,
 	handshake_keys_error:         Handshake_Keys_Error,
@@ -126,10 +128,16 @@ Conn :: struct {
 	early_accepted:               bool,
 	early_rejected:               bool,
 	early_effect_done:            bool,
-	resumption_master:            [32]u8,
+	resumption_master:            [MAX_TRANSCRIPT_HASH_SIZE]u8,
 	have_resumption_master:       bool,
-	server_finished_transcript:   sha2.Context_256,
+	// Through server Finished; a requested client flight is appended to it.
+	server_finished_transcript:   Handshake_Transcript,
 	have_server_finished_transcript: bool,
+	// Through server Finished only: the application secrets' transcript.
+	application_transcript:       Handshake_Transcript,
+	// Digest through client Finished, for the resumption master secret.
+	client_finished_hash:         [MAX_TRANSCRIPT_HASH_SIZE]u8,
+	have_client_finished_hash:    bool,
 	client_auth_requested: bool,
 	client_auth_used: bool,
 	client_auth_schemes: [32]u16,
@@ -435,7 +443,6 @@ Async_Conn :: struct {
 	hello:                                                             [MAX_HELLO_RETRY_REQUEST_SIZE]u8,
 	hello_used, ignored_ccs:                                           int,
 	finishing:                                                         bool,
-	secrets:                                                           Application_Secrets,
 	read_op, write_op, close_op:                                       ^net.Async_Operation,
 	read_buffer, write_buffer:                                         []u8,
 	read_deadline, write_deadline:                                     time.Time,
@@ -722,7 +729,6 @@ async_shutdown_drive :: proc(conn: ^Async_Conn) {
 	alpn_clear(&conn.protocol)
 	application_clear(&conn.protocol.application)
 	handshake_keys_clear(&conn.protocol)
-	crypto.zero_explicit(&conn.secrets, size_of(conn.secrets))
 	crypto.zero_explicit(&conn.rx_wire, size_of(conn.rx_wire))
 	crypto.zero_explicit(&conn.tx_wire, size_of(conn.tx_wire))
 	crypto.zero_explicit(&conn.rx_plain, size_of(conn.rx_plain))

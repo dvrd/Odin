@@ -1,7 +1,7 @@
 package tls
 
 import "core:crypto"
-import "core:crypto/hkdf"
+import "core:crypto/hash"
 import "core:crypto/sha2"
 import "core:time"
 import credential_store "credentials/store"
@@ -106,8 +106,12 @@ session_early_secret :: proc(session: ^Session) -> (secret: [32]u8, ok: bool) {
 	}
 	psk := session.psk
 	defer crypto.zero_explicit(&psk, size_of(psk))
-	salt: [32]u8
-	hkdf.extract(.SHA256, salt[:], psk[:], secret[:])
+
+	keys: Handshake_Keys
+	defer clear_handshake_keys(&keys)
+
+	schedule_init(&keys, .SHA256, psk[:])
+	copy(secret[:], schedule_secret(&keys))
 	ok = true
 	return
 }
@@ -329,7 +333,7 @@ session_remember :: proc(
 session_psk :: proc(master: [32]u8, nonce: []u8) -> (psk: [32]u8) {
 	secret := master
 	defer crypto.zero_explicit(&secret, size_of(secret))
-	finished_expand(secret[:], "resumption", nonce, psk[:])
+	schedule_expand(.SHA256, secret[:], "resumption", nonce, psk[:])
 	return
 }
 
@@ -503,11 +507,13 @@ resumption_retry_prepare :: proc(
 	return .None
 }
 
-@(private)
+// Writes the PSK binder over the truncated ClientHello (RFC 8446 section
+// 4.2.11.2): a Finished MAC keyed from the PSK's early secret. SHA-256 PSKs.
 resumption_write_binder :: proc(hello: []u8, psk: [32]u8, prefix: [][]u8) -> bool {
 	if len(hello) < RESUMPTION_BINDERS_TAIL + 4 {
 		return false
 	}
+
 	truncated := hello[:len(hello) - RESUMPTION_BINDERS_TAIL]
 	t: Handshake_Transcript
 	transcript_init(&t)
@@ -515,51 +521,46 @@ resumption_write_binder :: proc(hello: []u8, psk: [32]u8, prefix: [][]u8) -> boo
 		transcript_update(&t, part)
 	}
 	transcript_update(&t, truncated)
-	hash := transcript_snapshot(&t)
+
+	digest := transcript_snapshot(&t)
 	key := resumption_binder_key(psk)
 	defer crypto.zero_explicit(&key, size_of(key))
-	verify := finished_verify_data(key, hash)
-	defer crypto.zero_explicit(&verify, size_of(verify))
-	copy(hello[len(hello) - RESUMPTION_BINDER_LEN:], verify[:])
+
+	schedule_finished_mac(.SHA256, key[:], digest[:], hello[len(hello) - RESUMPTION_BINDER_LEN:])
 	return true
 }
 
-@(private)
 resumption_binder_key :: proc(psk: [32]u8) -> (key: [32]u8) {
 	secret := psk
 	defer crypto.zero_explicit(&secret, size_of(secret))
-	early: [32]u8
-	defer crypto.zero_explicit(&early, size_of(early))
-	salt: [32]u8
-	hkdf.extract(.SHA256, salt[:], secret[:], early[:])
-	empty := transcript_empty_hash()
-	finished_expand(early[:], "res binder", empty[:], key[:])
+
+	keys: Handshake_Keys
+	defer clear_handshake_keys(&keys)
+
+	schedule_init(&keys, .SHA256, secret[:])
+	schedule_derive_secret(&keys, "res binder", keys.zero_hash[:32], key[:])
 	return
 }
 
-@(private)
-resumption_capture :: proc(conn: ^Conn, master: [32]u8) {
- // Tickets are scoped to negotiated ALPN and the exact configured client identity.
-
-	if conn == nil || !conn.config.remember_tickets || !conn.have_server_finished_transcript {
+// Derives the resumption master secret once the schedule holds the master
+// secret and the digest through client Finished is known.
+resumption_capture :: proc(conn: ^Conn) {
+	// Tickets are scoped to negotiated ALPN and the exact configured client identity.
+	if conn == nil || !conn.config.remember_tickets || !conn.have_client_finished_hash {
 		return
 	}
+
 	if conn.config.session == nil && conn.config.session_cache == nil {
 		return
 	}
-	finished: [FINISHED_MESSAGE_SIZE]u8
-	defer crypto.zero_explicit(&finished, size_of(finished))
-	transcript := conn.server_finished_transcript
-	hash := transcript_snapshot(&transcript)
-	n, err := finished_encode(finished[:], conn.handshake_secrets.client_traffic_secret, hash)
-	if err != .None || n != FINISHED_MESSAGE_SIZE {
-		return
-	}
-	transcript_update(&transcript, finished[:])
-	full := transcript_snapshot(&transcript)
-	secret := master
-	defer crypto.zero_explicit(&secret, size_of(secret))
-	finished_expand(secret[:], "res master", full[:], conn.resumption_master[:])
+
+	digest_size := hash.DIGEST_SIZES[conn.keys.hash]
+	schedule_derive_secret(
+		&conn.keys,
+		"res master",
+		conn.client_finished_hash[:digest_size],
+		conn.resumption_master[:digest_size],
+	)
 	conn.have_resumption_master = true
 }
 
@@ -668,11 +669,20 @@ resumption_remember_ticket :: proc(conn: ^Conn, message: []u8) {
 	if conn == nil || !conn.config.remember_tickets || !conn.application.have_resumption {
 		return
 	}
+
+	// A session holds a SHA-256 PSK. A SHA-384 connection remembers no ticket.
+	resumption_secret: [32]u8
+	defer crypto.zero_explicit(&resumption_secret, size_of(resumption_secret))
+	if conn.application.resumption_secret_size != len(resumption_secret) {
+		return
+	}
+	copy(resumption_secret[:], conn.application.resumption_secret[:])
+
 	now := time.now()
 	if conn.config.session != nil {
 		_ = session_remember(
 			conn.config.session,
-			conn.application.resumption_secret,
+			resumption_secret,
 			message,
 			conn.config.server_name,
 			now,
@@ -688,7 +698,7 @@ resumption_remember_ticket :: proc(conn: ^Conn, message: []u8) {
 	}
 	temp: Session
 	defer session_clear(&temp)
-	if session_remember(&temp, conn.application.resumption_secret, message, conn.config.server_name, now) {
+	if session_remember(&temp, resumption_secret, message, conn.config.server_name, now) {
 		resumption_scope_bind(conn,&temp)
 		_ = session_cache_put(conn.config.session_cache, &temp)
 	}

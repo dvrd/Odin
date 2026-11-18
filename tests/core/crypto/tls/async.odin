@@ -350,7 +350,7 @@ async_key_update_response_uses_old_key :: proc(t: ^testing.T) {
 	testing.expect_value(t, kind, .Handshake)
 	testing.expect_value(t, len(body), 5)
 	testing.expect_value(t, body[4], u8(0))
-	testing.expect_value(t, conn.protocol.application.send.sequence, u64(0))
+	testing.expect_value(t, conn.protocol.application.send.seq, u64(0))
 	net.async_close(stream, &op); test_run(&s)
 }
 

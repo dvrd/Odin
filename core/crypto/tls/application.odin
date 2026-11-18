@@ -1,6 +1,7 @@
 package tls
 
 import "core:crypto"
+import "core:crypto/aead"
 import transport "core:net"
 import "core:time"
 
@@ -47,7 +48,9 @@ IO_Error :: struct {
 Application_State :: struct {
 	initialized:                                  bool,
 	send, receive:                                Record_Protection,
-	client_traffic_secret, server_traffic_secret: [32]u8,
+	// Application traffic secrets of both directions (upstream's schedule
+	// state); a KeyUpdate advances one of them and re-keys its protection.
+	secrets:                                      Connection_Secrets,
 	inbound:                                      [MAX_INNER_PLAINTEXT_SIZE]u8,
 	inbound_at, inbound_size:                     int,
 	post_handshake:                               [4 + MAX_NEW_SESSION_TICKET_BODY_SIZE]u8,
@@ -55,25 +58,67 @@ Application_State :: struct {
 	peer_closed:                                  bool,
 	key_update_pending:                           bool,
 	failure:                                      IO_Error,
-	resumption_secret:                            [32]u8,
+	resumption_secret:                            [MAX_TRANSCRIPT_HASH_SIZE]u8,
+	resumption_secret_size:                       int,
 	have_resumption:                              bool,
 }
 
-application_init :: proc(
+application_init :: proc {
+	application_init_schedule,
+	application_init_secrets,
+}
+
+// Takes over the client's application traffic secrets and AEAD state from
+// the schedule. A nonempty resumption_master allows tickets to be remembered.
+application_init_schedule :: proc(
+	state: ^Application_State,
+	secrets: ^Connection_Secrets,
+	resumption_master: []u8 = nil,
+) {
+	if state == nil || secrets == nil {
+		return
+	}
+
+	application_clear(state)
+	state.secrets = secrets^
+	state.secrets.unsafe_secret_logger = nil
+	record_protection_init(&state.send, &state.secrets.client_aead)
+	record_protection_init(&state.receive, &state.secrets.server_aead)
+	aead.reset(&secrets.client_aead.ctx)
+	aead.reset(&secrets.server_aead.ctx)
+
+	if len(resumption_master) > 0 {
+		state.resumption_secret_size = copy(state.resumption_secret[:], resumption_master)
+		state.have_resumption = true
+	}
+	state.initialized = true
+}
+
+// TLS_AES_128_GCM_SHA256 application secrets by value, for peers that drive
+// the pure codecs. The protections use the keys and IVs exactly as given; a
+// later KeyUpdate derives from the traffic secrets.
+application_init_secrets :: proc(
 	state: ^Application_State,
 	secrets: Application_Secrets,
 	resumption_master: [32]u8 = {},
 	remember: bool = false,
 ) {
-	if state == nil do return
+	if state == nil {
+		return
+	}
+
+	local := secrets
+	defer crypto.zero_explicit(&local, size_of(local))
 
 	application_clear(state)
-	record_protection_init(&state.send, secrets.client_key, secrets.client_iv)
-	record_protection_init(&state.receive, secrets.server_key, secrets.server_iv)
-	state.client_traffic_secret = secrets.client_traffic_secret
-	state.server_traffic_secret = secrets.server_traffic_secret
+	schedule_load_secret(&state.secrets, .TLS_AES_128_GCM_SHA256, local.client_traffic_secret[:], true)
+	copy(state.secrets.server_secret[:], local.server_traffic_secret[:])
+	record_protection_init(&state.send, local.client_key, local.client_iv)
+	record_protection_init(&state.receive, local.server_key, local.server_iv)
+
 	if remember {
-		state.resumption_secret = resumption_master
+		master := resumption_master
+		state.resumption_secret_size = copy(state.resumption_secret[:], master[:])
 		state.have_resumption = true
 	}
 	state.initialized = true
@@ -147,7 +192,7 @@ application_alert_read :: proc(conn: ^Conn, content: []u8) -> IO_Error {
 		// close_notify
 		state.peer_closed = true
 		record_protection_clear(&state.receive)
-		crypto.zero_explicit(&state.server_traffic_secret, 32)
+		crypto.zero_explicit(&state.secrets.server_secret, size_of(state.secrets.server_secret))
 		return {kind = .EOF}
 	case 90:
 		// user_canceled; normally followed by close_notify.
@@ -172,7 +217,7 @@ write :: proc(conn: ^Conn, src: []u8) -> (written: int, error: IO_Error) {
 
 	for written < len(src) {
 		// Reserve the final allowed old-key record for KeyUpdate itself.
-		if conn.application.send.sequence >= MAX_RECORDS_PER_KEY - 1 {
+		if application_send_key_exhausted(&conn.application) {
 			if err := application_send_key_update(conn); err.kind != .None {
 				return written, application_fail(conn, err)
 			}
@@ -370,13 +415,8 @@ application_post_message :: proc(conn: ^Conn, message: []u8, record_ended: bool)
 			return {kind = .Invalid_Post_Handshake}
 		}
 
-		updated := traffic_secret_update(state.server_traffic_secret)
-		defer crypto.zero_explicit(&updated, 32)
-		key, iv := traffic_key_iv(updated)
-		defer crypto.zero_explicit(&key, 16)
-		defer crypto.zero_explicit(&iv, 12)
-		state.server_traffic_secret = updated
-		record_protection_init(&state.receive, key, iv)
+		update_connection_secret(&state.secrets, false)
+		record_protection_init(&state.receive, &state.secrets.server_aead)
 		if message[4] == 1 {
 			// The async driver serializes this response with application writes.
 			if conn.defer_key_updates {
@@ -432,15 +472,18 @@ application_send_key_update :: proc(conn: ^Conn) -> IO_Error {
 	return {}
 }
 
+// Advances the client's send secret one generation (upstream's
+// update_connection_secret) and installs its keys at sequence zero.
 application_rotate_send_key :: proc(conn: ^Conn) {
+	state := &conn.application
+	update_connection_secret(&state.secrets, true)
+	record_protection_init(&state.send, &state.secrets.client_aead)
+}
 
-	updated := traffic_secret_update(conn.application.client_traffic_secret)
-	defer crypto.zero_explicit(&updated, 32)
-	key, iv := traffic_key_iv(updated)
-	defer crypto.zero_explicit(&key, 16)
-	defer crypto.zero_explicit(&iv, 12)
-	conn.application.client_traffic_secret = updated
-	record_protection_init(&conn.application.send, key, iv)
+// True when the next record must be a KeyUpdate: the final record allowed
+// under the current send key is reserved for it.
+application_send_key_exhausted :: proc(state: ^Application_State) -> bool {
+	return state.send.seq >= record_protection_limit(&state.send) - 1
 }
 
 // Validate every nested vector. Tickets are stored only by session_remember.
@@ -581,7 +624,7 @@ async_application_drive :: proc(conn: ^Async_Conn) {
 	}
 	if conn.closing || conn.failure.kind != .None || conn.tx.pending || conn.tx_done do return
 	if state.key_update_pending ||
-	   conn.write_op != nil && state.send.sequence >= MAX_RECORDS_PER_KEY - 1 {
+	   conn.write_op != nil && application_send_key_exhausted(state) {
 		size, err := record_seal(&state.send, conn.tx_wire[:], .Handshake, []u8{24, 0, 0, 1, 0})
 		if err != .None {
 			async_terminal(

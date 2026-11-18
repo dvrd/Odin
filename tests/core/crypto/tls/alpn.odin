@@ -68,13 +68,13 @@ alpn_selection_is_checked_before_authentication_and_not_exposed :: proc(t: ^test
 	defer free(conn)
 	conn.phase=.Server_Finished_Received
 	conn.config={server_name="localhost",alpn_protocols={"h2"}}
-	_,error:=tls.handshake_server_flight_verify(conn,valid)
+	error:=tls.handshake_server_flight_verify(conn,valid)
 	// A legal ALPN selection reaches the missing Certificate, never success.
 	testing.expect_value(t,error.kind,.Malformed_Message)
 	testing.expect_value(t,tls.connection_state(conn).negotiated_protocol,"")
 	conn.phase=.Server_Finished_Received
 	conn.config={server_name="localhost",alpn_protocols={"http/1.1"}}
-	_,error=tls.handshake_server_flight_verify(conn,valid)
+	error=tls.handshake_server_flight_verify(conn,valid)
 	testing.expect_value(t,error.kind,.Invalid_ALPN)
 	testing.expect_value(t,tls.connection_state(conn).negotiated_protocol,"")
 	// An unsolicited response remains an unsupported extension, even if valid.
@@ -102,7 +102,7 @@ alpn_rejects_malformed_and_duplicate_server_selections :: proc(t: ^testing.T) {
 	for message in messages {
 		conn.phase=.Server_Finished_Received
 		conn.config={server_name="localhost",alpn_protocols={"h2"}}
-		_,error:=tls.handshake_server_flight_verify(conn,message.wire)
+		error:=tls.handshake_server_flight_verify(conn,message.wire)
 		testing.expect_value(t,error.kind,message.expected)
 		testing.expect_value(t,tls.connection_state(conn).negotiated_protocol,"")
 	}

@@ -370,7 +370,7 @@ server_async_key_usage_reservation_and_control_caps :: proc(t:^testing.T) {
 		peer,receiver,secrets:=tcp_test_establish(t,&s,&stream,&a,store)
 		r:TCP_Test_Result;op:=tcp_test_op(&r);buffer:[8]u8
 		if mode==0 {
-			server_async_keys(&s).write.sequence=MAX_RECORDS_PER_KEY-1;receiver.sequence=MAX_RECORDS_PER_KEY-1
+			server_async_keys(&s).write.seq=MAX_RECORDS_PER_KEY-1;receiver.seq=MAX_RECORDS_PER_KEY-1
 			at:=len(stream.output);net.async_write(server_async_connection(&s),&op,[]u8{9,8});tcp_test_run(&stream)
 			testing.expect_value(t,r.error.kind,.None)
 			first:=5+(int(stream.output[at+3])<<8|int(stream.output[at+4]));plain:[128]u8

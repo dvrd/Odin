@@ -87,9 +87,11 @@ client_authentication_flight :: proc(store:^credential_store.Store,schemes:[]u16
  for i in 0..<count {der,e:=credential_store.certificate_der(store,lease,i);if e.kind!=.None {return nil,{kind=.Authentication_Failed}};server_flight_put24(flight[at:at+3],len(der));at+=3;at+=copy(flight[at:],der);at+=2}
  transcript_update(transcript,flight[:at])
  if count>0 {
-  signed:=certificate_verify_input(transcript_snapshot(transcript),false)
+  digest_storage:[MAX_TRANSCRIPT_HASH_SIZE]u8
+  signed_storage:[MAX_CERTIFICATE_VERIFY_INPUT_SIZE]u8
+  signed:=certificate_verify_content(signed_storage[:],transcript_hash(transcript,digest_storage[:]),false)
   selected,_:=credential_store.signature_scheme(store,lease)
-  n,e:=credential_store.sign_sha256(store,lease,selected,signed[:],flight[at+8:]);if e.kind!=.None {return nil,{kind=.Authentication_Failed}}
+  n,e:=credential_store.sign_sha256(store,lease,selected,signed,flight[at+8:]);if e.kind!=.None {return nil,{kind=.Authentication_Failed}}
   flight[at]=15;server_flight_put24(flight[at+1:at+4],4+n)
   flight[at+4],flight[at+5],flight[at+6],flight[at+7]=u8(scheme>>8),u8(scheme),u8(n>>8),u8(n)
   transcript_update(transcript,flight[at:at+8+n]);at+=8+n
@@ -101,17 +103,16 @@ client_authentication_flight :: proc(store:^credential_store.Store,schemes:[]u16
  return out,{}
 }
 @(private)
-client_auth_prepare :: proc(conn:^Conn,hash:^[32]u8,allocator:mem.Allocator)->Handshake_Error {
+client_auth_prepare :: proc(conn:^Conn,allocator:mem.Allocator)->Handshake_Error {
  if !conn.client_auth_requested {return {}}
  conn.client_auth_used=true
- if raw_data(conn.client_auth_flight)!=nil {hash^=transcript_snapshot(&conn.server_finished_transcript);return {}}
+ if raw_data(conn.client_auth_flight)!=nil {return {}}
  flight,e:=client_authentication_flight(conn.config.client_credentials,conn.client_auth_schemes[:conn.client_auth_scheme_count],&conn.server_finished_transcript,allocator,conn.config.client_credential_lease)
  if e.kind!=.None {return e}
  if len(flight)>13&&flight[0]==11 {
   n:=authentication_u24(flight,8);if n>0&&n<=len(flight)-11 {conn.session_identity=ticket_hash(flight[11:11+n]);conn.session_identity_present=true;conn.session_identity_valid=true}
  }
  conn.client_auth_flight=flight;conn.client_auth_allocator=allocator
- hash^=transcript_snapshot(&conn.server_finished_transcript)
  return {}
 }
 @(private)

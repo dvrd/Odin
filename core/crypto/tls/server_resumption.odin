@@ -71,7 +71,7 @@ server_resumption_prepare :: proc(owner:^Server_Handshake,now:time.Time)->Server
    sec:=time.to_unix_seconds(now);actual_age:=(sec-opened.issued)*1000;reported_age:=i64(age-opened.age_add);max_age:=i64(early.max_age/time.Millisecond)
    if actual_age>=0&&actual_age<=max_age&&abs(actual_age-reported_age)<=10000&&early.compatible(opened.early_context[:opened.early_context_len],early.profile)&&anti_replay_reserve(early.replay,ticket_hash(ticket),opened.issued+i64(early.max_age/time.Second)+11,sec)==.None {
     state.early_accepted=true;early_psk:Session;early_psk.usable=true;early_psk.psk=opened.psk;secret,available:=session_early_secret(&early_psk);crypto.zero_explicit(&early_psk,size_of(early_psk))
-    if available {early_hash:=quic_hash(owner._hello.wire);finished_expand(secret[:],"c e traffic",early_hash[:],state.early_secret[:])};crypto.zero_explicit(&secret,size_of(secret))
+    if available {early_hash:=quic_hash(owner._hello.wire);schedule_expand(.SHA256, secret[:],"c e traffic",early_hash[:],state.early_secret[:])};crypto.zero_explicit(&secret,size_of(secret))
    }
   }
   return .None
@@ -83,7 +83,7 @@ server_resumption_issue :: proc(owner:^Server_Handshake,finished:[]u8)->bool {
  state:=owner._resumption;if state==nil {return false}
  transcript_update(&owner._transcript,finished)
  hash:=transcript_snapshot(&owner._transcript);master:[32]u8
- finished_expand(state.master[:],"res master",hash[:],master[:]);defer crypto.zero_explicit(&master,size_of(master))
+ schedule_expand(.SHA256, state.master[:],"res master",hash[:],master[:]);defer crypto.zero_explicit(&master,size_of(master))
  nonce:[16]u8;crypto.rand_bytes(nonce[:]);state.claims.psk=session_psk(master,nonce[:])
  now:=time.now();state.claims.issued=time.to_unix_seconds(now);lifetime:=u32(owner._config.tickets.lifetime/time.Second);state.claims.expires=state.claims.issued+i64(lifetime)
  state.claims.authenticated=owner._peer_identity.authenticated;state.claims.peer=owner._peer_identity.certificate_sha256;state.claims.peer_expires=owner._peer_expires

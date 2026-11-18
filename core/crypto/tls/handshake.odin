@@ -1,7 +1,7 @@
 package tls
 
 import "core:crypto"
-import "core:crypto/sha2"
+import "core:crypto/hash"
 import "core:crypto/x25519"
 import "core:mem"
 import transport "core:net"
@@ -116,15 +116,26 @@ handshake_until_internal :: proc(conn: ^Conn, deadline: time.Time) -> Handshake_
 	if error := handshake_until_check(conn, deadline); error.kind != .None {return error}
 	flight, flight_error := handshake_server_flight_read(conn, flight_storage)
 	if flight_error.kind != .None do return flight_error
-	transcript_hash, verify_error := handshake_server_flight_verify(conn, flight)
-	if verify_error.kind != .None do return verify_error
-	secrets := application_secrets_derive(conn.handshake_secrets.handshake_secret, transcript_hash)
-	defer crypto.zero_explicit(&secrets, size_of(secrets))
-	if error := handshake_until_check(conn, deadline); error.kind != .None {return error}
-	if finish_error := handshake_client_finished_send(conn, &transcript_hash); finish_error.kind != .None do return finish_error
-	if error := handshake_until_check(conn, deadline); error.kind != .None {return error}
-	activation_error := handshake_application_activate(conn, secrets, deadlines_set)
-	if activation_error.kind == .None do deadlines_set = false
+	if verify_error := handshake_server_flight_verify(conn, flight); verify_error.kind != .None {
+		return verify_error
+	}
+
+	if error := handshake_until_check(conn, deadline); error.kind != .None {
+		return error
+	}
+
+	if finish_error := handshake_client_finished_send(conn); finish_error.kind != .None {
+		return finish_error
+	}
+
+	if error := handshake_until_check(conn, deadline); error.kind != .None {
+		return error
+	}
+
+	activation_error := handshake_application_activate(conn, deadlines_set)
+	if activation_error.kind == .None {
+		deadlines_set = false
+	}
 	return activation_error
 }
 
@@ -226,16 +237,17 @@ handshake_server_flight_read :: proc(
 	return flight_storage[:size], {}
 }
 
-handshake_server_flight_verify :: proc(conn: ^Conn, flight: []u8) -> ([32]u8, Handshake_Error) {
+// Authenticates the complete server flight against the handshake secrets of
+// conn. On success the transcript through server Finished is retained for the
+// client's flight and for the application secrets.
+handshake_server_flight_verify :: proc(conn: ^Conn, flight: []u8) -> Handshake_Error {
 	transcript: Handshake_Transcript
-	transcript_init(&transcript)
-	transcript_update(&transcript, conn.retry_transcript[:conn.retry_transcript_size])
-	transcript_update(&transcript, handshake_effective_client_hello(conn))
-	transcript_update(&transcript, conn.server_hello[:conn.server_hello_size])
+	handshake_hello_transcript(conn, &transcript)
+
 	at := 0
 	encrypted_extensions, message_err := handshake_next_message(flight, &at, .Encrypted_Extensions)
 	if message_err.kind != .None {
-		return {}, handshake_fail(conn, message_err)
+		return handshake_fail(conn, message_err)
 	}
 
 	allow_early := conn.early_offered && conn.config.early_data != nil && conn.config.early_data.allow != nil
@@ -245,14 +257,22 @@ handshake_server_flight_verify :: proc(conn: ^Conn, flight: []u8) -> ([32]u8, Ha
 		conn.config.alpn_protocols,
 		allow_early,
 	)
-	if extension_error.kind != .None {return {},handshake_fail(conn,extension_error)}
+	if extension_error.kind != .None {
+		return handshake_fail(conn, extension_error)
+	}
 
 	transcript_update(&transcript, encrypted_extensions)
 	if at < len(flight) && flight[at] == u8(Handshake_Type.Certificate_Request) {
-		request,e := handshake_next_message(flight,&at,.Certificate_Request)
-		if e.kind != .None {return {},handshake_fail(conn,e)}
-		if e = client_auth_request_decode(conn,request);e.kind != .None {return {},handshake_fail(conn,e)}
-		transcript_update(&transcript,request)
+		request, e := handshake_next_message(flight, &at, .Certificate_Request)
+		if e.kind != .None {
+			return handshake_fail(conn, e)
+		}
+
+		if e = client_auth_request_decode(conn, request); e.kind != .None {
+			return handshake_fail(conn, e)
+		}
+
+		transcript_update(&transcript, request)
 	}
 	// Abbreviate only when the PSK is still bound to this hostname and the peer
 	// omitted certificates. A certificate still takes the existing checks.
@@ -262,30 +282,48 @@ handshake_server_flight_verify :: proc(conn: ^Conn, flight: []u8) -> ([32]u8, Ha
 		bound_session = conn.config.session
 	}
 	abbreviate := conn.psk_selected && session_offerable(bound_session, conn.config.server_name, time.now())
- if abbreviate && string(selected)!=string(bound_session.alpn[:bound_session.alpn_len]) {return {},handshake_fail(conn,{kind=.Malformed_Message})}
-	if !(abbreviate && at < len(flight) && flight[at] == u8(Handshake_Type.Finished)) {
-		if cert_error := handshake_flight_certificates_verify(conn, flight, &at, &transcript); cert_error.kind != .None do return {}, cert_error
+	if abbreviate && string(selected) != string(bound_session.alpn[:bound_session.alpn_len]) {
+		return handshake_fail(conn, {kind = .Malformed_Message})
 	}
-	hash, finished_error := handshake_flight_finished_verify(conn, flight, &at, &transcript)
-	if finished_error.kind != .None {return {},finished_error}
+
+	if !(abbreviate && at < len(flight) && flight[at] == u8(Handshake_Type.Finished)) {
+		if cert_error := handshake_flight_certificates_verify(conn, flight, &at, &transcript); cert_error.kind != .None {
+			return cert_error
+		}
+	}
+
+	if finished_error := handshake_flight_finished_verify(conn, flight, &at, &transcript); finished_error.kind != .None {
+		return finished_error
+	}
+
 	// The flight buffer is released by the async driver before Finished is sent.
 	// Retain a bounded owned copy, still hidden until authentication completes.
-	copy(conn.alpn_selected[:],selected)
-	conn.alpn_selected_size=len(selected)
+	copy(conn.alpn_selected[:], selected)
+	conn.alpn_selected_size = len(selected)
 	conn.server_finished_transcript = transcript
+	conn.application_transcript = transcript
 	conn.have_server_finished_transcript = true
 	if conn.early_offered {
 		conn.early_accepted = early_accepted
 		conn.early_rejected = !early_accepted
 	}
-	return hash,{}
+	return {}
+}
+
+// Hash of the suite over message_hash/HRR (after a retry), ClientHello and
+// ServerHello: the transcript the handshake traffic secrets are bound to.
+handshake_hello_transcript :: proc(conn: ^Conn, transcript: ^Handshake_Transcript) {
+	transcript_init(transcript, cipher_suite_hash(conn.server_parameters.cipher_suite))
+	transcript_update(transcript, conn.retry_transcript[:conn.retry_transcript_size])
+	transcript_update(transcript, handshake_effective_client_hello(conn))
+	transcript_update(transcript, conn.server_hello[:conn.server_hello_size])
 }
 
 handshake_flight_certificates_verify :: proc(
 	conn: ^Conn,
 	flight: []u8,
 	at: ^int,
-	transcript: ^sha2.Context_256,
+	transcript: ^Handshake_Transcript,
 ) -> Handshake_Error {
 	certificate, certificate_message_err := handshake_next_message(flight, at, .Certificate)
 	if certificate_message_err.kind != .None {
@@ -316,7 +354,7 @@ handshake_flight_signature_verify :: proc(
 	certs: ^Server_Certificates,
 	flight: []u8,
 	at: ^int,
-	transcript: ^sha2.Context_256,
+	transcript: ^Handshake_Transcript,
 ) -> Handshake_Error {
 	certificate_verify, verify_message_err := handshake_next_message(
 		flight,
@@ -327,9 +365,9 @@ handshake_flight_signature_verify :: proc(
 		return handshake_fail(conn, verify_message_err)
 	}
 
-	transcript_hash: [32]u8
-	transcript_hash = transcript_snapshot(transcript)
-	if err := verify_server_certificate_signature(certs, certificate_verify, transcript_hash);
+	digest_storage: [MAX_TRANSCRIPT_HASH_SIZE]u8
+	digest := transcript_hash(transcript, digest_storage[:])
+	if err := verify_certificate_signature(certs, certificate_verify, digest, true);
 	   err.kind != .None {
 		return handshake_fail(conn, {kind = .Authentication_Failed, authentication = err})
 	}
@@ -342,58 +380,65 @@ handshake_flight_finished_verify :: proc(
 	conn: ^Conn,
 	flight: []u8,
 	at: ^int,
-	transcript: ^sha2.Context_256,
-) -> (
-	[32]u8,
-	Handshake_Error,
-) {
-	transcript_hash: [32]u8
+	transcript: ^Handshake_Transcript,
+) -> Handshake_Error {
 	finished_message, finished_message_err := handshake_next_message(flight, at, .Finished)
 	if finished_message_err.kind != .None {
-		return {}, handshake_fail(conn, finished_message_err)
+		return handshake_fail(conn, finished_message_err)
 	}
 
 	if at^ != len(flight) {
-		return {}, handshake_fail(conn, {kind = .Unexpected_Handshake_Message})
+		return handshake_fail(conn, {kind = .Unexpected_Handshake_Message})
 	}
 
-	transcript_hash = transcript_snapshot(transcript)
-	if err := finished_verify(
-		finished_message,
-		conn.handshake_secrets.server_traffic_secret,
-		transcript_hash,
-	); err != .None {
-		return {}, handshake_fail(conn, {kind = .Finished_Failed, finished = err})
+	if conn.secrets.hash == .Invalid {
+		return handshake_fail(conn, {kind = .Invalid_State})
+	}
+
+	if len(finished_message) != 4 + hash.DIGEST_SIZES[conn.secrets.hash] {
+		return handshake_fail(conn, {kind = .Finished_Failed, finished = .Invalid_Length})
+	}
+
+	if !verify_connection_finished(&conn.secrets, transcript, finished_message[4:], true) {
+		return handshake_fail(conn, {kind = .Finished_Failed, finished = .Verification_Failed})
 	}
 
 	transcript_update(transcript, finished_message)
-	transcript_hash = transcript_snapshot(transcript)
-	return transcript_hash, {}
+	return {}
 }
 
+// Seals the client Finished over the transcript through the server Finished
+// and any client authentication flight. The digest through this Finished is
+// kept for the resumption master secret.
 handshake_client_finished_encode :: proc(
 	conn: ^Conn,
-	transcript_hash: ^[32]u8,
 	wire: []u8,
 ) -> (
 	int,
 	Handshake_Error,
 ) {
-	client_finished: [36]u8
-	_, finish_err := finished_encode(
-		client_finished[:],
-		conn.handshake_secrets.client_traffic_secret,
-		transcript_hash^,
-	)
-	if finish_err != .None {
-		return 0, handshake_fail(conn, {kind = .Finished_Failed, finished = finish_err})
+	if !conn.have_server_finished_transcript {
+		return 0, handshake_fail(conn, {kind = .Invalid_State})
 	}
+
+	storage: [MAX_FINISHED_MESSAGE_SIZE]u8
+	defer crypto.zero_explicit(&storage, size_of(storage))
+
+	digest_size := hash.DIGEST_SIZES[conn.secrets.hash]
+	client_finished := storage[:4 + digest_size]
+	finished_header_encode(client_finished, digest_size)
+	derive_connection_finished(&conn.secrets, &conn.server_finished_transcript, client_finished[4:], true)
+
+	through_finished := conn.server_finished_transcript
+	transcript_update(&through_finished, client_finished)
+	transcript_hash(&through_finished, conn.client_finished_hash[:])
+	conn.have_client_finished_hash = true
 
 	written, protection_err := record_seal(
 		&conn.handshake_send,
 		wire,
 		.Handshake,
-		client_finished[:],
+		client_finished,
 	)
 	if protection_err != .None {
 		return 0, handshake_fail(
@@ -405,37 +450,65 @@ handshake_client_finished_encode :: proc(
 	return written, {}
 }
 
-handshake_client_finished_send :: proc(conn: ^Conn, transcript_hash: ^[32]u8) -> Handshake_Error {
- if e := client_auth_prepare(conn,transcript_hash,context.allocator);e.kind != .None {return handshake_fail(conn,e)}
- wire: [RECORD_HEADER_SIZE + MAX_CIPHERTEXT_SIZE]u8
- for conn.client_auth_offset < len(conn.client_auth_flight) {
-  at := conn.client_auth_offset
-  end := min(len(conn.client_auth_flight),at+MAX_PLAINTEXT_SIZE)
-  n,e := record_seal(&conn.handshake_send,wire[:],.Handshake,conn.client_auth_flight[at:end])
-  if e != .None {return handshake_fail(conn,{kind=.Finished_Write_Failed,protection=e})}
-  if _,e := transport.write_all(conn.transport,wire[:n]);e.kind != .None {return handshake_fail(conn,{kind=.Finished_Write_Failed,transport=e})}
-  conn.client_auth_offset=end
- }
- written,err := handshake_client_finished_encode(conn,transcript_hash,wire[:])
- if err.kind != .None {return err}
- _,send_err:=transport.write_all(conn.transport,wire[:written])
- if send_err.kind != .None {return handshake_fail(conn,{kind=.Finished_Write_Failed,transport=send_err})}
- return {}
+handshake_client_finished_send :: proc(conn: ^Conn) -> Handshake_Error {
+	if e := client_auth_prepare(conn, context.allocator); e.kind != .None {
+		return handshake_fail(conn, e)
+	}
+
+	wire: [RECORD_HEADER_SIZE + MAX_CIPHERTEXT_SIZE]u8
+	for conn.client_auth_offset < len(conn.client_auth_flight) {
+		at := conn.client_auth_offset
+		end := min(len(conn.client_auth_flight), at + MAX_PLAINTEXT_SIZE)
+		n, e := record_seal(&conn.handshake_send, wire[:], .Handshake, conn.client_auth_flight[at:end])
+		if e != .None {
+			return handshake_fail(conn, {kind = .Finished_Write_Failed, protection = e})
+		}
+
+		if _, write_error := transport.write_all(conn.transport, wire[:n]); write_error.kind != .None {
+			return handshake_fail(conn, {kind = .Finished_Write_Failed, transport = write_error})
+		}
+
+		conn.client_auth_offset = end
+	}
+
+	written, err := handshake_client_finished_encode(conn, wire[:])
+	if err.kind != .None {
+		return err
+	}
+
+	_, send_err := transport.write_all(conn.transport, wire[:written])
+	if send_err.kind != .None {
+		return handshake_fail(conn, {kind = .Finished_Write_Failed, transport = send_err})
+	}
+
+	return {}
 }
 
+// Switches to the application traffic secrets once the client Finished left
+// under the handshake keys: upstream's finished_connection_secrets takes the
+// schedule to the master secret over the transcript through server Finished.
 handshake_application_activate :: proc(
 	conn: ^Conn,
-	secrets: Application_Secrets,
 	deadlines_set: bool,
 ) -> Handshake_Error {
+	if !conn.have_server_finished_transcript {
+		return handshake_fail(conn, {kind = .Invalid_State})
+	}
+
 	if deadlines_set {
 		if err := transport.set_deadline(conn.transport, {}); err.kind != .None {
 			return handshake_fail(conn, {kind = .Deadline_Failed, transport = err})
 		}
 	}
 
-	resumption_capture(conn, secrets.master_secret)
-	application_init(&conn.application, secrets, conn.resumption_master, conn.have_resumption_master)
+	finished_connection_secrets(&conn.secrets, &conn.keys, &conn.application_transcript)
+	resumption_capture(conn)
+
+	resumption_master: []u8
+	if conn.have_resumption_master {
+		resumption_master = conn.resumption_master[:hash.DIGEST_SIZES[conn.keys.hash]]
+	}
+	application_init(&conn.application, &conn.secrets, resumption_master)
 	handshake_keys_clear(conn)
 	conn.phase = .Established
 	conn.handshake_complete = true
@@ -1025,15 +1098,7 @@ client_handshake_keys_init :: proc(conn: ^Conn) -> Handshake_Keys_Error {
 		// Handshake secrets only. 0-RTT packet keys are not installed here.
 		psk = bound_session.psk[:]
 	}
-	secrets, err := handshake_secrets_derive(
-		conn.shared_secret,
-		handshake_effective_client_hello(conn),
-		conn.server_hello[:conn.server_hello_size],
-		conn.retry_transcript[:conn.retry_transcript_size],
-		psk,
-	)
-	defer crypto.zero_explicit(&secrets, size_of(secrets))
-	if err != .None {
+	if err := client_handshake_schedule_check(conn, psk); err != .None {
 		conn.phase = .Failed
 		alpn_clear(conn)
 		conn.handshake_keys_error = {
@@ -1044,23 +1109,68 @@ client_handshake_keys_init :: proc(conn: ^Conn) -> Handshake_Keys_Error {
 		return conn.handshake_keys_error
 	}
 
-	conn.handshake_secrets = secrets
-	record_protection_init(&conn.handshake_send, secrets.client_key, secrets.client_iv)
-	record_protection_init(&conn.handshake_receive, secrets.server_key, secrets.server_iv)
+	client_handshake_secrets_install(conn, conn.shared_secret[:], psk)
 	crypto.zero_explicit(&conn.shared_secret, size_of(conn.shared_secret))
 	conn.phase = .Handshake_Keys_Ready
 	return {}
+}
+
+client_handshake_schedule_check :: proc(conn: ^Conn, psk: []u8) -> Key_Schedule_Error {
+	if !schedule_message_valid(handshake_effective_client_hello(conn), .Client_Hello) {
+		return .Invalid_Client_Hello
+	}
+
+	if !schedule_message_valid(conn.server_hello[:conn.server_hello_size], .Server_Hello) {
+		return .Invalid_Server_Hello
+	}
+
+	if !cipher_suite_known(conn.server_parameters.cipher_suite) {
+		return .Invalid_Server_Hello
+	}
+
+	digest_size := hash.DIGEST_SIZES[CIPHER_SUITE_HASH[conn.server_parameters.cipher_suite]]
+	if len(psk) != 0 && len(psk) != digest_size {
+		return .Invalid_Secret_Length
+	}
+
+	if crypto.is_zero_constant_time(conn.shared_secret[:]) == 1 {
+		return .Invalid_Shared_Secret
+	}
+
+	return .None
+}
+
+// Runs upstream's schedule for the negotiated suite over the stored hello
+// messages: early secret (PSK or zero), handshake secret from the key
+// exchange output, then both handshake traffic secrets and their AEAD state,
+// which move into the record protections.
+client_handshake_secrets_install :: proc(conn: ^Conn, shared_secret: []u8, psk: []u8) {
+	suite := conn.server_parameters.cipher_suite
+
+	schedule_init(&conn.keys, CIPHER_SUITE_HASH[suite], psk)
+	update_handshake_keys(&conn.keys, shared_secret)
+
+	transcript: Handshake_Transcript
+	handshake_hello_transcript(conn, &transcript)
+	init_connection_secrets(&conn.secrets, &conn.keys, &transcript, CIPHER_SUITE_AEAD[suite], true, context.allocator, nil)
+
+	record_protection_init(&conn.handshake_send, &conn.secrets.client_aead)
+	record_protection_init(&conn.handshake_receive, &conn.secrets.server_aead)
 }
 
 handshake_keys_clear :: proc(conn: ^Conn) {
  client_auth_clear(conn)
 	crypto.zero_explicit(&conn.x25519_private_key, size_of(conn.x25519_private_key))
 	crypto.zero_explicit(&conn.shared_secret, size_of(conn.shared_secret))
-	crypto.zero_explicit(&conn.handshake_secrets, size_of(conn.handshake_secrets))
+	clear_handshake_keys(&conn.keys)
+	clear_connection_secrets(&conn.secrets)
 	crypto.zero_explicit(&conn.resumption_master, size_of(conn.resumption_master))
 	conn.have_resumption_master = false
 	crypto.zero_explicit(&conn.server_finished_transcript, size_of(conn.server_finished_transcript))
+	crypto.zero_explicit(&conn.application_transcript, size_of(conn.application_transcript))
 	conn.have_server_finished_transcript = false
+	crypto.zero_explicit(&conn.client_finished_hash, size_of(conn.client_finished_hash))
+	conn.have_client_finished_hash = false
 	record_protection_clear(&conn.handshake_send)
 	record_protection_clear(&conn.handshake_receive)
 	tls12_client_clear(conn)
@@ -1081,7 +1191,7 @@ handshake_effective_client_hello :: proc(conn: ^Conn) -> []u8 {
 // fixed X25519 share rules out any legitimate HRR key_share selection.
 MAX_RETRY_COOKIE_SIZE :: 1024
 MAX_HELLO_RETRY_REQUEST_SIZE :: 44 + 6 + 6 + MAX_RETRY_COOKIE_SIZE
-MAX_RETRY_TRANSCRIPT_SIZE :: 36 + MAX_HELLO_RETRY_REQUEST_SIZE
+MAX_RETRY_TRANSCRIPT_SIZE :: MAX_MESSAGE_HASH_SIZE + MAX_HELLO_RETRY_REQUEST_SIZE
 MAX_RETRY_CLIENT_HELLO_SIZE :: MAX_CLIENT_HELLO_SIZE + 6 + MAX_RETRY_COOKIE_SIZE
 RETRY_COOKIE_EXTENSION :: cast(u16)44
 
@@ -1279,14 +1389,45 @@ client_hello_retry_prepare :: proc(conn: ^Conn, retry: []u8, cookie: []u8) -> Se
 	return .None
 }
 
+// The retry names the suite, and with it the hash of message_hash. A retry
+// that names no TLS 1.3 suite is rejected by the ServerHello checks; SHA-256
+// keeps this step total until then.
+client_hello_retry_hash :: proc(retry: []u8) -> hash.Algorithm {
+	if len(retry) < 39 {
+		return .SHA256
+	}
+
+	at := 39 + int(retry[38])
+	if len(retry) < at + 2 {
+		return .SHA256
+	}
+
+	return cipher_suite_hash(Cipher_Suite(retry_u16(retry, at)))
+}
+
+cipher_suite_known :: proc(suite: Cipher_Suite) -> bool {
+	return suite >= min(Cipher_Suite) && suite <= max(Cipher_Suite)
+}
+
+// Transcript hash of suite. A value that names no TLS 1.3 suite (nothing
+// negotiated yet) maps to SHA-256 so callers stay total.
+cipher_suite_hash :: proc(suite: Cipher_Suite) -> hash.Algorithm {
+	if !cipher_suite_known(suite) {
+		return .SHA256
+	}
+	return CIPHER_SUITE_HASH[suite]
+}
+
 client_hello_retry_transcript_prepare :: proc(conn: ^Conn, first, retry: []u8) {
 	t: Handshake_Transcript
-	transcript_init(&t)
+	transcript_init(&t, client_hello_retry_hash(retry))
 	transcript_update(&t, first)
-	message := transcript_message_hash(transcript_snapshot(&t))
-	copy(conn.retry_transcript[:36], message[:])
-	copy(conn.retry_transcript[36:], retry)
-	conn.retry_transcript_size = 36 + len(retry)
+
+	digest_storage: [MAX_TRANSCRIPT_HASH_SIZE]u8
+	digest := transcript_hash(&t, digest_storage[:])
+	message := transcript_message_hash_encode(conn.retry_transcript[:], digest)
+	copy(conn.retry_transcript[len(message):], retry)
+	conn.retry_transcript_size = len(message) + len(retry)
 }
 
 retry_u16 :: proc(data: []u8, at: int) -> u16 {
@@ -1588,26 +1729,46 @@ async_handshake_drive :: proc(conn: ^Async_Conn) {
 		return
 	}
 	if p.phase == .Server_Finished_Received {
-  if !conn.finishing {
-   hash,err:=handshake_server_flight_verify(p,conn.flight[:conn.flight_used])
-   if err.kind != .None {async_handshake_fail(conn,err);return}
-   conn.secrets=application_secrets_derive(p.handshake_secrets.handshake_secret,hash)
-   if e:=client_auth_prepare(p,&hash,conn.allocator);e.kind != .None {async_handshake_fail(conn,e);return}
-   crypto.zero_explicit(raw_data(conn.flight),len(conn.flight));delete(conn.flight,conn.allocator);conn.flight=nil
-   conn.finishing=true
-  }
-  if p.client_auth_offset < len(p.client_auth_flight) {
-   at:=p.client_auth_offset;end:=min(len(p.client_auth_flight),at+MAX_PLAINTEXT_SIZE)
-   n,e:=record_seal(&p.handshake_send,conn.tx_wire[:],.Handshake,p.client_auth_flight[at:end])
-   if e != .None {async_handshake_fail(conn,{kind=.Finished_Write_Failed,protection=e});return}
-   p.client_auth_offset=end;async_send_start(conn,.Client_Auth,n,conn.handshake_deadline);return
-  }
-  hash:=transcript_snapshot(&p.server_finished_transcript)
-  size,e:=handshake_client_finished_encode(p,&hash,conn.tx_wire[:])
-  if e.kind != .None {async_handshake_fail(conn,e);return}
-  async_send_start(conn,.Finished,size,conn.handshake_deadline)
-  return
- }
+		if !conn.finishing {
+			if err := handshake_server_flight_verify(p, conn.flight[:conn.flight_used]); err.kind != .None {
+				async_handshake_fail(conn, err)
+				return
+			}
+
+			if e := client_auth_prepare(p, conn.allocator); e.kind != .None {
+				async_handshake_fail(conn, e)
+				return
+			}
+
+			crypto.zero_explicit(raw_data(conn.flight), len(conn.flight))
+			delete(conn.flight, conn.allocator)
+			conn.flight = nil
+			conn.finishing = true
+		}
+
+		if p.client_auth_offset < len(p.client_auth_flight) {
+			at := p.client_auth_offset
+			end := min(len(p.client_auth_flight), at + MAX_PLAINTEXT_SIZE)
+			n, e := record_seal(&p.handshake_send, conn.tx_wire[:], .Handshake, p.client_auth_flight[at:end])
+			if e != .None {
+				async_handshake_fail(conn, {kind = .Finished_Write_Failed, protection = e})
+				return
+			}
+
+			p.client_auth_offset = end
+			async_send_start(conn, .Client_Auth, n, conn.handshake_deadline)
+			return
+		}
+
+		size, e := handshake_client_finished_encode(p, conn.tx_wire[:])
+		if e.kind != .None {
+			async_handshake_fail(conn, e)
+			return
+		}
+
+		async_send_start(conn, .Finished, size, conn.handshake_deadline)
+		return
+	}
 	if p.phase != .Awaiting_Server_Hello && p.phase != .Handshake_Keys_Ready {
 		async_handshake_fail(conn, {kind = .Invalid_State}); return
 	}

@@ -35,7 +35,7 @@ resumption_test_binder :: proc(psk: [32]u8, parts: [][]u8) -> [32]u8 {
 	empty := transcript_empty_hash()
 	key: [32]u8
 	defer crypto.zero_explicit(&key, size_of(key))
-	finished_expand(early[:], "res binder", empty[:], key[:])
+	schedule_expand(.SHA256, early[:], "res binder", empty[:], key[:])
 	t: Handshake_Transcript
 	transcript_init(&t)
 	for part in parts {
@@ -224,7 +224,7 @@ resumption_flight_keeps_certificate_checks :: proc(t: ^testing.T) {
 	secrets, derr := handshake_secrets_derive(shared, conn.client_hello[:conn.client_hello_size], sh, nil, session.psk[:])
 	defer crypto.zero_explicit(&secrets, size_of(secrets))
 	testing.expect_value(t, derr, .None)
-	conn.handshake_secrets = secrets
+	resumption_test_install(conn, shared, session.psk[:])
 	ee := []u8{8, 0, 0, 2, 0, 0}
 	transcript: Handshake_Transcript
 	transcript_init(&transcript)
@@ -242,36 +242,34 @@ resumption_flight_keeps_certificate_checks :: proc(t: ^testing.T) {
 	copy(flight[len(ee):], finished[:])
 
 	conn.psk_selected = false
-	_, full := handshake_server_flight_verify(conn, flight[:])
+	full := handshake_server_flight_verify(conn, flight[:])
 	testing.expect_value(t, full.kind, .Unexpected_Handshake_Message)
 
 	conn.phase = .Handshake_Pending
-	conn.handshake_secrets = secrets
+	resumption_test_install(conn, shared, session.psk[:])
 	conn.psk_selected = true
 	early_ee := []u8{8, 0, 0, 6, 0, 4, 0x00, 0x2a, 0x00, 0x00}
-	_, early := handshake_server_flight_verify(conn, early_ee)
+	early := handshake_server_flight_verify(conn, early_ee)
 	testing.expect_value(t, early.kind, .Early_Data_Disabled)
 
 	conn.phase = .Handshake_Pending
-	conn.handshake_secrets = secrets
+	resumption_test_install(conn, shared, session.psk[:])
 	conn.psk_selected = true
 	cert_flight: [11]u8
 	copy(cert_flight[:], ee)
 	cert_flight[6] = 11
-	_, certs := handshake_server_flight_verify(conn, cert_flight[:])
+	certs := handshake_server_flight_verify(conn, cert_flight[:])
 	testing.expect(t, certs.kind != .None)
 	testing.expect(t, certs.kind != .Early_Data_Disabled)
 
 	conn.phase = .Handshake_Pending
-	conn.handshake_secrets = secrets
+	resumption_test_install(conn, shared, session.psk[:])
 	conn.psk_selected = true
-	checked, resumed := handshake_server_flight_verify(conn, flight[:])
-	defer crypto.zero_explicit(&checked, size_of(checked))
+	resumed := handshake_server_flight_verify(conn, flight[:])
 	testing.expect_value(t, resumed.kind, .None)
 	keys, kerr := session_early_keys(&session)
 	defer quic_direction_keys_clear(&keys)
 	testing.expect_value(t, kerr.kind, .Early_Data_Disabled)
-	_ = checked
 }
 
 @(test)
@@ -288,7 +286,8 @@ resumption_ticket_remember_refuses_early_data :: proc(t: ^testing.T) {
 		master[i] = 0x55
 	}
 	conn.application.have_resumption = true
-	conn.application.resumption_secret = master
+	copy(conn.application.resumption_secret[:], master[:])
+	conn.application.resumption_secret_size = len(master)
 	nonce := []u8{7}
 	ticket := []u8{1, 2, 3, 4}
 	// lifetime, age_add, nonce, ticket, early_data = 4096.
@@ -390,6 +389,15 @@ resumption_test_nst :: proc(dst: []u8, lifetime: u32, ticket: []u8, early_max: u
 }
 
 @(private)
+resumption_test_install :: proc(conn: ^Conn, shared: [32]u8, psk: []u8) {
+	local := shared
+	defer crypto.zero_explicit(&local, size_of(local))
+
+	conn.server_parameters.cipher_suite = .TLS_AES_128_GCM_SHA256
+	client_handshake_secrets_install(conn, local[:], psk)
+}
+
+@(private)
 resumption_test_arm_flight :: proc(conn: ^Conn, dst: []u8, psk: []u8, accept_early: bool) -> []u8 {
 	sh_storage: [128]u8
 	sh := resumption_test_server_hello(sh_storage[:], true)
@@ -413,7 +421,7 @@ resumption_test_arm_flight :: proc(conn: ^Conn, dst: []u8, psk: []u8, accept_ear
 	if derr != .None {
 		return nil
 	}
-	conn.handshake_secrets = secrets
+	resumption_test_install(conn, shared, psk)
 	ee := []u8{8, 0, 0, 2, 0, 0}
 	if accept_early {
 		ee = []u8{8, 0, 0, 6, 0, 4, 0x00, 0x2a, 0x00, 0x00}
@@ -427,7 +435,7 @@ resumption_test_arm_flight :: proc(conn: ^Conn, dst: []u8, psk: []u8, accept_ear
 	hash := transcript_snapshot(&transcript)
 	finished: [FINISHED_MESSAGE_SIZE]u8
 	defer crypto.zero_explicit(&finished, size_of(finished))
-	n, ferr := finished_encode(finished[:], conn.handshake_secrets.server_traffic_secret, hash)
+	n, ferr := finished_encode(finished[:], secrets.server_traffic_secret, hash)
 	if ferr != .None || n != FINISHED_MESSAGE_SIZE || len(dst) < len(ee) + n {
 		return nil
 	}
@@ -465,7 +473,8 @@ resumption_cache_resumes_isolates_and_expires :: proc(t: ^testing.T) {
 	stored.config.session_cache = &cache
 	stored.config.remember_tickets = true
 	stored.application.have_resumption = true
-	stored.application.resumption_secret = master
+	copy(stored.application.resumption_secret[:], master[:])
+	stored.application.resumption_secret_size = len(master)
 	testing.expect_value(t, application_post_message(stored, nst, true).kind, .None)
 	found := session_cache_lookup(&cache, "example.com", time.now())
 	testing.expect(t, found != nil && found.usable && found.saw_early_data)
@@ -489,7 +498,7 @@ resumption_cache_resumes_isolates_and_expires :: proc(t: ^testing.T) {
 	flight_buf: [80]u8
 	flight := resumption_test_arm_flight(resume, flight_buf[:], found.psk[:], false)
 	testing.expect(t, flight != nil)
-	_, resumed := handshake_server_flight_verify(resume, flight)
+	resumed := handshake_server_flight_verify(resume, flight)
 	testing.expect_value(t, resumed.kind, .None)
 	testing.expect(t, !resume.early_offered && !resume.early_accepted)
 
@@ -505,7 +514,7 @@ resumption_cache_resumes_isolates_and_expires :: proc(t: ^testing.T) {
 	bad_flight := resumption_test_arm_flight(mismatch, flight_buf[:], found.psk[:], false)
 	testing.expect(t, bad_flight != nil)
 	bad_flight[len(bad_flight) - 1] ~= 0x01
-	_, mismatch_err := handshake_server_flight_verify(mismatch, bad_flight)
+	mismatch_err := handshake_server_flight_verify(mismatch, bad_flight)
 	testing.expect_value(t, mismatch_err.kind, .Finished_Failed)
 
 	declined := resumption_test_pending("example.com", &cache, nil)
@@ -516,7 +525,7 @@ resumption_cache_resumes_isolates_and_expires :: proc(t: ^testing.T) {
 	declined_flight := resumption_test_arm_flight(declined, flight_buf[:], found.psk[:], false)
 	testing.expect(t, declined_flight != nil)
 	declined.psk_selected = false
-	_, declined_err := handshake_server_flight_verify(declined, declined_flight)
+	declined_err := handshake_server_flight_verify(declined, declined_flight)
 	testing.expect_value(t, declined_err.kind, .Unexpected_Handshake_Message)
 
 	expired: Session
@@ -532,7 +541,7 @@ resumption_cache_resumes_isolates_and_expires :: proc(t: ^testing.T) {
 	testing.expect(t, !exp.psk_offered)
 	exp_flight := resumption_test_arm_flight(exp, flight_buf[:], expired.psk[:], false)
 	testing.expect(t, exp_flight != nil)
-	_, exp_err := handshake_server_flight_verify(exp, exp_flight)
+	exp_err := handshake_server_flight_verify(exp, exp_flight)
 	testing.expect_value(t, exp_err.kind, .Unexpected_Handshake_Message)
 
 	later := time.time_add(time.now(), 2 * 3600 * time.Second)
@@ -623,7 +632,7 @@ resumption_rejected_early_data_does_not_apply_twice :: proc(t: ^testing.T) {
 	flight_buf: [80]u8
 	flight := resumption_test_arm_flight(rejected, flight_buf[:], session.psk[:], false)
 	testing.expect(t, flight != nil)
-	_, rejected_err := handshake_server_flight_verify(rejected, flight)
+	rejected_err := handshake_server_flight_verify(rejected, flight)
 	testing.expect_value(t, rejected_err.kind, .None)
 	testing.expect(t, rejected.early_rejected && !rejected.early_accepted)
 	effects := 0
@@ -642,7 +651,7 @@ resumption_rejected_early_data_does_not_apply_twice :: proc(t: ^testing.T) {
 	testing.expect_value(t, client_hello_prepare(mutated).kind, .None)
 	mutated_flight := resumption_test_arm_flight(mutated, flight_buf[:], session.psk[:], false)
 	testing.expect(t, mutated_flight != nil)
-	_, mutated_err := handshake_server_flight_verify(mutated, mutated_flight)
+	mutated_err := handshake_server_flight_verify(mutated, mutated_flight)
 	testing.expect_value(t, mutated_err.kind, .None)
 	posts := 0
 	testing.expect_value(t, connection_early_data_apply(mutated, "POST", resumption_test_count, &posts), .Deferred)
@@ -663,7 +672,7 @@ resumption_rejected_early_data_does_not_apply_twice :: proc(t: ^testing.T) {
 	testing.expect(t, second.key != early_keys.key)
 	accepted_flight := resumption_test_arm_flight(accepted, flight_buf[:], session.psk[:], true)
 	testing.expect(t, accepted_flight != nil)
-	_, accepted_err := handshake_server_flight_verify(accepted, accepted_flight)
+	accepted_err := handshake_server_flight_verify(accepted, accepted_flight)
 	testing.expect_value(t, accepted_err.kind, .None)
 	testing.expect(t, accepted.early_accepted && !accepted.early_rejected)
 	once := 0

@@ -115,14 +115,14 @@ quic_early_packet_keys :: proc(
 	   resumption_extension_offset(client_hello, EXTENSION_EARLY_DATA) < 0 {
 		return {}, {kind = .Early_Data_Disabled}
 	}
-	if !key_schedule_message_valid(client_hello, .Client_Hello) {
+	if !schedule_message_valid(client_hello, .Client_Hello) {
 		return {}, {kind = .Malformed}
 	}
 	local: Quic_Direction_Keys
 	defer quic_direction_keys_clear(&local)
 	hash := quic_hash(client_hello)
 	defer crypto.zero_explicit(&hash, size_of(hash))
-	finished_expand(secret[:], "c e traffic", hash[:], local.secret[:])
+	schedule_expand(.SHA256, secret[:], "c e traffic", hash[:], local.secret[:])
 	if schedule := quic_expand_aead(&local); schedule != .None {
 		return {}, {kind = .Derivation_Failed, schedule = schedule}
 	}
@@ -307,7 +307,7 @@ quic_traffic :: proc(handshake_secret: [32]u8, label: string, client_hello, serv
 	secret := handshake_secret
 	defer crypto.zero_explicit(&secret, size_of(secret))
 	out: [32]u8
-	finished_expand(secret[:], label, hash[:], out[:])
+	schedule_expand(.SHA256, secret[:], label, hash[:], out[:])
 	return out
 }
 
@@ -575,7 +575,7 @@ quic_application_secrets_mutual :: proc(
  n,fe:=finished_encode(flight[len(auth):],client_traffic,transcript_snapshot(&transcript))
  if fe!=.None||n!=FINISHED_MESSAGE_SIZE {crypto.zero_explicit(raw_data(flight),len(flight));delete(flight,allocator);return {},nil,{kind=.Finished_Failed,finished=fe}}
  transcript_update(&transcript,flight[len(auth):]);hash:=transcript_snapshot(&transcript)
- finished_expand(application.master_secret[:],"res master",hash[:],local.resumption_master[:])
+ schedule_expand(.SHA256, application.master_secret[:],"res master",hash[:],local.resumption_master[:])
  local.early_accepted=quic_ee_has_early(messages[0])
  if local.early_accepted&&!resumed {crypto.zero_explicit(raw_data(flight),len(flight));delete(flight,allocator);return {},nil,{kind=.Malformed}}
  return local,flight,{}

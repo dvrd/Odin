@@ -2,7 +2,7 @@ package tls
 
 import "core:bytes"
 import "core:crypto"
-import "core:crypto/aes"
+import "core:crypto/aead"
 import transport "core:net"
 import "core:net"
 import "core:time"
@@ -207,10 +207,12 @@ record_read_plaintext_conn :: proc(
 
 // Authenticated record encryption
 
-GCM_TAG_SIZE :: aes.GCM_TAG_SIZE
+GCM_TAG_SIZE :: AEAD_TAG_SIZE
 MAX_INNER_PLAINTEXT_SIZE :: MAX_PLAINTEXT_SIZE + 1
 // Conservative bound below the 2^24.5 full-record AES-GCM limit in RFC 8446
-// section 5.5. Rekey before this many records are used in either direction.
+// section 5.5: upstream's AEAD_REKEY_SEQ for both AES-GCM suites. A direction
+// is rekeyed before this many records; record_protection_limit is the
+// per-suite value (ChaCha20-Poly1305 has no practical limit).
 MAX_RECORDS_PER_KEY :: cast(u64)(1 << 24)
 
 Record_Protection_Error :: enum {
@@ -233,32 +235,79 @@ Record_Protection_Error :: enum {
 	Invalid_Alert_Length,
 }
 
-// One direction under one set of traffic keys. Do not copy initialized state
-// or share it between reading and writing: each direction has its own nonce
-// sequence. Reinitialization is only safe when installing fresh traffic keys.
+// One direction under one set of traffic keys: upstream's Aead_State (AEAD
+// context, IV, sequence and key generation) plus a fail-closed latch. Do not
+// copy initialized state or share it between reading and writing: each
+// direction has its own nonce sequence. Reinitialization is only safe when
+// installing fresh traffic keys.
 Record_Protection :: struct {
-	ctx:         aes.Context_GCM,
-	iv:          [12]u8,
-	sequence:    u64,
+	using state: Aead_State,
 	initialized: bool,
 	failure:     Record_Protection_Error,
 }
 
-record_protection_init :: proc(state: ^Record_Protection, key: [16]u8, iv: [12]u8) {
-	if state == nil do return
+record_protection_init :: proc {
+	record_protection_init_secret,
+	record_protection_init_key,
+	record_protection_install,
+}
+
+// Derives the key and IV of one traffic secret of suite with upstream's
+// update_connection_aead and installs them at sequence zero.
+record_protection_init_secret :: proc(state: ^Record_Protection, suite: Cipher_Suite, traffic_secret: []u8) {
+	if state == nil {
+		return
+	}
+
+	scratch: Connection_Secrets
+	defer clear_connection_secrets(&scratch)
+
+	schedule_load_secret(&scratch, suite, traffic_secret, true)
+	update_connection_aead(&scratch, true, false)
+	record_protection_install(state, &scratch.client_aead)
+}
+
+// AES-128-GCM with an explicit key and IV, for peers that hold raw keys.
+record_protection_init_key :: proc(state: ^Record_Protection, key: [16]u8, iv: [12]u8) {
+	if state == nil {
+		return
+	}
 
 	record_protection_clear(state)
 	key_copy := key
 	defer crypto.zero_explicit(&key_copy, size_of(key_copy))
-	aes.init_gcm(&state.ctx, key_copy[:])
+
+	aead.init(&state.ctx, .AES_GCM_128, key_copy[:])
 	state.iv = iv
 	state.initialized = true
+}
+
+// Takes over an AEAD state the schedule just derived. The source keeps its
+// generation counter and loses its key, so one direction's keys live in
+// exactly one place.
+record_protection_install :: proc(state: ^Record_Protection, derived: ^Aead_State) {
+	if state == nil || derived == nil {
+		return
+	}
+
+	record_protection_clear(state)
+	state.state = derived^
+	state.seq = 0
+	state.initialized = true
+
+	aead.reset(&derived.ctx)
+	crypto.zero_explicit(&derived.iv, size_of(derived.iv))
 }
 
 record_protection_clear :: proc(state: ^Record_Protection) {
 	if state != nil {
 		crypto.zero_explicit(state, size_of(Record_Protection))
 	}
+}
+
+// Records one direction may protect under one key before it must be rekeyed.
+record_protection_limit :: proc(state: ^Record_Protection) -> u64 {
+	return AEAD_REKEY_SEQ[aead.algorithm(&state.ctx)]
 }
 
 // Produces a complete TLSCiphertext record without optional zero padding.
@@ -304,7 +353,7 @@ record_seal :: proc(
 	copy(inner, body)
 	inner[len(body)] = cast(u8)content_type
 	nonce := protection_nonce(state)
-	aes.seal_gcm(
+	aead.seal_ctx(
 		&state.ctx,
 		inner,
 		dst[RECORD_HEADER_SIZE + inner_size:wire_size],
@@ -312,12 +361,12 @@ record_seal :: proc(
 		dst[:RECORD_HEADER_SIZE],
 		inner,
 	)
-	state.sequence += 1
+	state.seq += 1
 	return wire_size, .None
 }
 
 // Authenticates and opens one complete TLSCiphertext record. dst needs room
-// for the inner plaintext (ciphertext length minus the 16-byte GCM tag), which
+// for the inner plaintext (ciphertext length minus the 16-byte AEAD tag), which
 // includes content type and padding. Returned content borrows dst. dst and
 // wire must not overlap. Destination/alias errors are retryable without nonce
 // consumption; malformed records and authentication failures poison the state.
@@ -335,7 +384,9 @@ record_open :: proc(
 	}
 
 	inner_size, size_error := record_open_inner_size(state, wire)
-	if size_error != .None do return {}, nil, size_error
+	if size_error != .None {
+		return {}, nil, size_error
+	}
 
 	if len(dst) < inner_size {
 		return {}, nil, .Destination_Undersized
@@ -347,7 +398,7 @@ record_open :: proc(
 
 	inner := dst[:inner_size]
 	nonce := protection_nonce(state)
-	valid := aes.open_gcm(
+	valid := aead.open_ctx(
 		&state.ctx,
 		inner,
 		nonce[:],
@@ -356,14 +407,16 @@ record_open :: proc(
 		wire[RECORD_HEADER_SIZE + inner_size:],
 	)
 	if !valid {
-		// core:crypto/aes also clears this slice on failure. Keep the TLS
+		// core:crypto/aead also clears this slice on failure. Keep the TLS
 		// boundary explicit so no unauthenticated plaintext can escape.
 		crypto.zero_explicit(raw_data(inner), len(inner))
 		return {}, nil, protection_fail(state, .Authentication_Failed)
 	}
 
 	at := inner_size - 1
-	for at >= 0 && inner[at] == 0 do at -= 1
+	for at >= 0 && inner[at] == 0 {
+		at -= 1
+	}
 	if at < 0 {
 		crypto.zero_explicit(raw_data(inner), len(inner))
 		return {}, nil, protection_fail(state, .Missing_Content_Type)
@@ -375,7 +428,7 @@ record_open :: proc(
 		return {}, nil, protection_fail(state, err)
 	}
 
-	state.sequence += 1
+	state.seq += 1
 	return content_type, inner[:at], .None
 }
 
@@ -431,10 +484,14 @@ protection_content_validate :: proc(
 	#partial switch content_type {
 	case .Application_Data:
 	case .Handshake:
-		if size == 0 do return .Empty_Handshake
+		if size == 0 {
+			return .Empty_Handshake
+		}
 
 	case .Alert:
-		if size != 2 do return .Invalid_Alert_Length
+		if size != 2 {
+			return .Invalid_Alert_Length
+		}
 
 	case:
 		return .Unexpected_Inner_Content_Type
@@ -443,22 +500,30 @@ protection_content_validate :: proc(
 }
 
 protection_state_validate :: proc(state: ^Record_Protection) -> Record_Protection_Error {
-	if state == nil do return .Invalid_State
+	if state == nil {
+		return .Invalid_State
+	}
 
-	if state.failure != .None do return state.failure
+	if state.failure != .None {
+		return state.failure
+	}
 
-	if !state.initialized do return .Invalid_State
+	if !state.initialized {
+		return .Invalid_State
+	}
 
-	if state.sequence >= MAX_RECORDS_PER_KEY {
+	if state.seq >= record_protection_limit(state) {
 		return protection_fail(state, .Key_Usage_Limit)
 	}
 
 	return .None
 }
 
-protection_nonce :: proc(state: ^Record_Protection) -> [12]u8 {
+protection_nonce :: proc(state: ^Record_Protection) -> [AEAD_IV_SIZE]u8 {
 	nonce := state.iv
-	for i in 0 ..< 8 do nonce[11 - i] ~= cast(u8)(state.sequence >> cast(uint)(i * 8))
+	for i in 0 ..< 8 {
+		nonce[11 - i] ~= cast(u8)(state.seq >> cast(uint)(i * 8))
+	}
 	return nonce
 }
 
@@ -466,7 +531,7 @@ protection_fail :: proc(
 	state: ^Record_Protection,
 	err: Record_Protection_Error,
 ) -> Record_Protection_Error {
-	aes.reset_gcm(&state.ctx)
+	aead.reset(&state.ctx)
 	crypto.zero_explicit(&state.iv, size_of(state.iv))
 	state.initialized = false
 	state.failure = err
@@ -623,8 +688,7 @@ async_send_process :: proc(conn: ^Async_Conn) {
 	case .Hello, .Retry:
 		conn.protocol.phase = .Awaiting_Server_Hello
 	case .Finished:
-		handshake_application_activate(&conn.protocol, conn.secrets, false)
-		crypto.zero_explicit(&conn.secrets, size_of(conn.secrets))
+		handshake_application_activate(&conn.protocol, false)
 		async_handshake_complete(conn, {})
 	case .Data:
 		if conn.write_op != nil {

@@ -34,7 +34,7 @@ ticket_test_issue :: proc(t:^testing.T,identity:^store.Store,config:Server_Hands
  for _ in 0..<100 {event,_=server_handshake_peek(&owner);if event.kind==.None {break};assert(event.kind!=.Fatal);assert(server_handshake_accept(&owner,event.id)==.None)}
  master:=owner._resumption.master;defer crypto.zero_explicit(&master,size_of(master))
  finished:[36]u8;_,fe:=finished_encode(finished[:],owner._flight.client_finished_secret,transcript_snapshot(&owner._transcript));assert(fe==.None)
- transcript:=owner._transcript;transcript_update(&transcript,finished[:]);hash:=transcript_snapshot(&transcript);secret:[32]u8;finished_expand(master[:],"res master",hash[:],secret[:]);defer crypto.zero_explicit(&secret,size_of(secret))
+ transcript:=owner._transcript;transcript_update(&transcript,finished[:]);hash:=transcript_snapshot(&transcript);secret:[32]u8;schedule_expand(.SHA256, master[:],"res master",hash[:],secret[:]);defer crypto.zero_explicit(&secret,size_of(secret))
  _,_,e=server_handshake_feed(&owner,.Handshake,finished[:]);assert(e==.None)
  event,_=server_handshake_peek(&owner);testing.expect_value(t,event.kind,.Handshake_Bytes);testing.expect_value(t,event.level,.Application)
  session:Session;assert(session_remember(&session,secret,event.bytes,"localhost",time.now()));testing.expect(t,!server_handshake_resumed(&owner))

@@ -31,7 +31,7 @@ early_test_ticket :: proc(identity:^store.Store,config:Server_Handshake_Config,s
  for _ in 0..<100 {event,_:=server_handshake_peek(&owner);if event.kind==.None {break};assert(event.kind!=.Fatal);assert(server_handshake_accept(&owner,event.id)==.None)}
  master:=owner._resumption.master;defer crypto.zero_explicit(&master,size_of(master))
  finished:[36]u8;_,e:=finished_encode(finished[:],owner._flight.client_finished_secret,transcript_snapshot(&owner._transcript));assert(e==.None)
- transcript:=owner._transcript;transcript_update(&transcript,finished[:]);hash:=transcript_snapshot(&transcript);secret:[32]u8;finished_expand(master[:],"res master",hash[:],secret[:]);defer crypto.zero_explicit(&secret,size_of(secret))
+ transcript:=owner._transcript;transcript_update(&transcript,finished[:]);hash:=transcript_snapshot(&transcript);secret:[32]u8;schedule_expand(.SHA256, master[:],"res master",hash[:],secret[:]);defer crypto.zero_explicit(&secret,size_of(secret))
  _,_,fe:=server_handshake_feed(&owner,.Handshake,finished[:]);assert(fe==.None)
  event,_:=server_handshake_peek(&owner);assert(event.kind==.Handshake_Bytes&&event.level==.Application)
  session:Session;assert(quic_session_remember(&session,secret,event.bytes,scope,time.now()).kind==.None)
