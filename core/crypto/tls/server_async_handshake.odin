@@ -1,6 +1,5 @@
 package tls
 
-import "core:crypto"
 import "core:time"
 
 @(private)
