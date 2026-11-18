@@ -69,7 +69,7 @@ brotli_encode_round_trips_every_level :: proc(t: ^testing.T) {
 
 	for kind in 0 ..< 5 {
 		for size in sizes {
-			data := encode_sample(kind, size)
+			data := deflate_sample(kind, size)
 			defer delete(data)
 
 			for level in BROTLI_LEVELS {
@@ -106,7 +106,7 @@ brotli_encode_uses_the_static_dictionary :: proc(t: ^testing.T) {
 
 @(test)
 brotli_encode_levels_order_by_size :: proc(t: ^testing.T) {
-	data := encode_sample(1, 300000)
+	data := deflate_sample(1, 300000)
 	defer delete(data)
 
 	previous := max(int) / 2
@@ -120,7 +120,7 @@ brotli_encode_levels_order_by_size :: proc(t: ^testing.T) {
 		previous = len(packed)
 	}
 
-	random := encode_sample(0, 100000)
+	random := deflate_sample(0, 100000)
 	defer delete(random)
 
 	stored, stored_error := brotli_encode(random, .Default)
@@ -132,7 +132,7 @@ brotli_encode_levels_order_by_size :: proc(t: ^testing.T) {
 
 @(test)
 brotli_decode_rejects_damaged_streams :: proc(t: ^testing.T) {
-	data := encode_sample(1, 20000)
+	data := deflate_sample(1, 20000)
 	defer delete(data)
 
 	packed, encode_error := brotli_encode(data, .Default)
@@ -168,7 +168,7 @@ brotli_stream_encoder_round_trips :: proc(t: ^testing.T) {
 
 	for kind in 0 ..< 3 {
 		for size in sizes {
-			sample := encode_sample(kind, size)
+			sample := deflate_sample(kind, size)
 			defer delete(sample)
 
 			packed := make([]u8, brotli.stream_bound(size))
@@ -229,7 +229,7 @@ brotli_stream_encoder_respects_output_limit :: proc(t: ^testing.T) {
 	e := new(brotli.Stream_Encoder)
 	defer free(e)
 
-	sample := encode_sample(2, 100_000)
+	sample := deflate_sample(2, 100_000)
 	defer delete(sample)
 
 	packed := make([]u8, brotli.stream_bound(len(sample)))
@@ -283,7 +283,7 @@ brotli_compress_to_slice_matches_every_level :: proc(t: ^testing.T) {
 
 	for kind in 0 ..< 5 {
 		for size in sizes {
-			data := encode_sample(kind, size)
+			data := deflate_sample(kind, size)
 			defer delete(data)
 
 			// Bytes past the bound that no level may write.
@@ -333,7 +333,7 @@ brotli_compress_to_slice_matches_every_level :: proc(t: ^testing.T) {
 
 @(test)
 brotli_compress_checks_its_arguments :: proc(t: ^testing.T) {
-	data := encode_sample(1, 1000)
+	data := deflate_sample(1, 1000)
 	defer delete(data)
 
 	state := new(brotli.Brotli)
@@ -368,7 +368,7 @@ brotli_compress_checks_its_arguments :: proc(t: ^testing.T) {
 
 @(test)
 brotli_decompress_honours_its_limits :: proc(t: ^testing.T) {
-	data := encode_sample(1, 150000)
+	data := deflate_sample(1, 150000)
 	defer delete(data)
 
 	packed, encode_error := brotli_encode(data, .Default)
@@ -422,7 +422,7 @@ brotli_decompress_honours_its_limits :: proc(t: ^testing.T) {
 
 @(test)
 brotli_decompress_reads_a_stream_context :: proc(t: ^testing.T) {
-	data := encode_sample(1, 400000)
+	data := deflate_sample(1, 400000)
 	defer delete(data)
 
 	for level in ([?]brotli.Level{.Fastest, .Default}) {
