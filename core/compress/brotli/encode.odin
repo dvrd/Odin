@@ -72,9 +72,6 @@ Parameters :: struct {
 	block_bits: uint,
 	// Recent distances probed before the bucket: 4, 10 or 16 from level 5 on.
 	cache_size: int,
-	// A copy is given up for a better one starting later; every parser has
-	// its own way compiled in.
-	lazy:       bool,
 	// Static dictionary matching and literal context modelling.
 	modelled:   bool,
 	// Block splitting: of commands and distances at level 9, of literals as
@@ -88,18 +85,18 @@ Parameters :: struct {
 // use the modelling flags.
 @(rodata)
 PARAMETERS := [12]Parameters {
-	{0, 4, false, false, false},
-	{2, 4, false, false, false},
-	{1, 1, true, false, false},
-	{2, 2, true, false, false},
-	{3, 2, true, false, false},
-	{4, 4, true, true, false},
-	{5, 4, true, true, false},
-	{6, 10, true, true, false},
-	{7, 10, true, true, false},
-	{8, 16, true, true, true},
-	{0, 0, true, true, true},
-	{0, 0, true, true, true},
+	{0, 4, false, false},
+	{2, 4, false, false},
+	{1, 1, false, false},
+	{2, 2, false, false},
+	{3, 2, false, false},
+	{4, 4, true, false},
+	{5, 4, true, false},
+	{6, 10, true, false},
+	{7, 10, true, false},
+	{8, 16, true, true},
+	{0, 0, true, true},
+	{0, 0, true, true},
 }
 
 Bit_Writer :: struct {
