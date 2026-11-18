@@ -1,7 +1,9 @@
 package compress_brotli
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:math"
+import "core:math/bits"
 
 // Levels 10 and 11: every match of a block is cached once, then the block is
 // parsed as a shortest path under a bit-cost model taken from the previous
@@ -15,9 +17,8 @@ Cached_Match :: struct {
 	distance:    u32,
 }
 
+// The cheapest command that ends at a position.
 Node :: struct {
-	// Cheapest cost of a command that ends here; infinite when none does.
-	cost:        f64,
 	insert:      u32,
 	length:      u32,
 	copy_length: u32,
@@ -38,6 +39,10 @@ Model :: struct {
 	command:     [COMMAND_ALPHABET]f32,
 	// Cheapest command symbol.
 	command_min: f32,
+	// Command symbol and copy extra bits by insert and copy code, and the same
+	// for the symbols that stand for the last distance as well.
+	pair:        [INSERT_CODES][COPY_CODES]f32,
+	implicit:    [IMPLICIT_INSERT_CODES][IMPLICIT_COPY_CODES]f32,
 	distance:    [DISTANCE_CONTEXTS][DISTANCE_ALPHABET]f32,
 	postfix:     uint,
 	direct:      uint,
@@ -66,16 +71,24 @@ TREE_DEPTH :: 64
 TREE_COMPARE :: 128
 // Positions before the current one scanned for two and three byte matches.
 NEAR_RANGE :: 64
-STARTS_MAX :: 8
 // Starts tried with the recent distances, and with the cached matches.
 STARTS_RECENT :: 5
 STARTS_MATCHED :: 2
+INSERT_CODES :: 24
+COPY_CODES :: 24
+// Codes below these share symbols that carry the last distance.
+IMPLICIT_INSERT_CODES :: 8
+IMPLICIT_COPY_CODES :: 16
 COPY_CODE_TABLE :: 2120
 // Longest text a transformed dictionary word can cover.
 DICTIONARY_COVER_MAX :: 37
 
 Optimal :: struct {
 	nodes:        []Node,
+	// costs[i]: cost of the cheapest command that ends at i, infinite when
+	// none does. Kept apart from the nodes: it is read far more than they are.
+	costs:        []f64,
+	scanned:      Scanned,
 	matches:      [dynamic]Cached_Match,
 	match_start:  []u32,
 	literal_cost: []f32,
@@ -94,6 +107,8 @@ Optimal :: struct {
 	groups:       [TRANSFORM_COUNT]Transform_Group,
 	members:      [TRANSFORM_COUNT]u8,
 	group_count:  int,
+	// Per byte, the groups whose prefix may start with it, as bits.
+	group_leads:  [256]u16,
 }
 
 optimal_make :: proc(e: ^Encoder, block_max: int, allocator: runtime.Allocator) -> (o: ^Optimal, err: runtime.Allocator_Error) {
@@ -114,6 +129,7 @@ optimal_make :: proc(e: ^Encoder, block_max: int, allocator: runtime.Allocator) 
 	}
 
 	o.nodes = make([]Node, block_max + 1, allocator) or_return
+	o.costs = make([]f64, block_max + 1, allocator) or_return
 	o.match_start = make([]u32, block_max + 1, allocator) or_return
 	o.literal_cost = make([]f32, block_max, allocator) or_return
 	o.literal_sum = make([]f64, block_max + 1, allocator) or_return
@@ -137,6 +153,7 @@ optimal_destroy :: proc(o: ^Optimal, allocator: runtime.Allocator) {
 	delete(o.forest, allocator)
 	delete(o.roots, allocator)
 	delete(o.nodes, allocator)
+	delete(o.costs, allocator)
 	delete(o.match_start, allocator)
 	delete(o.literal_cost, allocator)
 	delete(o.literal_sum, allocator)
@@ -172,6 +189,16 @@ group_transforms :: proc(o: ^Optimal) {
 
 		o.groups[o.group_count] = group
 		o.group_count += 1
+	}
+
+	assert(o.group_count <= 16)
+
+	for &leads, value in o.group_leads {
+		for group, index in o.groups[:o.group_count] {
+			if len(group.prefix) == 0 || group.prefix[0] == u8(value) {
+				leads |= 1 << uint(index)
+			}
+		}
 	}
 }
 
@@ -252,18 +279,50 @@ starts_with :: #force_inline proc(src: []u8, position, limit: int, text: string)
 	return true
 }
 
-offer_word :: #force_inline proc(found: ^[DICTIONARY_COVER_MAX + 1]Cached_Match, covered, size, distance: int) {
-	slot := &found[covered]
+// Words found per covered length, and the lengths that have one.
+Found_Words :: struct {
+	lengths: u64,
+	words:   [DICTIONARY_COVER_MAX + 1]Cached_Match,
+}
 
-	if slot.distance == 0 || u32(distance) < slot.distance {
+// Bytes two texts start with alike, `limit` at most.
+shared_length :: #force_inline proc(a, b: [^]u8, limit: int) -> int #no_bounds_check {
+	length := 0
+
+	when ODIN_ENDIAN == .Little {
+		for length + 8 <= limit {
+			difference := intrinsics.unaligned_load((^u64)(&a[length])) ~ intrinsics.unaligned_load((^u64)(&b[length]))
+
+			if difference != 0 {
+				return length + int(intrinsics.count_trailing_zeros(difference)) >> 3
+			}
+
+			length += 8
+		}
+	}
+
+	for length < limit && a[length] == b[length] {
+		length += 1
+	}
+
+	return length
+}
+
+offer_word :: #force_inline proc(found: ^Found_Words, covered, size, distance: int) {
+	slot := &found.words[covered]
+	had := found.lengths & (1 << uint(covered)) != 0
+
+	if !had || u32(distance) < slot.distance {
 		slot^ = {u32(covered), u32(size), u32(distance)}
+		found.lengths |= 1 << uint(covered)
 	}
 }
 
 // Every way a static dictionary word, transformed or not, spells the text at
 // `position`: the cheapest reference for each covered length.
-dictionary_matches :: proc(o: ^Optimal, src: []u8, position, limit, reach: int, found: ^[DICTIONARY_COVER_MAX + 1]Cached_Match) #no_bounds_check {
-	for group in o.groups[:o.group_count] {
+dictionary_matches :: proc(o: ^Optimal, src: []u8, position, limit, reach: int, found: ^Found_Words) #no_bounds_check {
+	for leads := o.group_leads[src[position]]; leads != 0; leads &= leads - 1 {
+		group := o.groups[intrinsics.count_trailing_zeros(leads)]
 		lead := len(group.prefix)
 
 		if lead + 4 > limit || !starts_with(src, position, limit, group.prefix) {
@@ -289,7 +348,17 @@ dictionary_matches :: proc(o: ^Optimal, src: []u8, position, limit, reach: int, 
 			key |= u32(value) << uint(8 * index)
 		}
 
-		word := WORD_HEAD[(key * 0x1e35a7bd) >> (32 - DICTIONARY_HASH_BITS)]
+		hash := key * 0x1e35a7bd
+		filter := hash >> (32 - DICTIONARY_FILTER_BITS)
+
+		// Text as it stands is what a word has to start with, and most
+		// of it starts none. A change of case can meet a word the filter
+		// does not know under these four bytes: those go and look.
+		if group.class == .Plain && DICTIONARY_FILTER[filter >> 6] & (1 << (filter & 63)) == 0 {
+			continue
+		}
+
+		word := WORD_HEAD[hash >> (32 - DICTIONARY_HASH_BITS)]
 
 		for steps := 0; word != DICTIONARY_NONE && steps < 64; steps += 1 {
 			size := int(WORD_LENGTH[word])
@@ -298,7 +367,12 @@ dictionary_matches :: proc(o: ^Optimal, src: []u8, position, limit, reach: int, 
 			word = WORD_NEXT[word]
 			matched := 0
 
-			for matched < min(size, room) {
+			// A word as it stands goes by eight bytes at a time.
+			if group.class == .Plain {
+				matched = shared_length(raw_data(src)[at:], raw_data(DICTIONARY)[offset:], min(size, room))
+			}
+
+			for group.class != .Plain && matched < min(size, room) {
 				value := DICTIONARY[offset + matched]
 
 				// Bytes from 0xc0 up make the uppercase transforms touch
@@ -365,9 +439,10 @@ tree_search :: proc(e: ^Encoder, o: ^Optimal, position, limit, best: int, collec
 		}
 
 		other := int(candidate)
+		children := 2 * (other & o.forest_mask)
+
 		length := min(left_length, right_length)
 		length += common_length(src, other + length, position + length, limit - length)
-		children := 2 * (other & o.forest_mask)
 
 		if collect && length > longest {
 			longest = length
@@ -407,6 +482,59 @@ tree_search :: proc(e: ^Encoder, o: ^Optimal, position, limit, best: int, collec
 	return
 }
 
+// Appends the nearest match of two bytes and the nearest longer one within
+// NEAR_RANGE of `position`, and returns the length of the longer, 1 for none.
+near_matches :: proc(o: ^Optimal, src: []u8, position, limit: int) -> (best: int, err: runtime.Allocator_Error) #no_bounds_check {
+	best = 1
+	distance := 1
+
+	when ODIN_ENDIAN == .Little {
+		// Eight distances at a time while the words stay inside the text:
+		// byte k of them belongs to distance + 7 - k.
+		if position >= NEAR_RANGE {
+			first := u64(src[position]) * BYTE_ONES
+			second := u64(src[position + 1]) * BYTE_ONES
+
+			for ; distance <= NEAR_RANGE && best <= 2; distance += 8 {
+				before := intrinsics.unaligned_load((^u64)(&src[position - distance - 7]))
+				after := intrinsics.unaligned_load((^u64)(&src[position - distance - 6]))
+				pairs := zero_bytes(before ~ first) & zero_bytes(after ~ second)
+
+				for pairs != 0 && best <= 2 {
+					slot := bits.len(uint(pairs)) - 1
+					pairs &~= 1 << uint(slot)
+					near := distance + 7 - slot
+					length := common_length(src, position - near, position, limit)
+
+					if length > best {
+						best = length
+						append(&o.matches, Cached_Match{u32(length), u32(length), u32(near)}) or_return
+					}
+				}
+			}
+
+			return
+		}
+	}
+
+	for ; distance <= min(position, NEAR_RANGE) && best <= 2; distance += 1 {
+		other := position - distance
+
+		if src[other] != src[position] || src[other + 1] != src[position + 1] {
+			continue
+		}
+
+		length := common_length(src, other, position, limit)
+
+		if length > best {
+			best = length
+			append(&o.matches, Cached_Match{u32(length), u32(length), u32(distance)}) or_return
+		}
+	}
+
+	return
+}
+
 // Caches, per position, its matches by increasing length: the nearest two and
 // three byte ones, the tree's, then static dictionary words longer than those.
 collect_matches :: proc(e: ^Encoder, o: ^Optimal, start, end: int) -> runtime.Allocator_Error #no_bounds_check {
@@ -423,35 +551,20 @@ collect_matches :: proc(e: ^Encoder, o: ^Optimal, start, end: int) -> runtime.Al
 
 		reach := min(position, e.window_max)
 		first := len(o.matches)
-		best := 1
-
-		for distance := 1; distance <= min(reach, NEAR_RANGE) && best <= 2; distance += 1 {
-			other := position - distance
-
-			if src[other] != src[position] || src[other + 1] != src[position + 1] {
-				continue
-			}
-
-			length := common_length(src, other, position, limit)
-
-			if length > best {
-				best = length
-				append(&o.matches, Cached_Match{u32(length), u32(length), u32(distance)}) or_return
-			}
-		}
+		best := near_matches(o, src, position, limit) or_return
 
 		if best < limit {
 			best = tree_search(e, o, position, limit, best, true) or_return
 		}
 
 		if best <= OPTIMAL_LONG {
-			found: [DICTIONARY_COVER_MAX + 1]Cached_Match
+			found: Found_Words = ---
+			found.lengths = 0
 			dictionary_matches(o, src, position, limit, reach, &found)
+			shortest := uint(min(max(best + 1, 4), len(found.words)))
 
-			for word in found[min(max(best + 1, 4), len(found)):] {
-				if word.distance != 0 {
-					append(&o.matches, word) or_return
-				}
+			for lengths := found.lengths >> shortest << shortest; lengths != 0; lengths &= lengths - 1 {
+				append(&o.matches, found.words[intrinsics.count_trailing_zeros(lengths)]) or_return
 			}
 
 			continue
@@ -533,6 +646,8 @@ set_model :: proc(e: ^Encoder, o: ^Optimal, block: ^Meta_Block, start, end: int,
 			}
 		}
 
+		pair_costs(&o.model)
+
 		return
 	}
 
@@ -546,29 +661,74 @@ set_model :: proc(e: ^Encoder, o: ^Optimal, block: ^Meta_Block, start, end: int,
 	for &costs, slot in o.model.distance {
 		symbol_costs(block.distance_histogram[int(block.distance_map[slot]) * DISTANCE_ALPHABET:][:DISTANCE_ALPHABET], costs[:], 6)
 	}
+
+	pair_costs(&o.model)
+}
+
+// Tabulates the command costs the shortest path asks for per copy length.
+pair_costs :: proc(model: ^Model) {
+	for insert in 0 ..< INSERT_CODES {
+		for copy in 0 ..< COPY_CODES {
+			model.pair[insert][copy] = command_cost(model, insert, copy, false)
+		}
+	}
+
+	for insert in 0 ..< IMPLICIT_INSERT_CODES {
+		for copy in 0 ..< IMPLICIT_COPY_CODES {
+			model.implicit[insert][copy] = command_cost(model, insert, copy, true)
+		}
+	}
 }
 
 // ------------------------------------------------------------- shortest path
 
 // Bits of the command symbol and the copy length's extra bits.
-command_cost :: #force_inline proc(o: ^Optimal, insert, copy: int, implicit: bool) -> f32 #no_bounds_check {
+command_cost :: proc(model: ^Model, insert, copy: int, implicit: bool) -> f32 {
 	cell := COMMAND_CELLS[insert >> 3][copy >> 3]
 
 	if implicit {
 		cell -= 2
 	}
 
-	return o.model.command[cell << 6 | (insert & 7) << 3 | copy & 7] + f32(COPY_EXTRA[copy])
+	return model.command[cell << 6 | (insert & 7) << 3 | copy & 7] + f32(COPY_EXTRA[copy])
 }
 
 copy_code_of :: #force_inline proc(o: ^Optimal, length: int) -> int #no_bounds_check {
 	return int(o.copy_codes[length]) if length < COPY_CODE_TABLE else 23
 }
 
-// Keeps the STARTS_MAX cheapest starts, cheapest first.
-push_start :: proc(starts: ^[STARTS_MAX]Start, count: ^int, start: Start) {
-	// A new start always enters; when full it replaces the dearest one.
-	slot := min(count^, STARTS_MAX - 1)
+// Longest copy of a copy code.
+copy_code_last :: #force_inline proc(copy: int) -> int #no_bounds_check {
+	return int(COPY_BASE[copy]) + 1 << COPY_EXTRA[copy] - 1
+}
+
+// Offers the nodes that copies of first..=last bytes from `at` reach a command
+// of `cost` bits: one copy code, so one cost, for all of them. `omit` is what a
+// dictionary word's copy length has over the bytes it covers.
+offer_sizes :: #force_inline proc(o: ^Optimal, at, first, last: int, cost: f64, run, distance, omit: int, ring: Ring) #no_bounds_check {
+	for size in first ..= last {
+		if cost < o.costs[at + size] {
+			o.costs[at + size] = cost
+			o.nodes[at + size] = {u32(run), u32(size), u32(size + omit), u32(distance), ring}
+		}
+	}
+}
+
+// Keeps the cheapest starts, as many as `starts` holds, cheapest first and
+// the older first among equals.
+push_start :: #force_inline proc(starts: []Start, count: ^int, start: Start) #no_bounds_check {
+	slot := count^
+
+	if slot == len(starts) {
+		// Full: only a start cheaper than the dearest enters, in its place.
+		slot -= 1
+
+		if starts[slot].relative <= start.relative {
+			return
+		}
+	} else {
+		count^ += 1
+	}
 
 	for slot > 0 && starts[slot - 1].relative > start.relative {
 		starts[slot] = starts[slot - 1]
@@ -576,125 +736,302 @@ push_start :: proc(starts: ^[STARTS_MAX]Start, count: ^int, start: Start) {
 	}
 
 	starts[slot] = start
-	count^ = min(count^ + 1, STARTS_MAX)
+}
+
+BYTE_ONES :: 0x0101010101010101
+BYTE_LOWS :: 0x7f7f7f7f7f7f7f7f
+RECENT_ALL :: 0xffff
+
+// Recent-distance candidates of the seven bytes around the newest distance,
+// farthest first, as bits by candidate number.
+RECENT_ORDER: [128]u16
+
+@(init)
+fill_recent_order :: proc "contextless" () {
+	for set in 0 ..< len(RECENT_ORDER) {
+		for candidate in 0 ..< 16 {
+			slot := 3 - int(CACHE_OFFSET[candidate])
+
+			if CACHE_INDEX[candidate] == 0 && set & (1 << uint(slot)) != 0 {
+				RECENT_ORDER[set] |= 1 << uint(candidate)
+			}
+		}
+	}
+}
+
+// One bit per byte of `word` that is zero, the first byte lowest.
+zero_bytes :: #force_inline proc(word: u64) -> int {
+	flags := ~((word & BYTE_LOWS + BYTE_LOWS) | word | BYTE_LOWS)
+
+	return int((flags >> 7) * 0x0102040810204080 >> 56)
+}
+
+// The recent-distance candidates, as bits by number, that have `best` bytes
+// in the byte the text has there: only those can go past `best`. Sixteen
+// candidates are seven bytes around each of the two newest distances and one
+// at each of the older two, so two words and two bytes answer for all. Every
+// candidate when a word would reach outside the text.
+recent_candidates :: #force_inline proc(src: []u8, ring: ^Ring, position, best: int) -> int #no_bounds_check {
+	when ODIN_ENDIAN == .Little {
+		first := int(ring[0])
+		second := int(ring[1])
+		third := int(ring[2])
+		fourth := int(ring[3])
+
+		if first < 5 || first + 3 > position || second < 5 || second + 3 > position {
+			return RECENT_ALL
+		}
+
+		if third < 1 || third > position || fourth < 1 || fourth > position {
+			return RECENT_ALL
+		}
+
+		at := position + best
+		value := src[at]
+		spread := u64(value) * BYTE_ONES
+		near := int(RECENT_ORDER[zero_bytes(intrinsics.unaligned_load((^u64)(&src[at - first - 3])) ~ spread) & 127])
+		far := int(RECENT_ORDER[zero_bytes(intrinsics.unaligned_load((^u64)(&src[at - second - 3])) ~ spread) & 127])
+		// The second newest distance has candidate 1 and, for its
+		// neighbours, 10 to 15 where the newest has 4 to 9.
+		set := near | (far & 1) << 1 | (far >> 4) << 10
+
+		if src[at - third] == value {
+			set |= 1 << 2
+		}
+
+		if src[at - fourth] == value {
+			set |= 1 << 3
+		}
+
+		return set
+	} else {
+		return RECENT_ALL
+	}
+}
+
+// What the copies offered from one start at one node have in common.
+Offer :: struct {
+	at:       int,
+	position: int,
+	limit:    int,
+	reach:    int,
+	run:      int,
+	insert:   int,
+	// Cost up to the copy: the start, the literals and their extra bits.
+	base:     f64,
+	ring:     Ring,
+}
+
+// Offers the copies at the recent distances that are longer than `best`.
+recent_copies :: #force_inline proc(src: []u8, o: ^Optimal, offer: ^Offer, best: int) #no_bounds_check {
+	best := best
+	model := &o.model
+	at := offer.at
+	position := offer.position
+	limit := offer.limit
+	insert := offer.insert
+	pair := &model.pair[insert]
+
+	if best >= limit {
+		return
+	}
+
+	candidates := recent_candidates(src, &offer.ring, position, best)
+
+	for candidates != 0 {
+		index := int(intrinsics.count_trailing_zeros(candidates))
+		candidates &= candidates - 1
+		distance := int(offer.ring[CACHE_INDEX[index]]) + int(CACHE_OFFSET[index])
+
+		if distance <= 0 || distance > offer.reach || index != 0 && distance == int(offer.ring[0]) {
+			continue
+		}
+
+		if src[position + best] != src[position - distance + best] {
+			continue
+		}
+
+		length := common_length(src, position - distance, position, limit)
+		ring := offer.ring
+
+		if index != 0 {
+			ring_push(&ring, distance)
+		}
+
+		size := best + 1
+		last_distance := index == 0 && insert < IMPLICIT_INSERT_CODES
+
+		if length > OPTIMAL_LONG {
+			size = length
+		}
+
+		for size <= length {
+			copy := copy_code_of(o, size)
+			last := min(length, copy_code_last(copy))
+			cost := offer.base
+
+			if last_distance && copy < IMPLICIT_COPY_CODES {
+				cost += f64(model.implicit[insert][copy])
+			} else {
+				cost += f64(pair[copy])
+				cost += f64(model.distance[distance_context(u32(size))][index])
+			}
+
+			offer_sizes(o, at, size, last, cost, offer.run, distance, 0, ring)
+			size = last + 1
+		}
+
+		if length <= best {
+			continue
+		}
+
+		best = length
+
+		if best >= limit {
+			break
+		}
+
+		// Later candidates have to pass at the new length.
+		candidates &= recent_candidates(src, &offer.ring, position, best)
+	}
+}
+
+// Offers the cached matches of the node at their lengths from `shortest` up.
+cached_copies :: #force_inline proc(o: ^Optimal, offer: ^Offer, shortest: int, cached: []Cached_Match) #no_bounds_check {
+	model := &o.model
+	pair := &model.pair[offer.insert]
+	size := shortest
+
+	for match in cached {
+		top := int(match.length)
+
+		// Nothing left to offer: the lengths it has are taken or ruled out.
+		if top < size {
+			continue
+		}
+
+		distance := int(match.distance)
+		word := distance > offer.reach
+		symbol, extra_bits, _ := distance_prefix(u32(distance) + 15, model.postfix, model.direct)
+		ring := offer.ring
+
+		if !word {
+			ring_push(&ring, distance)
+		}
+
+		if size < top && (word || top > OPTIMAL_LONG) {
+			size = top
+		}
+
+		// A word is one copy, whose length says which word.
+		omit := int(match.copy_length) - top if word else 0
+
+		for size <= top {
+			coded := size + omit
+			copy := copy_code_of(o, coded)
+			last := top if word else min(top, copy_code_last(copy))
+			cost := offer.base + f64(pair[copy]) + f64(model.distance[distance_context(u32(coded))][symbol]) + f64(extra_bits)
+			offer_sizes(o, offer.at, size, last, cost, offer.run, distance, omit, ring)
+			size = last + 1
+		}
+	}
+}
+
+// The scan for the shortest copy from a node that could still beat what
+// already reaches the nodes ahead: lengths below `shortest` cannot. The bound
+// is the cheapest command, one more bit per length-code bucket.
+Scan :: struct {
+	shortest:   int,
+	bucket:     int,
+	bucket_end: int,
+	// Bits the bound has gained so far.
+	raises:     int,
+}
+
+// The scan of the cheapest start at the node before, kept to go on from.
+Scanned :: struct {
+	at:       int,
+	// Its bound for the shortest copies.
+	floor:    f64,
+	shortest: int,
+}
+
+scan_raise :: #force_inline proc(scan: ^Scan, floor: ^f64) {
+	floor^ += 1
+	scan.raises += 1
+	scan.bucket_end += scan.bucket
+	scan.bucket *= 2
+}
+
+// Starts the scan at node `at` from what the node before found, when the
+// bound has not come down since: a node that was within the bound one byte
+// further from there is within it now, costs only ever falling, unless it
+// was the first of its bucket then, where the bound had one bit more. Those
+// few are looked at; the scan goes on after the last node known.
+scan_resume :: #force_inline proc(o: ^Optimal, scan: ^Scan, at: int, floor: ^f64) #no_bounds_check {
+	if o.scanned.at + 1 != at || floor^ < o.scanned.floor {
+		return
+	}
+
+	known := max(o.scanned.shortest - 1, scan.shortest)
+
+	for scan.bucket_end <= known {
+		if o.costs[at + scan.bucket_end - 1] > floor^ {
+			known = scan.bucket_end - 1
+
+			break
+		}
+
+		scan_raise(scan, floor)
+	}
+
+	scan.shortest = known
 }
 
 // Offers, from every start, the copies that begin at node `at`.
 relax :: proc(e: ^Encoder, o: ^Optimal, starts: []Start, at, position, limit: int, cached: []Cached_Match) #no_bounds_check {
-	src := e.src
-	reach := min(position, e.window_max)
-	nodes := o.nodes
+	costs := o.costs
 
 	// Below the top level only the cheapest start is extended.
-	recent := STARTS_RECENT if e.level >= .Optimal else 1
 	matched := STARTS_MATCHED if e.level >= .Optimal else 1
 
-	for start, rank in starts[:min(len(starts), recent)] {
+	// The starts come cheapest first, so no start's bound lies below that of
+	// the one before it and each scan goes on where the last one stopped.
+	scan := Scan{2, 4, 10, 0}
+
+	for start, rank in starts {
 		run := at - start.position
 		insert := insert_code(run)
 		arrival := start.relative + o.literal_sum[at]
-		base := arrival + f64(INSERT_EXTRA[insert])
+		lowest := arrival + f64(o.model.command_min)
+		floor := lowest
 
-		// Shortest copy that could still beat what already reaches the nodes
-		// ahead: the cheapest command, one more bit per length-code bucket.
-		floor := arrival + f64(o.model.command_min)
-		shortest := 2
-		bucket := 4
-		bucket_end := 10
+		// One at a time, as the scan itself adds them: the sums must agree.
+		for _ in 0 ..< scan.raises {
+			floor += 1
+		}
 
-		for shortest <= limit && nodes[at + shortest].cost <= floor {
-			shortest += 1
+		if rank == 0 {
+			scan_resume(o, &scan, at, &floor)
+		}
 
-			if shortest == bucket_end {
-				floor += 1
-				bucket_end += bucket
-				bucket *= 2
+		for scan.shortest <= limit && costs[at + scan.shortest] <= floor {
+			scan.shortest += 1
+
+			if scan.shortest == scan.bucket_end {
+				scan_raise(&scan, &floor)
 			}
 		}
 
-		best := shortest - 1
-
-		for index in 0 ..< 16 {
-			if best >= limit {
-				break
-			}
-
-			distance := int(start.ring[CACHE_INDEX[index]]) + int(CACHE_OFFSET[index])
-
-			if distance <= 0 || distance > reach || index != 0 && distance == int(start.ring[0]) {
-				continue
-			}
-
-			if src[position + best] != src[position - distance + best] {
-				continue
-			}
-
-			length := common_length(src, position - distance, position, limit)
-			ring := start.ring
-
-			if index != 0 {
-				ring_push(&ring, distance)
-			}
-
-			low := best + 1
-
-			if length > OPTIMAL_LONG {
-				low = length
-			}
-
-			for size in low ..= length {
-				copy := copy_code_of(o, size)
-				implicit := index == 0 && insert < 8 && copy < 16
-				cost := base + f64(command_cost(o, insert, copy, implicit))
-
-				if !implicit {
-					cost += f64(o.model.distance[distance_context(u32(size))][index])
-				}
-
-				target := &nodes[at + size]
-
-				if cost < target.cost {
-					target^ = {cost, u32(run), u32(size), u32(size), u32(distance), ring}
-				}
-			}
-
-			best = max(best, length)
+		if rank == 0 {
+			o.scanned = {at, lowest, scan.shortest}
 		}
 
-		if rank >= matched {
-			continue
-		}
+		offer := Offer{at, position, limit, min(position, e.window_max), run, insert, arrival + f64(INSERT_EXTRA[insert]), start.ring}
+		recent_copies(e.src, o, &offer, scan.shortest - 1)
 
-		size := shortest
-
-		for match in cached {
-			distance := int(match.distance)
-			word := distance > reach
-			top := int(match.length)
-			symbol, extra_bits, _ := distance_prefix(u32(distance) + 15, o.model.postfix, o.model.direct)
-			ring := start.ring
-
-			if !word {
-				ring_push(&ring, distance)
-			}
-
-			if size < top && (word || top > OPTIMAL_LONG) {
-				size = top
-			}
-
-			for ; size <= top; size += 1 {
-				coded := int(match.copy_length) if word else size
-				cost :=
-					base +
-					f64(command_cost(o, insert, copy_code_of(o, coded), false)) +
-					f64(o.model.distance[distance_context(u32(coded))][symbol]) +
-					f64(extra_bits)
-				target := &nodes[at + size]
-
-				if cost < target.cost {
-					target^ = {cost, u32(run), u32(size), u32(coded), u32(distance), ring}
-				}
-			}
+		if rank < matched {
+			cached_copies(o, &offer, scan.shortest, cached)
 		}
 	}
 }
@@ -702,22 +1039,25 @@ relax :: proc(e: ^Encoder, o: ^Optimal, starts: []Start, at, position, limit: in
 shortest_path :: proc(e: ^Encoder, o: ^Optimal, start, end: int) -> runtime.Allocator_Error #no_bounds_check {
 	count := end - start
 	nodes := o.nodes[:count + 1]
+	costs := o.costs[:count + 1]
 
-	for &node in nodes {
-		node.cost = math.INF_F64
+	for &cost in costs {
+		cost = math.INF_F64
 	}
 
+	costs[0] = 0
 	nodes[0] = {ring = e.ring}
-	starts: [STARTS_MAX]Start
+	o.scanned = {at = -2}
+	// Below the top level only the cheapest start is extended.
+	starts: [STARTS_RECENT]Start
+	kept := STARTS_RECENT if e.level >= .Optimal else 1
 	started := 0
 	skip := 0
 
 	for at in 0 ..< count {
-		node := &nodes[at]
-
 		// Only ends of commands that beat plain literals are worth starting from.
-		if node.cost <= o.literal_sum[at] {
-			push_start(&starts, &started, {at, node.cost - o.literal_sum[at], node.ring})
+		if costs[at] <= o.literal_sum[at] {
+			push_start(starts[:kept], &started, {at, costs[at] - o.literal_sum[at], nodes[at].ring})
 		}
 
 		if skip > 0 {
@@ -744,8 +1084,8 @@ shortest_path :: proc(e: ^Encoder, o: ^Optimal, start, end: int) -> runtime.Allo
 	last := 0
 	cheapest := math.INF_F64
 
-	for node, at in nodes {
-		total := node.cost + o.literal_sum[count] - o.literal_sum[at]
+	for cost, at in costs {
+		total := cost + o.literal_sum[count] - o.literal_sum[at]
 
 		if total <= cheapest {
 			cheapest = total
