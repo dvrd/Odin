@@ -987,6 +987,17 @@ parse_deep :: proc(e: ^Encoder, start, end: int, $CACHE: int) -> runtime.Allocat
 	return nil
 }
 
+// Insert and copy extra bits of every command symbol together.
+COMMAND_EXTRA: [COMMAND_ALPHABET]u8
+
+@(init)
+fill_command_extra :: proc "contextless" () {
+	for &extra, symbol in COMMAND_EXTRA {
+		cell := symbol >> 6
+		extra = INSERT_EXTRA[int(COMMAND_INSERT_CELL[cell]) + symbol >> 3 & 7] + COPY_EXTRA[int(COMMAND_COPY_CELL[cell]) + symbol & 7]
+	}
+}
+
 // Pending output bits of the fast writer, which knows the size of what it
 // writes beforehand and has the room reserved.
 Fast_Bits :: struct {
@@ -1089,30 +1100,35 @@ write_fast_meta_block :: proc(e: ^Encoder, records: []Fast_Record, start, end: i
 
 	// The codes may be built from counts evened out; the sizes come from
 	// the true ones.
-	counted := histograms
+	counted := &histograms
+	evened: Fast_Histograms = ---
+	built := counted
 
 	if e.level >= SMOOTH_LEVEL_MIN {
-		smooth_for_rle(histograms.literal[:])
-		smooth_for_rle(histograms.command[:])
-		smooth_for_rle(histograms.distance[:])
+		evened = histograms
+		built = &evened
+		smooth_for_rle(evened.literal[:])
+		smooth_for_rle(evened.command[:])
+		smooth_for_rle(evened.distance[:])
 	}
 
 	write_plain_header(w, end - start, last)
 
-	literal_lengths: [LITERAL_ALPHABET]u8
-	literal_codes: [LITERAL_ALPHABET]u16
-	command_lengths: [COMMAND_ALPHABET]u8
-	command_codes: [COMMAND_ALPHABET]u16
-	distance_lengths: [PLAIN_DISTANCE_ALPHABET]u8
-	distance_codes: [PLAIN_DISTANCE_ALPHABET]u16
-	build_and_write_code(e, histograms.literal[:], literal_lengths[:], literal_codes[:], true)
-	build_and_write_code(e, histograms.command[:], command_lengths[:], command_codes[:], true)
-	build_and_write_code(e, histograms.distance[:], distance_lengths[:], distance_codes[:], true)
+	// Every length and code is written by the builder, every table entry below.
+	literal_lengths: [LITERAL_ALPHABET]u8 = ---
+	literal_codes: [LITERAL_ALPHABET]u16 = ---
+	command_lengths: [COMMAND_ALPHABET]u8 = ---
+	command_codes: [COMMAND_ALPHABET]u16 = ---
+	distance_lengths: [PLAIN_DISTANCE_ALPHABET]u8 = ---
+	distance_codes: [PLAIN_DISTANCE_ALPHABET]u16 = ---
+	build_and_write_code(e, built.literal[:], literal_lengths[:], literal_codes[:], true)
+	build_and_write_code(e, built.command[:], command_lengths[:], command_codes[:], true)
+	build_and_write_code(e, built.distance[:], distance_lengths[:], distance_codes[:], true)
 
 	// The counts and the codes give the exact size: data that does not
 	// shrink is stored without being coded first.
-	literal_table: [LITERAL_ALPHABET]u32
-	command_table: [COMMAND_ALPHABET]u32
+	literal_table: [LITERAL_ALPHABET]u32 = ---
+	command_table: [COMMAND_ALPHABET]u32 = ---
 	coded := (len(w.out) - mark_size) * 8 + int(w.count) - int(mark_count)
 
 	for &entry, value in literal_table {
@@ -1121,10 +1137,8 @@ write_fast_meta_block :: proc(e: ^Encoder, records: []Fast_Record, start, end: i
 	}
 
 	for &entry, symbol in command_table {
-		cell := symbol >> 6
-		extra := INSERT_EXTRA[int(COMMAND_INSERT_CELL[cell]) + symbol >> 3 & 7] + COPY_EXTRA[int(COMMAND_COPY_CELL[cell]) + symbol & 7]
 		entry = u32(command_codes[symbol]) | u32(command_lengths[symbol]) << 16
-		coded += int(counted.command[symbol]) * int(command_lengths[symbol] + extra)
+		coded += int(counted.command[symbol]) * int(command_lengths[symbol] + COMMAND_EXTRA[symbol])
 	}
 
 	for count, symbol in counted.distance {

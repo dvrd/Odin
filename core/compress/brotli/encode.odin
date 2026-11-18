@@ -752,31 +752,32 @@ write_context_map :: proc(e: ^Encoder, mapping: []u8, trees: int) {
 	write_bits(w, 1, 1)
 }
 
-// Code lengths of at most `limit` for `frequencies`, of which two or more
-// are not zero: a plain Huffman tree, built again with the rarest counts
-// raised while it comes out too deep. Rarely worse than the package merge
-// and several times quicker, which is what the fast levels need.
-quick_code_lengths :: proc(frequencies: []u32, limit: u16, lengths: []u8) #no_bounds_check {
+// Code lengths of at most `limit`, and their canonical codes, for the
+// `symbols` of `frequencies` that occur, two or more and in order: a plain
+// Huffman tree, built again with the rarest counts raised while it comes out
+// too deep. Rarely worse than the package merge and several times quicker,
+// which is what the fast levels need. Only the symbols that occur are gone
+// through: a small block has few of its alphabet.
+quick_code :: proc(frequencies: []u32, symbols: []u16, limit: u16, lengths: []u8, codes: []u16) #no_bounds_check {
 	// Leaves in order of weight, then the inner nodes in the order made.
-	keys: [ALPHABET_MAX]u64 = ---
+	gathered: [ALPHABET_MAX]u64 = ---
+	spare: [ALPHABET_MAX]u64 = ---
 	weights: [2 * ALPHABET_MAX]u64 = ---
 	parents: [2 * ALPHABET_MAX]u16 = ---
 	depths: [2 * ALPHABET_MAX]u16 = ---
-	used := 0
+	used := len(symbols)
+	highest := u32(0)
 
-	for frequency, symbol in frequencies {
-		lengths[symbol] = 0
-
-		if frequency != 0 {
-			keys[used] = u64(frequency) << 16 | u64(symbol)
-			used += 1
-		}
+	for symbol, index in symbols {
+		frequency := frequencies[symbol]
+		gathered[index] = u64(frequency) << 16 | u64(symbol)
+		highest = max(highest, frequency)
 	}
 
-	slice.sort(keys[:used])
+	keys := sort_by_count(gathered[:used], spare[:used], highest)
 
 	for floor := u64(1);; floor *= 2 {
-		for key, index in keys[:used] {
+		for key, index in keys {
 			weights[index] = max(key >> 16, floor)
 		}
 
@@ -815,8 +816,110 @@ quick_code_lengths :: proc(frequencies: []u32, limit: u16, lengths: []u8) #no_bo
 		}
 	}
 
-	for key, index in keys[:used] {
+	counts: [CODE_LENGTH_MAX + 1]u32
+	first: [CODE_LENGTH_MAX + 1]u32
+	slice.zero(lengths)
+	slice.zero(codes)
+
+	for key, index in keys {
 		lengths[key & 0xffff] = u8(depths[index])
+		counts[depths[index]] += 1
+	}
+
+	code: u32
+
+	for length in 1 ..= CODE_LENGTH_MAX {
+		code = (code + counts[length - 1]) << 1
+		first[length] = code
+	}
+
+	for symbol in symbols {
+		length := lengths[symbol]
+		codes[symbol] = u16(bits.reverse_bits(first[length]) >> (32 - u32(length)))
+		first[length] += 1
+	}
+}
+
+SORT_BY_INSERTION_MAX :: 16
+
+// Sorts keys of a count above a 16-bit symbol that come in order of symbol:
+// a stable pass per byte of the largest count orders them by count and leaves
+// equal counts by symbol, in a few hundred steps where a comparison sort of
+// a small block's symbols takes thousands. Returns whichever of the two
+// slices ends up holding them.
+sort_by_count :: proc(keys, spare: []u64, highest: u32) -> []u64 #no_bounds_check {
+	// A handful is in place sooner than the passes are set up; no two keys
+	// are equal, so the order is the same.
+	if len(keys) <= SORT_BY_INSERTION_MAX {
+		for key, index in keys {
+			slot := index
+
+			for slot > 0 && keys[slot - 1] > key {
+				keys[slot] = keys[slot - 1]
+				slot -= 1
+			}
+
+			keys[slot] = key
+		}
+
+		return keys
+	}
+
+	from := keys
+	to := spare
+
+	for shift := uint(16); highest >> (shift - 16) != 0; shift += 8 {
+		starts: [257]u32
+
+		for key in from {
+			starts[(key >> shift) & 0xff + 1] += 1
+		}
+
+		for digit in 1 ..< 256 {
+			starts[digit] += starts[digit - 1]
+		}
+
+		for key in from {
+			digit := (key >> shift) & 0xff
+			to[starts[digit]] = key
+			starts[digit] += 1
+		}
+
+		from, to = to, from
+	}
+
+	return from
+}
+
+// Canonical codes for `lengths`, bit-reversed for the LSB-first bit order and
+// zero where there is no code. The symbols without one are passed over
+// without being counted: each count waits on the one before it.
+canonical_codes :: proc(lengths: []u8, codes: []u16) #no_bounds_check {
+	counts: [CODE_LENGTH_MAX + 1]u32
+	first: [CODE_LENGTH_MAX + 1]u32
+
+	for length in lengths {
+		if length != 0 {
+			counts[length] += 1
+		}
+	}
+
+	code: u32
+
+	for length in 1 ..= CODE_LENGTH_MAX {
+		code = (code + counts[length - 1]) << 1
+		first[length] = code
+	}
+
+	for length, symbol in lengths {
+		if length == 0 {
+			codes[symbol] = 0
+
+			continue
+		}
+
+		codes[symbol] = u16(bits.reverse_bits(first[length]) >> (32 - u32(length)))
+		first[length] += 1
 	}
 }
 
@@ -826,17 +929,28 @@ quick_code_lengths :: proc(frequencies: []u32, limit: u16, lengths: []u8) #no_bo
 build_and_write_code :: proc(e: ^Encoder, histogram: []u32, lengths: []u8, codes: []u16, quick := false) {
 	w := &e.writer
 	alphabet := len(histogram)
+	// The symbols that occur, in order: a slot is kept only when its symbol
+	// does.
+	symbols: [ALPHABET_MAX]u16 = ---
 	used: [4]int
 	used_count := 0
 
-	for frequency, symbol in histogram {
-		if frequency != 0 {
-			if used_count < 4 {
-				used[used_count] = symbol
-			}
+	#no_bounds_check for base := 0; base < alphabet; base += 4 {
+		group := histogram[base:min(base + 4, alphabet)]
 
-			used_count += 1
+		// Most of a small block's alphabet goes unused, four counts at a time.
+		if len(group) == 4 && intrinsics.unaligned_load((^u64)(&group[0])) | intrinsics.unaligned_load((^u64)(&group[2])) == 0 {
+			continue
 		}
+
+		for frequency, offset in group {
+			symbols[used_count] = u16(base + offset)
+			used_count += int(frequency != 0)
+		}
+	}
+
+	for index in 0 ..< min(used_count, len(used)) {
+		used[index] = int(symbols[index])
 	}
 
 	width := uint(bits.len_u32(u32(alphabet - 1)))
@@ -859,12 +973,11 @@ build_and_write_code :: proc(e: ^Encoder, histogram: []u32, lengths: []u8, codes
 	}
 
 	if quick {
-		quick_code_lengths(histogram, CODE_LENGTH_MAX, lengths)
+		quick_code(histogram, symbols[:used_count], CODE_LENGTH_MAX, lengths, codes)
 	} else {
 		compress.huffman_lengths(e.huffman, histogram, CODE_LENGTH_MAX, lengths)
+		canonical_codes(lengths, codes)
 	}
-
-	compress.huffman_codes(lengths, codes)
 
 	if used_count <= 4 {
 		// Simple code: symbols in order of (length, value).
@@ -897,9 +1010,40 @@ build_and_write_code :: proc(e: ^Encoder, histogram: []u32, lengths: []u8, codes
 	write_complex_code(e, lengths)
 }
 
+// How many of the first bytes of `data`, which is not empty, are the same:
+// the runs of symbols without a code are long, and go by eight at a time.
+run_length :: proc(data: []u8) -> int #no_bounds_check {
+	value := data[0]
+	run := 1
+
+	when ODIN_ENDIAN == .Little {
+		same := u64(value) * 0x0101010101010101
+
+		for run + 8 <= len(data) {
+			difference := intrinsics.unaligned_load((^u64)(&data[run])) ~ same
+
+			if difference != 0 {
+				return run + int(intrinsics.count_trailing_zeros(difference)) >> 3
+			}
+
+			run += 8
+		}
+	}
+
+	for run < len(data) && data[run] == value {
+		run += 1
+	}
+
+	return run
+}
+
 write_complex_code :: proc(e: ^Encoder, lengths: []u8) {
 	w := &e.writer
 	size := len(lengths)
+
+	for size >= 8 && intrinsics.unaligned_load((^u64)(&lengths[size - 8])) == 0 {
+		size -= 8
+	}
 
 	for size > 0 && lengths[size - 1] == 0 {
 		size -= 1
@@ -907,19 +1051,15 @@ write_complex_code :: proc(e: ^Encoder, lengths: []u8) {
 
 	// Run-length encode with 16 (repeat previous non-zero) and 17 (zeros);
 	// consecutive repeat symbols extend one run in base 4 or base 8.
-	symbols: [ALPHABET_MAX + 8]u8
-	extras: [ALPHABET_MAX + 8]u8
+	// Written up to `total` before they are read.
+	symbols: [ALPHABET_MAX + 8]u8 = ---
+	extras: [ALPHABET_MAX + 8]u8 = ---
 	total := 0
 	previous: u8 = 8
 
 	for index := 0; index < size; {
 		value := lengths[index]
-		run := 1
-
-		for index + run < size && lengths[index + run] == value {
-			run += 1
-		}
-
+		run := run_length(lengths[index:size])
 		index += run
 
 		if value == 0 {
@@ -976,7 +1116,7 @@ write_complex_code :: proc(e: ^Encoder, lengths: []u8) {
 		}
 	} else {
 		compress.huffman_lengths(e.huffman, histogram[:], 5, meta_lengths[:])
-		compress.huffman_codes(meta_lengths[:], meta_codes[:])
+		canonical_codes(meta_lengths[:], meta_codes[:])
 	}
 
 	skip := 0
@@ -1009,20 +1149,36 @@ write_complex_code :: proc(e: ^Encoder, lengths: []u8) {
 		}
 	}
 
+	// A code and its extra bits are 8 bits at most: they are gathered and
+	// handed over three symbols at a time, the writer being slow to take them.
+	pending: u64
+	width: uint
+
 	for index in 0 ..< total {
 		symbol := symbols[index]
 
 		if used != 1 {
-			write_bits(w, u64(meta_codes[symbol]), uint(meta_lengths[symbol]))
+			pending |= u64(meta_codes[symbol]) << width
+			width += uint(meta_lengths[symbol])
 		}
 
 		switch symbol {
 		case 16:
-			write_bits(w, u64(extras[index]), 2)
+			pending |= u64(extras[index]) << width
+			width += 2
 		case 17:
-			write_bits(w, u64(extras[index]), 3)
+			pending |= u64(extras[index]) << width
+			width += 3
+		}
+
+		if width > 24 {
+			write_bits(w, pending, width)
+			pending = 0
+			width = 0
 		}
 	}
+
+	write_bits(w, pending, width)
 }
 
 // Appends `symbol` repeated so that the decoder accumulates exactly `run`:
