@@ -67,7 +67,8 @@ ALPN_Transport :: enum {
 
 // No socket and no handshake. TCP allows a missing list (HTTP/1 fallback, with
 // no implicit h2/h3) or only http/1.1 and h2. QUIC allows exactly one "h3".
-alpn_transport_offers :: proc(transport: ALPN_Transport, protocols: []string) -> Client_Error {
+@(private)
+engine_alpn_transport_offers :: proc(transport: ALPN_Transport, protocols: []string) -> Client_Error {
 	if _, valid := alpn_protocols_size(protocols); !valid {
 		return .Invalid_ALPN
 	}

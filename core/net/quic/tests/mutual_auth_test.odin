@@ -18,7 +18,7 @@ handshake_mutual_authentication_retains_variable_client_flight :: proc(t: ^testi
 	shared: [32]u8
 	shared[0] = 0x42
 	hs, he := tls.quic_handshake_secrets(shared, ch, sh, params[:])
-	assert(he.kind == .None)
+	assert(he == nil)
 	defer tls.quic_handshake_keys_clear(&hs)
 	ee_storage: [64]u8
 	ee := protect_extensions(ee_storage[:], 8, params[:], nil)
@@ -50,7 +50,7 @@ handshake_mutual_authentication_retains_variable_client_flight :: proc(t: ^testi
 		buffers: [3][2048]u8
 		h: quic.Handshake
 		assert(quic.handshake_init(&h, .Client, []string{"h3"}, buffers[0][:], buffers[1][:], buffers[2][:]) == .None)
-		assert(quic.handshake_accept_client_hello(&h, shared, ch, sh, params[:]).kind == .None)
+		assert(quic.handshake_accept_client_hello(&h, shared, ch, sh, params[:]) == nil)
 		selected := store
 		if empty {
 			selected = nil
@@ -67,7 +67,7 @@ handshake_mutual_authentication_retains_variable_client_flight :: proc(t: ^testi
 			selected,
 			context.allocator,
 		)
-		testing.expect_value(t, e.kind, .None)
+		testing.expect_value(t, e, nil)
 		flight, re := quic.handshake_client_finished(&h)
 		assert(re == .None)
 		testing.expect(t, len(flight) > tls.FINISHED_MESSAGE_SIZE && flight[0] == 11)
@@ -79,7 +79,7 @@ handshake_mutual_authentication_retains_variable_client_flight :: proc(t: ^testi
 				hs.client.secret,
 				protect_hash(ch, sh, server_flight[:at], before_finished),
 			),
-			.None,
+			nil,
 		)
 		expected := make([]u8, len(flight))
 		copy(expected, flight)

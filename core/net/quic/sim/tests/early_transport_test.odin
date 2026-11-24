@@ -22,7 +22,7 @@ conn_early_stream_confirmation_rejection_and_shared_packet_numbers :: proc(t: ^t
 		secret: [32]u8
 		secret[0] = 42
 		keys, e := tls.quic_packet_keys_derive(secret, .Application)
-		assert(e.kind == .None)
+		assert(e == nil)
 		assert(
 			quic.packet_keys_set_aes(
 				&client_early.zero_rtt_write,

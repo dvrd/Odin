@@ -69,7 +69,7 @@ matrix_roots :: proc(roots: ^Root_Pool, ecdsa: bool) {
 		trust = #load("../../../tests/core/crypto/tls/credentials/testdata/p256-valid.pem")
 	}
 
-	parsed := root_pool_parse(roots, trust)
+	parsed := engine_root_pool_parse(roots, trust)
 	assert(parsed.kind == .None)
 }
 
@@ -96,11 +96,11 @@ matrix_connection :: proc(t: ^testing.T, entry: Matrix_Case, loc := #caller_loca
 	server_config.handshake.offer = .Upstream
 	transport := net.Async_Connection{data = &loop.stream, submit = tcp_test_submit, cancel = tcp_test_cancel}
 	executor := net.Async_Executor{data = &loop.stream, schedule = tcp_test_schedule}
-	testing.expect_value(t, server_async_server(server, transport, executor, server_config, {tcp_test_allocate, &audit}), Server_Async_Init_Error.None, loc)
+	testing.expect_value(t, engine_server_async_server(server, transport, executor, server_config, {tcp_test_allocate, &audit}), Server_Async_Init_Error.None, loc)
 
 	accepted: TCP_Test_Result
 	accept := Server_Async_Handshake_Operation{callback = tcp_test_handshake, user_data = &accepted}
-	testing.expect_value(t, server_async_handshake(server, &accept).kind, net.Connection_Error_Kind.None, loc)
+	testing.expect_value(t, engine_server_async_handshake(server, &accept).kind, net.Connection_Error_Kind.None, loc)
 
 	suites := [1]Cipher_Suite{entry.suite}
 	groups := [1]Named_Group{entry.group}
@@ -297,11 +297,11 @@ matrix_async_connection :: proc(t: ^testing.T, suite: Cipher_Suite, group: Named
 	server_config.handshake.offer = .Upstream
 	server_transport := net.Async_Connection{data = &pipe.server, submit = tcp_test_submit, cancel = tcp_test_cancel}
 	server_executor := net.Async_Executor{data = &pipe.server, schedule = tcp_test_schedule}
-	testing.expect_value(t, server_async_server(server, server_transport, server_executor, server_config, {tcp_test_allocate, &audit}), Server_Async_Init_Error.None, loc)
+	testing.expect_value(t, engine_server_async_server(server, server_transport, server_executor, server_config, {tcp_test_allocate, &audit}), Server_Async_Init_Error.None, loc)
 
 	accepted: TCP_Test_Result
 	accept := Server_Async_Handshake_Operation{callback = tcp_test_handshake, user_data = &accepted}
-	testing.expect_value(t, server_async_handshake(server, &accept).kind, net.Connection_Error_Kind.None, loc)
+	testing.expect_value(t, engine_server_async_handshake(server, &accept).kind, net.Connection_Error_Kind.None, loc)
 
 	suites := [1]Cipher_Suite{suite}
 	groups := [1]Named_Group{group}
@@ -317,11 +317,11 @@ matrix_async_connection :: proc(t: ^testing.T, suite: Cipher_Suite, group: Named
 	defer free(conn)
 	client_transport := net.Async_Connection{data = &pipe.client, submit = tcp_test_submit, cancel = tcp_test_cancel}
 	client_executor := net.Async_Executor{data = &pipe.client, schedule = tcp_test_schedule}
-	testing.expect_value(t, async_client(conn, client_transport, client_executor, config), Client_Error.None, loc)
+	testing.expect_value(t, engine_async_client(conn, client_transport, client_executor, config), Client_Error.None, loc)
 
 	connected: Matrix_Async_Result
 	connect := Async_Handshake_Operation{callback = matrix_async_handshake_done, user_data = &connected}
-	testing.expect_value(t, async_handshake(conn, &connect).kind, net.Connection_Error_Kind.None, loc)
+	testing.expect_value(t, engine_async_handshake(conn, &connect).kind, net.Connection_Error_Kind.None, loc)
 	matrix_pump(pipe)
 
 	testing.expect_value(t, connected.calls, 1, loc)

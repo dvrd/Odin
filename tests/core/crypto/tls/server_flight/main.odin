@@ -28,12 +28,12 @@ main :: proc() {
 	defer store.destroy(&s)
 	assert(store.replace(s, &credential).kind == .None)
 	o: tls.Server_Handshake
-	assert(tls.server_handshake_init(&o, tls.SERVER_HANDSHAKE_DEFAULT_CONFIG, context.allocator) == .None)
+	assert(tls.server_handshake_init(&o, tls.SERVER_HANDSHAKE_DEFAULT_CONFIG, context.allocator) == nil)
 	defer tls.server_handshake_destroy(&o)
 	// Exercise one-byte ClientHello delivery through the public API.
 	for at in 0 ..< len(ch) {
 		n, _, e := tls.server_handshake_feed(&o, .Initial, ch[at:at + 1])
-		assert(n == 1 && e == .None)
+		assert(n == 1 && e == nil)
 	}
 	peer, _ := tls.server_handshake_peek(&o)
 	if peer.kind == .Handshake_Bytes {
@@ -44,7 +44,7 @@ main :: proc() {
 		retry_wire[3], retry_wire[4], retry_wire[5], retry_wire[6] = u8(n >> 24), u8(n >> 16), u8(n >> 8), u8(n)
 		copy(retry_wire[7:], peer.bytes)
 		assert(os.write_entire_file(os.args[4], retry_wire[:7 + n]) == nil)
-		assert(tls.server_handshake_accept(&o, peer.id) == .None)
+		assert(tls.server_handshake_accept(&o, peer.id) == nil)
 		fmt.println("RETRY")
 		length: [4]u8
 		for at := 0; at < 4; {n, e := os.read(os.stdin, length[at:]); assert(e == nil && n > 0); at += n}
@@ -55,7 +55,7 @@ main :: proc() {
 		for at := 0; at < size; {n, e := os.read(os.stdin, second[at:]); assert(e == nil && n > 0); at += n}
 		for at in 0 ..< size {
 			n, _, e := tls.server_handshake_feed(&o, .Initial, second[at:at + 1])
-			assert(n == 1 && e == .None)
+			assert(n == 1 && e == nil)
 		}
 		peer, _ = tls.server_handshake_peek(&o)
 	}
@@ -71,18 +71,18 @@ main :: proc() {
 			config.mode = .QUIC
 			config.quic_transport_parameters = []u8{9, 8, 7}
 		}
-		assert(tls.server_handshake_select_parameters(&o, peer.id, config) == .None)
+		assert(tls.server_handshake_select_parameters(&o, peer.id, config) == nil)
 		p, pe := tls.server_handshake_parameters(&o)
-		assert(pe == .None && !p.authenticated)
+		assert(pe == nil && !p.authenticated)
 	} else {
-		assert(tls.server_handshake_accept(&o, peer.id) == .None)
+		assert(tls.server_handshake_accept(&o, peer.id) == nil)
 	}
-	assert(tls.server_handshake_start_flight(&o, s, time.from_nanoseconds(1790000000 * 1000000000)) == .None)
+	assert(tls.server_handshake_start_flight(&o, s, time.from_nanoseconds(1790000000 * 1000000000)) == nil)
 	output: [dynamic]u8
 	defer delete(output)
 	for _ in 0 ..< 1000 {
 		event, e := tls.server_handshake_peek(&o)
-		assert(e == .None)
+		assert(e == nil)
 		if event.kind == .None {
 			break
 		}
@@ -105,10 +105,10 @@ main :: proc() {
 		append(&output, ..bytes)
 		same, _ := tls.server_handshake_peek(&o)
 		assert(same.id == event.id)
-		assert(tls.server_handshake_accept(&o, event.id) == .None)
+		assert(tls.server_handshake_accept(&o, event.id) == nil)
 	}
 	_, status, e := tls.server_handshake_feed(&o, .Handshake, nil)
-	assert(status == .Need_Input && e == .None)
+	assert(status == .Need_Input && e == nil)
 	assert(os.write_entire_file(os.args[4], output[:]) == nil)
 	fmt.println("READY")
 	if reject {
@@ -117,7 +117,7 @@ main :: proc() {
 		assert(e == nil && n == 1 && control[0] == 1)
 		event, _ := tls.server_handshake_peek(&o)
 		assert(event.kind == .None)
-		assert(tls.server_handshake_abort(&o) == .None)
+		assert(tls.server_handshake_abort(&o) == nil)
 		stats, _ := tls.server_handshake_stats(&o)
 		assert(stats.live_bytes == 0)
 		ss, _ := store.stats(s)
@@ -143,9 +143,9 @@ main :: proc() {
 		n, st, fe := tls.server_handshake_feed(&o, .Handshake, finished[at:at + 1])
 		assert(n == 1)
 		if bad && at == 35 {
-			assert(fe == .Finished_Failed && st == .Terminal)
+			assert(fe == tls.Error(tls.Protocol_Error.Decrypt_Error) && st == .Terminal)
 		} else {
-			assert(fe == .None && st == (.Need_Event_Drain if at == 35 else .Need_Input))
+			assert(fe == nil && st == (.Need_Event_Drain if at == 35 else .Need_Input))
 		}
 	}
 	complete, _ := tls.server_handshake_peek(&o)
@@ -153,7 +153,7 @@ main :: proc() {
 	clean, _ := tls.server_handshake_stats(&o)
 	if select_parameters {
 		p, pe := tls.server_handshake_parameters(&o)
-		assert(pe == .None && p.authenticated)
+		assert(pe == nil && p.authenticated)
 		assert(string(p.alpn) == ("h3" if quic else "http/1.1") || string(p.alpn) == "opaque\x00\xff")
 		if quic {
 			assert(string(p.local_quic) == "\x09\x08\x07" && string(p.peer_quic) == "\x00\x01\x02")
@@ -162,7 +162,7 @@ main :: proc() {
 	} else {
 		assert(clean.live_bytes == 0)
 	}
-	assert(tls.server_handshake_accept(&o, complete.id) == .None)
+	assert(tls.server_handshake_accept(&o, complete.id) == nil)
 	none, _ := tls.server_handshake_peek(&o)
 	assert(none.kind == .None)
 	clean, _ = tls.server_handshake_stats(&o)

@@ -43,14 +43,14 @@ server_ecdsa_typed_offer_admission_and_finished_lifetime :: proc(t: ^testing.T) 
 		}
 		o: Server_Handshake
 		owner_test_ready(t, &o, &a, hello)
-		e := server_handshake_start_flight(&o, store, time.from_nanoseconds(1790000000 * 1000000000))
+		e := engine_server_handshake_start_flight(&o, store, time.from_nanoseconds(1790000000 * 1000000000))
 		if mode != 0 {
 			testing.expect_value(t, e, .Unsupported)
 		} else {
 			testing.expect_value(t, e, .None)
 			saw_verify := false
 			for _ in 0 ..< 100 {
-				event, ee := server_handshake_peek(&o)
+				event, ee := engine_server_handshake_peek(&o)
 				testing.expect_value(t, ee, .None)
 				if event.kind == .None {
 					break
@@ -61,14 +61,14 @@ server_ecdsa_typed_offer_admission_and_finished_lifetime :: proc(t: ^testing.T) 
 					testing.expect_value(t, hello_u16(event.bytes, 4), u16(0x0403))
 					testing.expect(t, len(event.bytes) >= 16 && len(event.bytes) <= 80)
 				}
-				testing.expect_value(t, server_handshake_accept(&o, event.id), .None)
+				testing.expect_value(t, engine_server_handshake_accept(&o, event.id), .None)
 			}
 			testing.expect(t, saw_verify)
 			testing.expect_value(t, o._phase, .Await_Client_Finished)
 			snap, _ := credential_store.stats(store)
 			testing.expect_value(t, snap.active_leases, 1)
 		}
-		server_handshake_destroy(&o)
+		engine_server_handshake_destroy(&o)
 		owner_test_clean(t, &a)
 		snap, _ := credential_store.stats(store)
 		testing.expect_value(t, snap.active_leases, 0)

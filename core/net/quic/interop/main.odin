@@ -161,7 +161,7 @@ load_credential :: proc(state: ^State) -> bool {
 		return false
 	}
 	e := tls.server_handshake_init(&state.owner, tls.SERVER_HANDSHAKE_DEFAULT_CONFIG, context.allocator)
-	if e != .None {
+	if e != nil {
 		state.reason = "server handshake"
 		return false
 	}
@@ -470,7 +470,7 @@ feed :: proc(state: ^State, level: Level) -> bool {
 			}
 		}
 		consumed, status, err := tls.server_handshake_feed(&state.owner, tls_level(level), slice)
-		if err != .None {
+		if err != nil {
 			state.reason = "tls feed"
 			fmt.eprintf("tls feed %v\n", err)
 			return false
@@ -508,7 +508,7 @@ feed :: proc(state: ^State, level: Level) -> bool {
 drain :: proc(state: ^State) -> bool {
 	for {
 		event, err := tls.server_handshake_peek(&state.owner)
-		if err != .None {
+		if err != nil {
 			state.reason = "tls peek"
 			return false
 		}
@@ -523,13 +523,13 @@ drain :: proc(state: ^State) -> bool {
 				alpn_protocols = []string{"h3"},
 				quic_transport_parameters = params[:n],
 			})
-			if se != .None {
+			if se != nil {
 				state.reason = "parameters"
 				fmt.eprintf("parameters %v\n", se)
 				return false
 			}
 			fe := tls.server_handshake_start_flight(&state.owner, state.store, time.now())
-			if fe != .None {
+			if fe != nil {
 				state.reason = "flight"
 				fmt.eprintf("flight %v\n", fe)
 				return false
@@ -539,7 +539,7 @@ drain :: proc(state: ^State) -> bool {
 			if !queue_send(state, level_from_tls(event.level), event.bytes) {
 				return false
 			}
-			if tls.server_handshake_accept(&state.owner, event.id) != .None {
+			if tls.server_handshake_accept(&state.owner, event.id) != nil {
 				state.reason = "accept bytes"
 				return false
 			}
@@ -547,7 +547,7 @@ drain :: proc(state: ^State) -> bool {
 			if !install_secret(state, event) {
 				return false
 			}
-			if tls.server_handshake_accept(&state.owner, event.id) != .None {
+			if tls.server_handshake_accept(&state.owner, event.id) != nil {
 				state.reason = "accept secret"
 				return false
 			}
@@ -555,7 +555,7 @@ drain :: proc(state: ^State) -> bool {
 			state.complete = true
 			state.hs.handshake_complete = true
 			state.hs.have_one_rtt = true
-			if tls.server_handshake_accept(&state.owner, event.id) != .None {
+			if tls.server_handshake_accept(&state.owner, event.id) != nil {
 				state.reason = "accept complete"
 				return false
 			}
@@ -581,7 +581,7 @@ install_secret :: proc(state: ^State, event: tls.Server_Handshake_Event) -> bool
 	}
 	keys, err := tls.quic_packet_keys_derive(secret, qlevel)
 	defer tls.quic_direction_keys_clear(&keys)
-	if err.kind != .None {
+	if err != nil {
 		state.reason = "quic keys"
 		return false
 	}

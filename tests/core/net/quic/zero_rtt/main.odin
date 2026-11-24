@@ -57,10 +57,10 @@ server :: proc(directory, scenario: string) {
 	defer store.destroy(&identity)
 	assert(store.replace(identity, &credential).kind == .None)
 	keys: tls.Server_Ticket_Keys
-	assert(tls.server_ticket_keys_init(&keys) == .None)
+	assert(tls.server_ticket_keys_init(&keys) == nil)
 	defer tls.server_ticket_keys_close(&keys)
 	replay: tls.Anti_Replay
-	assert(tls.anti_replay_init(&replay) == .None)
+	assert(tls.anti_replay_init(&replay) == nil)
 	defer tls.anti_replay_close(&replay)
 	early := tls.Server_Early_Data_Config {
 		replay  = &replay,
@@ -111,7 +111,7 @@ server :: proc(directory, scenario: string) {
 	auth: tls.Client_Auth_Config
 	tcp_tls: saba.TLS_Config
 	if scenario == "mtls" {
-		assert(tls.root_pool_load_file(&roots, fmt.tprintf("%s/root.pem", directory)).kind == .None)
+		assert(tls.root_pool_load_file(&roots, fmt.tprintf("%s/root.pem", directory)) == nil)
 		auth = {
 			mode  = .Require,
 			roots = roots.roots[:roots.count],
@@ -125,7 +125,7 @@ server :: proc(directory, scenario: string) {
 		assert(pe == nil)
 		defer delete(client_pem)
 		pool: tls.Root_Pool
-		assert(tls.root_pool_parse(&pool, client_pem).kind == .None)
+		assert(tls.root_pool_parse(&pool, client_pem) == nil)
 		defer tls.root_pool_destroy(&pool)
 		state.expected_peer = sha256_leaf(pool.roots[0].raw)
 	}
@@ -172,7 +172,7 @@ main :: proc() {
 		return
 	}
 	roots: tls.Root_Pool
-	assert(tls.root_pool_load_file(&roots, fmt.tprintf("%s/root.pem", directory)).kind == .None)
+	assert(tls.root_pool_load_file(&roots, fmt.tprintf("%s/root.pem", directory)) == nil)
 	defer tls.root_pool_destroy(&roots)
 	address, valid := net.parse_endpoint(endpoint)
 	assert(valid)

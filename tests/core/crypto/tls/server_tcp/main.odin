@@ -169,7 +169,7 @@ handshake_done :: proc(op: ^tls.Server_Async_Handshake_Operation) {
 	assert(state.handshake_complete)
 	assert(state.negotiated_protocol == "http/1.1")
 	if s.mode == "key-update" {
-		assert(tls.server_async_key_update(&s.server, true).kind == .None)
+		assert(tls.server_async_key_update(&s.server, true) == nil)
 	}
 	s.read = {
 		callback  = read_done,
@@ -190,7 +190,7 @@ handshake_done :: proc(op: ^tls.Server_Async_Handshake_Operation) {
 }
 
 cancel_timer :: proc(op: ^nbio.Operation, s: ^Session) {
-	assert(tls.server_async_cancel_handshake(&s.server).kind == .None)
+	assert(tls.server_async_cancel_handshake(&s.server) == nil)
 }
 
 close_timer :: proc(op: ^nbio.Operation, s: ^Session) {close_session(s)}
@@ -260,12 +260,12 @@ main :: proc() {
 		if mode == "rotate" {
 			config.handshake_timeout = 45 * time.Second
 		}
-		assert(tls.server_async_server(&s.server, source, nbio.async_executor(), config, context.allocator) == .None)
+		assert(tls.server_async_server(&s.server, source, nbio.async_executor(), config, context.allocator) == nil)
 		s.handshake = {
 			callback  = handshake_done,
 			user_data = &s,
 		}
-		assert(tls.server_async_handshake(&s.server, &s.handshake).kind == .None)
+		assert(tls.server_async_handshake(&s.server, &s.handshake) == nil)
 		if mode == "cancel" {
 			nbio.timeout_poly(50 * time.Millisecond, &s, cancel_timer)
 		}

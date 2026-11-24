@@ -59,12 +59,12 @@ server_pss_sha256_certificate_chain_admission :: proc(t: ^testing.T) {
 		}
 		o: Server_Handshake
 		owner_test_ready(t, &o, &a, hello)
-		e := server_handshake_start_flight(&o, store, time.from_nanoseconds(1790000000 * 1000000000))
+		e := engine_server_handshake_start_flight(&o, store, time.from_nanoseconds(1790000000 * 1000000000))
 		good := mode == 0 || mode == 1 || mode == 7
 		testing.expect_value(t, e, .None if good else .Unsupported)
 		before, _ := credential_store.stats(store)
 		testing.expect_value(t, before.active_leases, 1 if good else 0)
-		server_handshake_destroy(&o)
+		engine_server_handshake_destroy(&o)
 		owner_test_clean(t, &a)
 		after, _ := credential_store.stats(store)
 		testing.expect_value(t, after.active_leases, 0)

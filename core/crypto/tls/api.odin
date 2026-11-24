@@ -72,6 +72,16 @@ General_Error :: enum {
 	Cancelled,
 	// The transport under the connection has no deadlines.
 	Deadline_Unsupported,
+	// A configured bound on memory, size or count was reached.
+	Limit_Exceeded,
+	// The system could not supply random bytes.
+	Entropy_Unavailable,
+	// The clock could not be read, or ran backwards.
+	Clock_Unavailable,
+	// Early data was refused: replayed, expired or not allowed here.
+	Early_Data_Rejected,
+	// The local certificate or its private key could not be used.
+	Credential_Failed,
 }
 
 // Socket is a TLS socket.  It MUST NOT be copied as the internal state

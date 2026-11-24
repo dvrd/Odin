@@ -8,7 +8,7 @@ import credentials "credentials"
 @(test)
 server_tickets_authenticated_rotation_expiry_and_revocation :: proc(t: ^testing.T) {
 	keys: Server_Ticket_Keys
-	testing.expect_value(t, server_ticket_keys_init(&keys, time.Hour), .None)
+	testing.expect_value(t, engine_server_ticket_keys_init(&keys, time.Hour), .None)
 	defer server_ticket_keys_close(&keys)
 	config := Server_Ticket_Config {
 		keys         = &keys,
@@ -42,9 +42,9 @@ server_tickets_authenticated_rotation_expiry_and_revocation :: proc(t: ^testing.
 		bad[offset] ~= 1
 		testing.expect(t, !server_ticket_crypt(&config, &opened, bad[:], false, now))
 	}
-	testing.expect_value(t, server_ticket_keys_rotate(&keys, now), .None)
+	testing.expect_value(t, engine_server_ticket_keys_rotate(&keys, now), .None)
 	testing.expect(t, server_ticket_crypt(&config, &opened, wire[:], false, now))
-	testing.expect_value(t, server_ticket_keys_rotate(&keys, now), .None)
+	testing.expect_value(t, engine_server_ticket_keys_rotate(&keys, now), .None)
 	testing.expect(t, !server_ticket_crypt(&config, &opened, wire[:], false, now))
 	testing.expect(t, server_ticket_crypt(&config, &claims, wire[:], true, now))
 	testing.expect(t, !server_ticket_crypt(&config, &opened, wire[:], false, time.time_add(now, 601 * time.Second)))
@@ -62,22 +62,22 @@ server_tickets_authenticated_rotation_expiry_and_revocation :: proc(t: ^testing.
 @(private)
 ticket_test_issue :: proc(t: ^testing.T, identity: ^store.Store, config: Server_Handshake_Config) -> Session {
 	owner: Server_Handshake
-	assert(server_handshake_init(&owner, config, context.allocator) == .None)
-	defer server_handshake_destroy(&owner)
+	assert(engine_server_handshake_init(&owner, config, context.allocator) == .None)
+	defer engine_server_handshake_destroy(&owner)
 	wire: [1024]u8
 	hello, _ := flight_test_hello(wire[:])
-	_, _, e := server_handshake_feed(&owner, .Initial, hello)
+	_, _, e := engine_server_handshake_feed(&owner, .Initial, hello)
 	assert(e == .None)
-	event, _ := server_handshake_peek(&owner)
-	assert(server_handshake_accept(&owner, event.id) == .None)
-	assert(server_handshake_start_flight(&owner, identity, time.now()) == .None)
+	event, _ := engine_server_handshake_peek(&owner)
+	assert(engine_server_handshake_accept(&owner, event.id) == .None)
+	assert(engine_server_handshake_start_flight(&owner, identity, time.now()) == .None)
 	for _ in 0 ..< 100 {
-		event, _ = server_handshake_peek(&owner)
+		event, _ = engine_server_handshake_peek(&owner)
 		if event.kind == .None {
 			break
 		}
 		assert(event.kind != .Fatal)
-		assert(server_handshake_accept(&owner, event.id) == .None)
+		assert(engine_server_handshake_accept(&owner, event.id) == .None)
 	}
 	master := owner._resumption.master
 	defer crypto.zero_explicit(&master, size_of(master))
@@ -90,18 +90,18 @@ ticket_test_issue :: proc(t: ^testing.T, identity: ^store.Store, config: Server_
 	secret: [32]u8
 	schedule_expand(.SHA256, master[:], "res master", hash[:], secret[:])
 	defer crypto.zero_explicit(&secret, size_of(secret))
-	_, _, e = server_handshake_feed(&owner, .Handshake, finished[:])
+	_, _, e = engine_server_handshake_feed(&owner, .Handshake, finished[:])
 	assert(e == .None)
-	event, _ = server_handshake_peek(&owner)
+	event, _ = engine_server_handshake_peek(&owner)
 	testing.expect_value(t, event.kind, .Handshake_Bytes)
 	testing.expect_value(t, event.level, .Application)
 	session: Session
 	assert(session_remember(&session, secret, event.bytes, "localhost", time.now()))
 	testing.expect(t, !server_handshake_resumed(&owner))
-	assert(server_handshake_accept(&owner, event.id) == .None)
-	event, _ = server_handshake_peek(&owner)
+	assert(engine_server_handshake_accept(&owner, event.id) == .None)
+	event, _ = engine_server_handshake_peek(&owner)
 	testing.expect_value(t, event.kind, .Complete)
-	assert(server_handshake_accept(&owner, event.id) == .None)
+	assert(engine_server_handshake_accept(&owner, event.id) == .None)
 	testing.expect_value(t, owner._stats.live_bytes, 0)
 	return session
 }
@@ -112,7 +112,7 @@ server_tickets_binder_context_and_fallback :: proc(t: ^testing.T) {
 	defer store.destroy(&identity)
 	for mode in 0 ..< 10 {
 		keys: Server_Ticket_Keys
-		assert(server_ticket_keys_init(&keys, time.Hour) == .None)
+		assert(engine_server_ticket_keys_init(&keys, time.Hour) == .None)
 		defer server_ticket_keys_close(&keys)
 		ticket := Server_Ticket_Config {
 			keys         = &keys,
@@ -130,8 +130,8 @@ server_tickets_binder_context_and_fallback :: proc(t: ^testing.T) {
 			ticket.policy_epoch = 2
 		}
 		if mode == 4 {
-			assert(server_ticket_keys_rotate(&keys, time.now()) == .None)
-			assert(server_ticket_keys_rotate(&keys, time.now()) == .None)
+			assert(engine_server_ticket_keys_rotate(&keys, time.now()) == .None)
+			assert(engine_server_ticket_keys_rotate(&keys, time.now()) == .None)
 		}
 		wire: [4096]u8
 		hello, _ := flight_test_hello(wire[:])
@@ -141,11 +141,11 @@ server_tickets_binder_context_and_fallback :: proc(t: ^testing.T) {
 			wire[n - 1] ~= 1
 		}
 		owner: Server_Handshake
-		assert(server_handshake_init(&owner, config, context.allocator) == .None)
-		_, _, e := server_handshake_feed(&owner, .Initial, wire[:n])
+		assert(engine_server_handshake_init(&owner, config, context.allocator) == .None)
+		_, _, e := engine_server_handshake_feed(&owner, .Initial, wire[:n])
 		assert(e == .None)
-		event, _ := server_handshake_peek(&owner)
-		assert(server_handshake_accept(&owner, event.id) == .None)
+		event, _ := engine_server_handshake_peek(&owner)
+		assert(engine_server_handshake_accept(&owner, event.id) == .None)
 		if mode == 5 {
 			assert(server_parameters_select(&owner, {}) == .None)
 			owner._parameters.value.alpn = transmute([]u8)string("h2")
@@ -165,7 +165,7 @@ server_tickets_binder_context_and_fallback :: proc(t: ^testing.T) {
 		defer root_pool_destroy(&roots)
 		policy: Client_Auth_Config
 		if mode == 9 {
-			assert(root_pool_parse(&roots, #load("testdata/mtls/root.pem")).kind == .None)
+			assert(engine_root_pool_parse(&roots, #load("testdata/mtls/root.pem")).kind == .None)
 			policy = {
 				mode  = .Require,
 				roots = roots.roots[:roots.count],
@@ -176,7 +176,7 @@ server_tickets_binder_context_and_fallback :: proc(t: ^testing.T) {
 		if mode == 6 {
 			now = time.time_add(now, 2 * time.Hour)
 		}
-		e = server_handshake_start_flight(&owner, identity, now)
+		e = engine_server_handshake_start_flight(&owner, identity, now)
 		if mode == 1 {
 			testing.expect_value(t, e, .Binder_Failed)
 		} else {
@@ -184,8 +184,8 @@ server_tickets_binder_context_and_fallback :: proc(t: ^testing.T) {
 			testing.expect_value(t, owner._resumed, mode == 0)
 		}
 		// Changed authenticated context must choose a complete new handshake.
-		server_handshake_abort(&owner)
-		server_handshake_destroy(&owner)
+		engine_server_handshake_abort(&owner)
+		engine_server_handshake_destroy(&owner)
 		testing.expect_value(t, owner._stats.live_bytes, 0)
 	}
 }

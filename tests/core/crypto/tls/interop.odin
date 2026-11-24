@@ -32,7 +32,7 @@ async_go_interoperability :: proc(t: ^testing.T) {
 	defer tls.root_pool_destroy(pool)
 	conn := new(tls.Async_Conn)
 	defer free(conn)
-	testing.expect_value(t, tls.root_pool_parse(pool, #load("testdata/root.pem")).kind, .None)
+	testing.expect_value(t, tls.root_pool_parse(pool, #load("testdata/root.pem")), nil)
 	testing.expect_value(
 		t,
 		tls.async_client(
@@ -41,7 +41,7 @@ async_go_interoperability :: proc(t: ^testing.T) {
 			nbio.async_executor(),
 			{server_name = "localhost", root_cas = pool.roots[:pool.count]},
 		),
-		.None,
+		nil,
 	)
 	State :: struct {
 		done:      bool,
@@ -58,7 +58,7 @@ async_go_interoperability :: proc(t: ^testing.T) {
 			s.handshake = op.result
 		},
 	}
-	testing.expect_value(t, tls.async_handshake(conn, &hs).kind, .None)
+	testing.expect_value(t, tls.async_handshake(conn, &hs), nil)
 	testing.expect(t, nbio.run() == nil)
 	testing.expect_value(t, hs_result.error.kind, .None)
 	testing.expect_value(t, hs_result.handshake.kind, .None)
@@ -148,7 +148,7 @@ async_go_rejects_wrong_hostname :: proc(t: ^testing.T) {
 	pool := new(tls.Root_Pool)
 	defer free(pool)
 	defer tls.root_pool_destroy(pool)
-	assert(tls.root_pool_parse(pool, #load("testdata/root.pem")).kind == .None)
+	assert(tls.root_pool_parse(pool, #load("testdata/root.pem")) == nil)
 	conn := new(tls.Async_Conn)
 	defer free(conn)
 	assert(
@@ -158,7 +158,7 @@ async_go_rejects_wrong_hostname :: proc(t: ^testing.T) {
 			nbio.async_executor(),
 			{server_name = "wrong.example", root_cas = pool.roots[:pool.count]},
 		) ==
-		.None,
+		nil,
 	)
 	State :: struct {
 		calls:     int,
@@ -175,7 +175,7 @@ async_go_rejects_wrong_hostname :: proc(t: ^testing.T) {
 			s.handshake = op.result.kind
 		},
 	}
-	tls.async_handshake(conn, &op)
+	_ = tls.async_handshake(conn, &op)
 	assert(nbio.run() == nil)
 	testing.expect_value(t, state.calls, 1)
 	testing.expect_value(t, state.error, .Protocol_Failed)
@@ -199,7 +199,7 @@ blocking_go_interoperability :: proc(t: ^testing.T) {
 	pool := new(tls.Root_Pool)
 	defer free(pool)
 	defer tls.root_pool_destroy(pool)
-	assert(tls.root_pool_parse(pool, #load("testdata/root.pem")).kind == .None)
+	assert(tls.root_pool_parse(pool, #load("testdata/root.pem")) == nil)
 	conn := new(tls.Conn)
 	defer free(conn)
 	result := tls.dial(

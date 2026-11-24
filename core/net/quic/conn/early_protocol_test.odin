@@ -16,7 +16,7 @@ early_protocol_fixture :: proc() -> ^Connection {
 	secret: [32]u8
 	secret[0] = 42
 	keys, e := tls.quic_packet_keys_derive(secret, .Application)
-	assert(e.kind == .None)
+	assert(e == nil)
 	assert(
 		quic.packet_keys_set_aes(&h.zero_rtt_read, keys.key[:], keys.iv[:], keys.hp[:], keys.secret[:], false) ==
 		.None,

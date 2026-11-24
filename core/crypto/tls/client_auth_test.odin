@@ -28,22 +28,22 @@ mtls_start :: proc(
 ) {
 	config := SERVER_HANDSHAKE_DEFAULT_CONFIG
 	config.client_auth = policy
-	testing.expect_value(t, server_handshake_init(owner, config, context.allocator), .None)
+	testing.expect_value(t, engine_server_handshake_init(owner, config, context.allocator), .None)
 	wire: [1024]u8
 	hello, _ := flight_test_hello(wire[:])
-	_, _, e := server_handshake_feed(owner, .Initial, hello)
+	_, _, e := engine_server_handshake_feed(owner, .Initial, hello)
 	assert(e == .None)
-	event, _ := server_handshake_peek(owner)
+	event, _ := engine_server_handshake_peek(owner)
 	assert(event.kind == .Peer_Parameters)
-	assert(server_handshake_accept(owner, event.id) == .None)
-	assert(server_handshake_start_flight(owner, identity, time.now()) == .None)
+	assert(engine_server_handshake_accept(owner, event.id) == .None)
+	assert(engine_server_handshake_start_flight(owner, identity, time.now()) == .None)
 	transcript: Handshake_Transcript
 	transcript_init(&transcript)
 	transcript_update(&transcript, hello)
 	secret: [32]u8
 	requested := false
 	for _ in 0 ..< 100 {
-		event, _ = server_handshake_peek(owner)
+		event, _ = engine_server_handshake_peek(owner)
 		if event.kind == .None {
 			break
 		}
@@ -57,7 +57,7 @@ mtls_start :: proc(
 		if event.kind == .Traffic_Secret && event.level == .Handshake && event.direction == .Read {
 			copy(secret[:], event.secret)
 		}
-		assert(server_handshake_accept(owner, event.id) == .None)
+		assert(engine_server_handshake_accept(owner, event.id) == .None)
 	}
 	testing.expect(t, requested)
 	testing.expect_value(t, owner._phase, .Await_Client_Finished)
@@ -85,7 +85,7 @@ mutual_tls_recordless_authentication_and_rejection :: proc(t: ^testing.T) {
 	client := mtls_store(t, #load("testdata/mtls/client.pem"), #load("testdata/mtls/client-key.pem"))
 	defer store.destroy(&client)
 	roots: Root_Pool
-	assert(root_pool_parse(&roots, #load("testdata/mtls/root.pem")).kind == .None)
+	assert(engine_root_pool_parse(&roots, #load("testdata/mtls/root.pem")).kind == .None)
 	defer root_pool_destroy(&roots)
 	for mode in 0 ..< 9 {
 		policy := Client_Auth_Config {
@@ -125,26 +125,26 @@ mutual_tls_recordless_authentication_and_rejection :: proc(t: ^testing.T) {
 		at := 0
 		cause: Server_Handshake_Error
 		for at < len(wire) {
-			n, s, e := server_handshake_feed(&owner, .Handshake, wire[at:at + 1])
+			n, s, e := engine_server_handshake_feed(&owner, .Handshake, wire[at:at + 1])
 			at += n
 			cause = e
 			if e != .None || s == .Terminal {
 				break
 			}
 			if mode == 8 && at == 12 {
-				server_handshake_abort(&owner)
+				engine_server_handshake_abort(&owner)
 				break
 			}
 		}
 		if mode < 2 {
-			event, _ := server_handshake_peek(&owner)
+			event, _ := engine_server_handshake_peek(&owner)
 			testing.expect_value(t, event.kind, .Complete)
 			peer := server_handshake_peer_identity(&owner)
 			testing.expect_value(t, peer.authenticated, mode == 0)
 			if mode == 0 {
 				testing.expect(t, !mem.check_zero(peer.certificate_sha256[:]))
 			}
-			testing.expect_value(t, server_handshake_accept(&owner, event.id), .None)
+			testing.expect_value(t, engine_server_handshake_accept(&owner, event.id), .None)
 		} else if mode == 8 {
 			testing.expect_value(t, owner._phase, .Aborted)
 		} else {
@@ -152,8 +152,8 @@ mutual_tls_recordless_authentication_and_rejection :: proc(t: ^testing.T) {
 			testing.expect(t, !server_handshake_peer_identity(&owner).authenticated)
 		}
 		delete(wire)
-		server_handshake_destroy(&owner)
-		stats, _ := server_handshake_stats(&owner)
+		engine_server_handshake_destroy(&owner)
+		stats, _ := engine_server_handshake_stats(&owner)
 		testing.expect_value(t, stats.live_bytes, 0)
 	}
 }
@@ -212,7 +212,7 @@ mutual_tls_pinned_credential_generation_survives_rotation :: proc(t: ^testing.T)
 	assert(error.kind == .None)
 	defer delete(flight)
 	count := 4 + handshake_body_size(flight)
-	certs, pe := server_certificates_parse(flight[:count])
+	certs, pe := engine_server_certificates_parse(flight[:count])
 	assert(pe.kind == .None)
 	defer server_certificates_destroy(&certs)
 	digest: sha2.Context_256

@@ -34,7 +34,8 @@ Anti_Replay :: struct {
 	_last_now:             i64,
 }
 
-anti_replay_init :: proc(
+@(private)
+engine_anti_replay_init :: proc(
 	owner: ^Anti_Replay,
 	capacity: int = 1024,
 	allocator: mem.Allocator = context.allocator,

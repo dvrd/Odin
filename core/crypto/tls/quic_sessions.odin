@@ -82,7 +82,8 @@ quic_session_scope_matches :: proc(session: ^Session, scope: Quic_Session_Scope,
 
 // Append after QUIC transport parameters; pre_shared_key remains the last
 // extension. A nil session advertises psk_dhe_ke for later ticket issuance.
-quic_client_hello_offer :: proc(
+@(private)
+engine_quic_client_hello_offer :: proc(
 	dst: []u8,
 	hello_len: int,
 	session: ^Session,
@@ -123,7 +124,8 @@ quic_client_hello_offer :: proc(
 
 // Caller binds the authenticated peer's remembered transport+HTTP3 settings in
 // profile. No 0RTT use is possible without this bounded authenticated context.
-quic_session_remember :: proc(
+@(private)
+engine_quic_session_remember :: proc(
 	session: ^Session,
 	master: [32]u8,
 	message: []u8,

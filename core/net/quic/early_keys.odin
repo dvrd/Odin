@@ -13,7 +13,7 @@ handshake_install_zero_rtt_read :: proc(h: ^Handshake, traffic_secret: []u8) -> 
 	defer crypto.zero_explicit(&secret, size_of(secret))
 	keys, e := tls.quic_packet_keys_derive(secret, .Application)
 	defer tls.quic_direction_keys_clear(&keys)
-	if e.kind != .None {
+	if e != nil {
 		return .Invalid_State
 	}
 	if packet_keys_set_aes(&h.zero_rtt_read, keys.key[:], keys.iv[:], keys.hp[:], keys.secret[:], false) != .None {
@@ -66,9 +66,9 @@ handshake_remember_ticket :: proc(
 	session: ^tls.Session,
 	scope: tls.Quic_Session_Scope,
 	now: time.Time,
-) -> tls.Quic_Secret_Error {
+) -> tls.Error {
 	if h == nil || h.failed || !h.peer_authenticated || !h.have_resumption_master {
-		return {kind = .Invalid_Input}
+		return tls.General_Error.Invalid_Config
 	}
 	return tls.quic_session_remember(session, h.resumption_master, message, scope, now)
 }

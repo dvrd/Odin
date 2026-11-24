@@ -27,7 +27,8 @@ Key_Schedule_Error :: enum {
 // TLS 1.3 HKDF-Expand-Label (RFC 8446 section 7.1) for the hash of the suite.
 // Performs all validation before writing dst. Labels exclude the "tls13 "
 // prefix and must be nonempty; output is bounded by the hash's HKDF limit.
-hkdf_expand_label :: proc(
+@(private)
+engine_hkdf_expand_label :: proc(
 	secret: []u8,
 	label: string,
 	label_context: []u8,
@@ -72,7 +73,7 @@ hkdf_expand_label :: proc(
 // so label validation cannot fail unless this code is changed.
 @(private)
 schedule_expand :: proc(algorithm: hash.Algorithm, secret: []u8, label: string, context_bytes, dst: []u8) {
-	err := hkdf_expand_label(secret, label, context_bytes, dst, algorithm)
+	err := engine_hkdf_expand_label(secret, label, context_bytes, dst, algorithm)
 	assert(err == .None, "invalid internal TLS HKDF parameters")
 }
 
@@ -263,7 +264,8 @@ finished_verify_data :: proc(traffic_secret: [32]u8, transcript_hash: [32]u8) ->
 
 // Takes exactly one complete SHA-256 Finished handshake message. MAC bytes
 // are compared in constant time after checking the public framing fields.
-finished_verify :: proc(
+@(private)
+engine_finished_verify :: proc(
 	message: []u8,
 	traffic_secret: [32]u8,
 	transcript_hash: [32]u8,

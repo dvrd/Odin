@@ -49,7 +49,8 @@ Server_Certificates :: struct {
 // RFC 8446 section 4.4.2, X.509 server authentication. Our ClientHello offers
 // no CertificateEntry extensions, so any nonempty entry extensions are an
 // unsolicited extension. Failure releases all partially parsed certificates.
-server_certificates_parse :: proc(message: []u8) -> (Server_Certificates, Authentication_Error) {
+@(private)
+engine_server_certificates_parse :: proc(message: []u8) -> (Server_Certificates, Authentication_Error) {
 	certs: Server_Certificates
 	err := authentication_certificates_parse_into(&certs, message)
 	if err.kind != .None {
@@ -66,7 +67,8 @@ server_certificates_destroy :: proc(certs: ^Server_Certificates) {
 	certs^ = {}
 }
 
-verify_server_certificates :: proc(
+@(private)
+engine_verify_server_certificates :: proc(
 	certs: ^Server_Certificates,
 	server_name: string,
 	roots: []^x509.Certificate,
@@ -133,7 +135,8 @@ verify_server_chain :: proc(
 // Checks proof of possession, independently of path validation above. The
 // transcript hash must cover ClientHello through Certificate (inclusive),
 // excluding CertificateVerify itself. RFC 8446 section 4.4.3.
-verify_server_certificate_signature :: proc(
+@(private)
+engine_verify_server_certificate_signature :: proc(
 	certs: ^Server_Certificates,
 	message: []u8,
 	transcript_hash: [32]u8,

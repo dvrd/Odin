@@ -144,7 +144,8 @@ Server_Handshake :: struct {
 	_binder_transcript:       Handshake_Transcript,
 }
 
-server_handshake_init :: proc(
+@(private)
+engine_server_handshake_init :: proc(
 	owner: ^Server_Handshake,
 	config: Server_Handshake_Config,
 	allocator: mem.Allocator,
@@ -267,7 +268,8 @@ server_handshake_fail :: proc(owner: ^Server_Handshake, error: Server_Handshake_
 
 // Input borrows end on return. Only consumed bytes have transferred; resubmit
 // the untouched suffix. Finished input must contain Handshake-level bytes only.
-server_handshake_feed :: proc(
+@(private)
+engine_server_handshake_feed :: proc(
 	owner: ^Server_Handshake,
 	level: Server_Handshake_Level,
 	input: []u8,
@@ -406,7 +408,8 @@ server_handshake_feed :: proc(
 	return consumed, .Need_Event_Drain, .None
 }
 
-server_handshake_peek :: proc(owner: ^Server_Handshake) -> (Server_Handshake_Event, Server_Handshake_Error) {
+@(private)
+engine_server_handshake_peek :: proc(owner: ^Server_Handshake) -> (Server_Handshake_Event, Server_Handshake_Error) {
 	if !server_handshake_valid(owner) {
 		return {}, .Invalid_Owner
 	}
@@ -419,7 +422,8 @@ server_handshake_peek :: proc(owner: ^Server_Handshake) -> (Server_Handshake_Eve
 	return owner._event, .None
 }
 
-server_handshake_accept :: proc(owner: ^Server_Handshake, id: u64) -> Server_Handshake_Error {
+@(private)
+engine_server_handshake_accept :: proc(owner: ^Server_Handshake, id: u64) -> Server_Handshake_Error {
 	if !server_handshake_valid(owner) {
 		return .Invalid_Owner
 	}
@@ -459,7 +463,8 @@ server_handshake_accept :: proc(owner: ^Server_Handshake, id: u64) -> Server_Han
 }
 
 // No alert callback or network close: the transport owns those decisions.
-server_handshake_abort :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
+@(private)
+engine_server_handshake_abort :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 	if !server_handshake_valid(owner) {
 		return .Invalid_Owner
 	}
@@ -474,7 +479,8 @@ server_handshake_abort :: proc(owner: ^Server_Handshake) -> Server_Handshake_Err
 	return .None
 }
 
-server_handshake_destroy :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
+@(private)
+engine_server_handshake_destroy :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 	if !server_handshake_valid(owner) {
 		return .Invalid_Owner
 	}
@@ -487,7 +493,8 @@ server_handshake_destroy :: proc(owner: ^Server_Handshake) -> Server_Handshake_E
 	return .None
 }
 
-server_handshake_stats :: proc(owner: ^Server_Handshake) -> (Server_Handshake_Stats, Server_Handshake_Error) {
+@(private)
+engine_server_handshake_stats :: proc(owner: ^Server_Handshake) -> (Server_Handshake_Stats, Server_Handshake_Error) {
 	if !server_handshake_valid(owner) {
 		return {}, .Invalid_Owner
 	}

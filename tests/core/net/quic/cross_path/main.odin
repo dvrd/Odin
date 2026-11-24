@@ -11,7 +11,7 @@ import http3 "shared:http/v3"
 main :: proc() {
 	assert(len(os.args) == 4)
 	roots: tls.Root_Pool
-	assert(tls.root_pool_load_file(&roots, fmt.tprintf("%s/root.pem", os.args[1])).kind == .None)
+	assert(tls.root_pool_load_file(&roots, fmt.tprintf("%s/root.pem", os.args[1])) == nil)
 	defer tls.root_pool_destroy(&roots)
 	original, oe := net.parse_endpoint(os.args[2])
 	assert(oe)

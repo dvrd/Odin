@@ -125,7 +125,7 @@ handshake_until_internal :: proc(conn: ^Conn, deadline: time.Time) -> Handshake_
 	if error := handshake_until_check(conn, deadline); error.kind != .None {return error}
 	flight, flight_error := handshake_server_flight_read(conn, flight_storage)
 	if flight_error.kind != .None do return flight_error
-	if verify_error := handshake_server_flight_verify(conn, flight); verify_error.kind != .None {
+	if verify_error := engine_handshake_server_flight_verify(conn, flight); verify_error.kind != .None {
 		return verify_error
 	}
 
@@ -253,7 +253,8 @@ handshake_server_flight_read :: proc(
 // Authenticates the complete server flight against the handshake secrets of
 // conn. On success the transcript through server Finished is retained for the
 // client's flight and for the application secrets.
-handshake_server_flight_verify :: proc(conn: ^Conn, flight: []u8) -> Handshake_Error {
+@(private)
+engine_handshake_server_flight_verify :: proc(conn: ^Conn, flight: []u8) -> Handshake_Error {
 	transcript: Handshake_Transcript
 	handshake_hello_transcript(conn, &transcript)
 
@@ -357,7 +358,7 @@ handshake_flight_certificates_verify :: proc(
 		return handshake_fail(conn, certificate_message_err)
 	}
 
-	certs, auth_err := server_certificates_parse(certificate)
+	certs, auth_err := engine_server_certificates_parse(certificate)
 	if auth_err.kind != .None {
 		return handshake_fail(conn, {kind = .Authentication_Failed, authentication = auth_err})
 	}
@@ -369,7 +370,7 @@ handshake_flight_certificates_verify :: proc(
 		if conn.upstream_client {
 			err = verify_server_chain(&certs, conn.config.server_name, conn.config.root_cas, time.now())
 		} else {
-			err = verify_server_certificates(&certs, conn.config.server_name, conn.config.root_cas, time.now())
+			err = engine_verify_server_certificates(&certs, conn.config.server_name, conn.config.root_cas, time.now())
 		}
 		if err.kind != .None {
 			return handshake_fail(conn, {kind = .Authentication_Failed, authentication = err})
@@ -472,7 +473,7 @@ handshake_client_finished_encode :: proc(
 	transcript_hash(&through_finished, conn.client_finished_hash[:])
 	conn.have_client_finished_hash = true
 
-	written, protection_err := record_seal(
+	written, protection_err := engine_record_seal(
 		&conn.handshake_send,
 		wire,
 		.Handshake,
@@ -504,7 +505,7 @@ handshake_client_finished_send :: proc(conn: ^Conn) -> Handshake_Error {
 	for conn.client_auth_offset < len(conn.client_auth_flight) {
 		at := conn.client_auth_offset
 		end := min(len(conn.client_auth_flight), at + MAX_PLAINTEXT_SIZE)
-		n, e := record_seal(&conn.handshake_send, wire[:], .Handshake, conn.client_auth_flight[at:end])
+		n, e := engine_record_seal(&conn.handshake_send, wire[:], .Handshake, conn.client_auth_flight[at:end])
 		if e != .None {
 			return handshake_fail(conn, {kind = .Finished_Write_Failed, protection = e})
 		}
@@ -603,7 +604,7 @@ handshake_alert_stage :: proc(conn: ^Conn, err: Handshake_Error) {
 
 	content := [2]u8{u8(alert_to_level(description)), u8(description)}
 	if conn.handshake_send.initialized && !plaintext {
-		size, seal_error := record_seal(&conn.handshake_send, conn.alert_wire[:], .Alert, content[:])
+		size, seal_error := engine_record_seal(&conn.handshake_send, conn.alert_wire[:], .Alert, content[:])
 		if seal_error == .None {
 			conn.alert_size = size
 		}
@@ -696,7 +697,8 @@ handshake_next_message :: proc(
 
 // Legacy no-ALPN validation keeps its exported signature and rejects unsolicited
 // protocol selections. The shared decoder also handles configured offers.
-encrypted_extensions_validate :: proc(message: []u8, server_name: string) -> Handshake_Error {
+@(private)
+engine_encrypted_extensions_validate :: proc(message: []u8, server_name: string) -> Handshake_Error {
 	_, _, error := encrypted_extensions_decode(message, server_name, nil, false)
 	return error
 }
@@ -796,7 +798,8 @@ Client_Hello_Send_Error :: struct {
 // First step of the handshake, not a completed TLS connection. A successful
 // call leaves the connection awaiting ServerHello. Errors are terminal and
 // cached: retrying must never send a second or partially repeated ClientHello.
-client_hello_prepare :: proc(conn: ^Conn) -> Client_Hello_Send_Error {
+@(private)
+engine_client_hello_prepare :: proc(conn: ^Conn) -> Client_Hello_Send_Error {
 	if conn == nil do return {kind = .Invalid_State}
 
 	if conn.phase == .Failed {
@@ -912,7 +915,7 @@ server_hello_storage_size :: proc(conn: ^Conn) -> int {
 
 @(private)
 client_hello_send :: proc(conn: ^Conn) -> Client_Hello_Send_Error {
-	if err := client_hello_prepare(conn); err.kind != .None do return err
+	if err := engine_client_hello_prepare(conn); err.kind != .None do return err
 	size := conn.client_hello_size
 
 	// Initial ClientHello may use legacy record version 0x0301. The inner
@@ -1883,7 +1886,7 @@ handshake_record_decrypt :: proc(
 	[]u8,
 	Handshake_Record_Read_Error,
 ) {
-	content_type, content, protection_err := record_open(
+	content_type, content, protection_err := engine_record_open(
 		&conn.handshake_receive,
 		dst,
 		wire[:RECORD_HEADER_SIZE + cast(int)header.length],
@@ -2029,7 +2032,7 @@ async_handshake_drive :: proc(conn: ^Async_Conn) {
 	if conn.tx.pending || conn.tx_done do return
 	p := &conn.protocol
 	if p.phase == .Handshake_Pending {
-		if err := client_hello_prepare(p); err.kind != .None {
+		if err := engine_client_hello_prepare(p); err.kind != .None {
 			async_handshake_fail(conn, {kind = .Client_Hello_Failed, client_hello = err}); return
 		}
 		async_hello_send(conn, false)
@@ -2041,7 +2044,7 @@ async_handshake_drive :: proc(conn: ^Async_Conn) {
 	}
 	if p.phase == .Server_Finished_Received {
 		if !conn.finishing {
-			if err := handshake_server_flight_verify(p, conn.flight[:conn.flight_used]); err.kind != .None {
+			if err := engine_handshake_server_flight_verify(p, conn.flight[:conn.flight_used]); err.kind != .None {
 				async_handshake_fail(conn, err)
 				return
 			}
@@ -2061,7 +2064,7 @@ async_handshake_drive :: proc(conn: ^Async_Conn) {
 			at := p.client_auth_offset
 			end := min(len(p.client_auth_flight), at + MAX_PLAINTEXT_SIZE)
 			prefix := handshake_ccs_encode(p, conn.tx_wire[:])
-			n, e := record_seal(&p.handshake_send, conn.tx_wire[prefix:], .Handshake, p.client_auth_flight[at:end])
+			n, e := engine_record_seal(&p.handshake_send, conn.tx_wire[prefix:], .Handshake, p.client_auth_flight[at:end])
 			if e != .None {
 				async_handshake_fail(conn, {kind = .Finished_Write_Failed, protection = e})
 				return

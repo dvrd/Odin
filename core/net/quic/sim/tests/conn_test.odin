@@ -190,7 +190,7 @@ build_flight :: proc(t: ^testing.T) -> ^Flight {
 	f.sh_n = len(sh)
 	hs, he := tls.quic_handshake_secrets(f.shared, f.ch[:f.ch_n], f.sh[:f.sh_n], f.params[:])
 	defer tls.quic_handshake_keys_clear(&hs)
-	testing.expect_value(t, he.kind, .None)
+	testing.expect_value(t, he, nil)
 	ee_storage: [64]u8
 	groups := [?]u8{0x00, 0x0a, 0x00, 0x02, 0x00, 0x1d}
 	ee := flight_extensions(ee_storage[:], f.params[:], groups[:])
@@ -210,7 +210,7 @@ build_flight :: proc(t: ^testing.T) -> ^Flight {
 	at += copy(f.flight[at:], cv)
 	at += copy(f.flight[at:], server_finished[:])
 	f.flight_n = at
-	if tls.root_pool_parse(&f.pool, #load("../../../../../tests/core/crypto/tls/testdata/root.pem")).kind != .None {
+	if tls.root_pool_parse(&f.pool, #load("../../../../../tests/core/crypto/tls/testdata/root.pem")) != nil {
 		testing.expect(t, false)
 		return f
 	}

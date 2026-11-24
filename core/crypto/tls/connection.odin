@@ -280,7 +280,7 @@ client_trust :: proc(
 		if allocation_error != nil || allocated == nil {
 			return {}, nil, {}, .Missing_Trust_Roots
 		}
-		loaded := root_pool_load_system(allocated)
+		loaded := engine_root_pool_load_system(allocated)
 		if loaded.kind != .None || allocated.count == 0 {
 			root_pool_destroy(allocated)
 			free(allocated, roots_allocator)
@@ -538,7 +538,8 @@ Async_Send_Kind :: enum {
 
 // Wraps without I/O. Success transfers transport ownership; failure leaves it
 // with the caller. Roots and allocator are explicit, as in the blocking client.
-async_client :: proc(
+@(private)
+engine_async_client :: proc(
 	conn: ^Async_Conn,
 	underlying: net.Async_Connection,
 	executor: net.Async_Executor,
@@ -584,7 +585,8 @@ async_client :: proc(
 
 // The handshake occupies its own operation. Read/write submissions are rejected
 // until it succeeds. Cancellation is terminal for a partially exchanged handshake.
-async_handshake :: proc(
+@(private)
+engine_async_handshake :: proc(
 	conn: ^Async_Conn,
 	op: ^Async_Handshake_Operation,
 	deadline := time.Time{},
@@ -604,7 +606,8 @@ async_handshake :: proc(
 	return {}
 }
 
-async_cancel_handshake :: proc(conn: ^Async_Conn) -> net.Connection_Error {
+@(private)
+engine_async_cancel_handshake :: proc(conn: ^Async_Conn) -> net.Connection_Error {
 	if conn == nil || !conn.initialized do return {kind = .Invalid_Connection}
 	if conn.handshake_op == nil || conn.protocol.phase == .Established do return {}
 	async_terminal(conn, {kind = .Cancelled}, {})
@@ -618,7 +621,8 @@ async_connection :: proc(conn: ^Async_Conn) -> net.Async_Connection {
 	return {data = conn, submit = async_submit, cancel = async_cancel}
 }
 
-async_failure :: proc(conn: ^Async_Conn) -> IO_Error {
+@(private)
+engine_async_failure :: proc(conn: ^Async_Conn) -> IO_Error {
 	if conn == nil do return {kind = .Invalid_State}
 	return conn.io_error
 }
@@ -776,7 +780,7 @@ async_shutdown_drive :: proc(conn: ^Async_Conn) {
 	async_emit(conn, .Read, error)
 	async_emit(conn, .Write, error)
 	if conn.closing && conn.notify_allowed && !conn.notify_sent && conn.failure.kind == .None {
-		size, seal_error := record_seal(
+		size, seal_error := engine_record_seal(
 			&conn.protocol.application.send,
 			conn.tx_wire[:],
 			.Alert,

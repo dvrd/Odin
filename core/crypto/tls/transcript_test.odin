@@ -121,12 +121,12 @@ transcript_rfc8448_secrets_and_finished :: proc(t: ^testing.T) {
 	transcript_update(&tr, flight[:len(flight) - 36])
 	testing.expect_value(
 		t,
-		finished_verify(flight[len(flight) - 36:], hs.server_traffic_secret, transcript_snapshot(&tr)),
+		engine_finished_verify(flight[len(flight) - 36:], hs.server_traffic_secret, transcript_snapshot(&tr)),
 		.None,
 	)
 	testing.expect_value(
 		t,
-		finished_verify(flight[len(flight) - 36:], hs.client_traffic_secret, transcript_snapshot(&tr)),
+		engine_finished_verify(flight[len(flight) - 36:], hs.client_traffic_secret, transcript_snapshot(&tr)),
 		.Verification_Failed,
 	)
 	testing.expect_value(

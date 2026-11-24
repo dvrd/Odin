@@ -25,7 +25,7 @@ authentication_fixture_certificates :: proc(storage: []u8) -> tls.Server_Certifi
 	copy(message[11:], der)
 	message[size - 2], message[size - 1] = 0, 0 // No CertificateEntry extensions.
 	certificates, parse_error := tls.server_certificates_parse(message)
-	assert(parse_error.kind == .None)
+	assert(parse_error == nil)
 	return certificates
 }
 
@@ -41,27 +41,24 @@ server_certificate_authentication_rejects_wrong_identity_trust_and_time :: proc(
 	pool := new(tls.Root_Pool)
 	defer free(pool)
 	defer tls.root_pool_destroy(pool)
-	assert(tls.root_pool_parse(pool, #load("testdata/root.pem")).kind == .None)
+	assert(tls.root_pool_parse(pool, #load("testdata/root.pem")) == nil)
 	roots := pool.roots[:pool.count]
 	now := time.unix(1893456000, 0) // 2030-01-01, inside the fixture validity period.
 	valid := tls.verify_server_certificates(&certificates, "localhost", roots, now)
-	testing.expect_value(t, valid.kind, .None)
+	testing.expect_value(t, valid, nil)
 
 	wrong_name := tls.verify_server_certificates(&certificates, "wrong.example", roots, now)
-	testing.expect_value(t, wrong_name.kind, .Certificate_Chain_Invalid)
-	testing.expect_value(t, wrong_name.x509, .Hostname_Mismatch)
+	testing.expect_value(t, wrong_name, tls.Error(tls.Protocol_Error.Bad_Certificate))
 
 	other_root, parse_error := x509.parse(#load("../x509/testdata/chain_ed_root.der"))
 	assert(parse_error == .None)
 	defer x509.destroy(&other_root)
 	wrong_roots := [?]^x509.Certificate{&other_root}
 	wrong_trust := tls.verify_server_certificates(&certificates, "localhost", wrong_roots[:], now)
-	testing.expect_value(t, wrong_trust.kind, .Certificate_Chain_Invalid)
-	testing.expect_value(t, wrong_trust.x509, .Unknown_Authority)
+	testing.expect_value(t, wrong_trust, tls.Error(tls.Protocol_Error.Unknown_Ca))
 
 	expired := tls.verify_server_certificates(&certificates, "localhost", roots, time.unix(2240611200, 0)) // 2041-01-01.
-	testing.expect_value(t, expired.kind, .Certificate_Chain_Invalid)
-	testing.expect_value(t, expired.x509, .Expired)
+	testing.expect_value(t, expired, tls.Error(tls.Protocol_Error.Certificate_Expired))
 }
 
 @(test)
@@ -88,15 +85,15 @@ server_certificate_verify_binds_signature_and_transcript :: proc(t: ^testing.T) 
 	copy(message[:8], []u8{15, 0, 0, 68, 0x08, 0x07, 0, 64})
 	ed25519.sign(&key, signed[:], message[8:])
 	valid := tls.verify_server_certificate_signature(&certificates, message[:], transcript)
-	testing.expect_value(t, valid.kind, .None)
+	testing.expect_value(t, valid, nil)
 
 	message[8] ~= 1
 	tampered_signature := tls.verify_server_certificate_signature(&certificates, message[:], transcript)
-	testing.expect_value(t, tampered_signature.kind, .Invalid_Signature)
+	testing.expect_value(t, tampered_signature, tls.Error(tls.Protocol_Error.Decrypt_Error))
 	message[8] ~= 1
 	transcript[0] ~= 1
 	tampered_transcript := tls.verify_server_certificate_signature(&certificates, message[:], transcript)
-	testing.expect_value(t, tampered_transcript.kind, .Invalid_Signature)
+	testing.expect_value(t, tampered_transcript, tls.Error(tls.Protocol_Error.Decrypt_Error))
 }
 
 @(test)
@@ -108,14 +105,14 @@ finished_rejects_modified_mac_transcript_and_traffic_secret :: proc(t: ^testing.
 	size, encode_error := tls.finished_encode(message[:], secret, transcript)
 	testing.expect_value(t, encode_error, .None)
 	testing.expect_value(t, size, len(message))
-	testing.expect_value(t, tls.finished_verify(message[:], secret, transcript), .None)
+	testing.expect_value(t, tls.finished_verify(message[:], secret, transcript), nil)
 
 	message[4] ~= 1
-	testing.expect_value(t, tls.finished_verify(message[:], secret, transcript), .Verification_Failed)
+	testing.expect_value(t, tls.finished_verify(message[:], secret, transcript), tls.Error(tls.Protocol_Error.Decrypt_Error))
 	message[4] ~= 1
 	transcript[0] ~= 1
-	testing.expect_value(t, tls.finished_verify(message[:], secret, transcript), .Verification_Failed)
+	testing.expect_value(t, tls.finished_verify(message[:], secret, transcript), tls.Error(tls.Protocol_Error.Decrypt_Error))
 	transcript[0] ~= 1
 	secret[0] ~= 1
-	testing.expect_value(t, tls.finished_verify(message[:], secret, transcript), .Verification_Failed)
+	testing.expect_value(t, tls.finished_verify(message[:], secret, transcript), tls.Error(tls.Protocol_Error.Decrypt_Error))
 }

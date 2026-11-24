@@ -93,7 +93,8 @@ server_name_valid :: proc(server_name: string) -> bool {
 // RFC 8446 sections 4.1.2 and 4.2. Pure encoding: randomness and key generation
 // belong to the connection. This initial profile has no resumption or
 // middlebox compatibility session ID. dst must not alias the hello fields.
-client_hello_encode :: proc(
+@(private)
+engine_client_hello_encode :: proc(
 	dst: []u8,
 	hello: Client_Hello,
 ) -> (
@@ -548,7 +549,8 @@ Server_Hello_Error :: enum {
 
 // RFC 8446 sections 4.1.3, 4.1.4, 4.2.1, and 4.2.8. Validates against the
 // fixed offer in client_hello_encode. This does not authenticate the peer.
-server_hello_decode :: proc(wire: []u8, allow_psk: bool = false) -> (hello: Server_Hello, err: Server_Hello_Error) {
+@(private)
+engine_server_hello_decode :: proc(wire: []u8, allow_psk: bool = false) -> (hello: Server_Hello, err: Server_Hello_Error) {
 	return server_hello_decode_offered(wire, COMPATIBLE_CIPHER_SUITES, COMPATIBLE_GROUPS, allow_psk)
 }
 

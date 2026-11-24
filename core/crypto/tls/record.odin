@@ -329,7 +329,8 @@ record_protection_limit :: proc(state: ^Record_Protection) -> u64 {
 // Produces a complete TLSCiphertext record without optional zero padding.
 // dst and body must not overlap. Invalid local arguments consume no nonce and
 // can be corrected and retried. The caller must send the returned record once.
-record_seal :: proc(
+@(private)
+engine_record_seal :: proc(
 	state: ^Record_Protection,
 	dst: []u8,
 	content_type: TLS_Content_Type,
@@ -386,7 +387,8 @@ record_seal :: proc(
 // includes content type and padding. Returned content borrows dst. dst and
 // wire must not overlap. Destination/alias errors are retryable without nonce
 // consumption; malformed records and authentication failures poison the state.
-record_open :: proc(
+@(private)
+engine_record_open :: proc(
 	state: ^Record_Protection,
 	dst: []u8,
 	wire: []u8,

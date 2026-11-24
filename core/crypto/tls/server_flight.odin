@@ -61,7 +61,8 @@ server_flight_secret_size :: proc(f: ^Server_Flight) -> int {
 // Explicit admission, after accepting tentative Peer_Parameters. The host keeps
 // Store alive until destroy/abort. Pins one generation even across rotation/close.
 // Parameters are explicitly selected, or default to optional TCP/no ALPN.
-server_handshake_start_flight :: proc(
+@(private)
+engine_server_handshake_start_flight :: proc(
 	owner: ^Server_Handshake,
 	store: ^credential_store.Store,
 	now: time.Time,

@@ -92,7 +92,7 @@ resumption_psk_dhe_binder_omits_early_data :: proc(t: ^testing.T) {
 	defer free(conn)
 	conn.phase = .Handshake_Pending
 	conn.config.server_name = "example.com"
-	prepare := client_hello_prepare(conn)
+	prepare := engine_client_hello_prepare(conn)
 	testing.expect_value(t, prepare.kind, .None)
 	testing.expect(t, !conn.psk_offered)
 	plain := conn.client_hello_size
@@ -104,7 +104,7 @@ resumption_psk_dhe_binder_omits_early_data :: proc(t: ^testing.T) {
 	conn.config.session = &session
 	conn.config.remember_tickets = true
 	conn.phase = .Handshake_Pending
-	prepare = client_hello_prepare(conn)
+	prepare = engine_client_hello_prepare(conn)
 	testing.expect_value(t, prepare.kind, .None)
 	testing.expect(t, conn.psk_offered)
 	hello := conn.client_hello[:conn.client_hello_size]
@@ -123,7 +123,7 @@ resumption_psk_dhe_binder_omits_early_data :: proc(t: ^testing.T) {
 	defer quic_direction_keys_clear(&early)
 	testing.expect_value(t, early_err.kind, .Early_Data_Disabled)
 	testing.expect(t, early.secret == [32]u8{} && early.key == [16]u8{} && early.iv == [12]u8{} && early.hp == [16]u8{})
-	refused, refused_err := quic_early_packet_keys(session.psk)
+	refused, refused_err := engine_quic_early_packet_keys(session.psk)
 	defer quic_direction_keys_clear(&refused)
 	testing.expect_value(t, refused_err.kind, .Early_Data_Disabled)
 
@@ -148,7 +148,7 @@ resumption_retry_rebinds_without_early_data :: proc(t: ^testing.T) {
 	session := resumption_test_session("example.com")
 	defer session_clear(&session)
 	conn.config.session = &session
-	prepare := client_hello_prepare(conn)
+	prepare := engine_client_hello_prepare(conn)
 	testing.expect_value(t, prepare.kind, .None)
 	ch1 := conn.client_hello[:conn.client_hello_size]
 	cookie := []u8{0xaa, 0xbb, 0xcc}
@@ -191,13 +191,13 @@ resumption_schedule_uses_psk_and_not_early_keys :: proc(t: ^testing.T) {
 
 	storage: [128]u8
 	selected := resumption_test_server_hello(storage[:], true)
-	hello, err := server_hello_decode(selected)
+	hello, err := engine_server_hello_decode(selected)
 	testing.expect_value(t, err, .Unsupported_Extension)
-	hello, err = server_hello_decode(selected, true)
+	hello, err = engine_server_hello_decode(selected, true)
 	testing.expect_value(t, err, .None)
 	testing.expect(t, hello.psk_selected)
 	plain := resumption_test_server_hello(storage[:], false)
-	hello, err = server_hello_decode(plain, true)
+	hello, err = engine_server_hello_decode(plain, true)
 	testing.expect_value(t, err, .None)
 	testing.expect(t, !hello.psk_selected)
 }
@@ -211,7 +211,7 @@ resumption_flight_keeps_certificate_checks :: proc(t: ^testing.T) {
 	session := resumption_test_session("example.com")
 	defer session_clear(&session)
 	conn.config.session = &session
-	prepare := client_hello_prepare(conn)
+	prepare := engine_client_hello_prepare(conn)
 	testing.expect_value(t, prepare.kind, .None)
 	sh_storage: [128]u8
 	sh := resumption_test_server_hello(sh_storage[:], true)
@@ -242,14 +242,14 @@ resumption_flight_keeps_certificate_checks :: proc(t: ^testing.T) {
 	copy(flight[len(ee):], finished[:])
 
 	conn.psk_selected = false
-	full := handshake_server_flight_verify(conn, flight[:])
+	full := engine_handshake_server_flight_verify(conn, flight[:])
 	testing.expect_value(t, full.kind, .Unexpected_Handshake_Message)
 
 	conn.phase = .Handshake_Pending
 	resumption_test_install(conn, shared, session.psk[:])
 	conn.psk_selected = true
 	early_ee := []u8{8, 0, 0, 6, 0, 4, 0x00, 0x2a, 0x00, 0x00}
-	early := handshake_server_flight_verify(conn, early_ee)
+	early := engine_handshake_server_flight_verify(conn, early_ee)
 	testing.expect_value(t, early.kind, .Early_Data_Disabled)
 
 	conn.phase = .Handshake_Pending
@@ -258,14 +258,14 @@ resumption_flight_keeps_certificate_checks :: proc(t: ^testing.T) {
 	cert_flight: [11]u8
 	copy(cert_flight[:], ee)
 	cert_flight[6] = 11
-	certs := handshake_server_flight_verify(conn, cert_flight[:])
+	certs := engine_handshake_server_flight_verify(conn, cert_flight[:])
 	testing.expect(t, certs.kind != .None)
 	testing.expect(t, certs.kind != .Early_Data_Disabled)
 
 	conn.phase = .Handshake_Pending
 	resumption_test_install(conn, shared, session.psk[:])
 	conn.psk_selected = true
-	resumed := handshake_server_flight_verify(conn, flight[:])
+	resumed := engine_handshake_server_flight_verify(conn, flight[:])
 	testing.expect_value(t, resumed.kind, .None)
 	keys, kerr := session_early_keys(&session)
 	defer quic_direction_keys_clear(&keys)
@@ -485,7 +485,7 @@ resumption_cache_resumes_isolates_and_expires :: proc(t: ^testing.T) {
 	resume := resumption_test_pending("example.com", &cache, nil)
 	defer free(resume)
 	defer handshake_keys_clear(resume)
-	testing.expect_value(t, client_hello_prepare(resume).kind, .None)
+	testing.expect_value(t, engine_client_hello_prepare(resume).kind, .None)
 	testing.expect(t, resume.psk_offered && resume.offered_session == found)
 	hello := resume.client_hello[:resume.client_hello_size]
 	testing.expect(t, resumption_extension_offset(hello, EXTENSION_EARLY_DATA) < 0)
@@ -493,41 +493,41 @@ resumption_cache_resumes_isolates_and_expires :: proc(t: ^testing.T) {
 	refused, refused_err := session_early_keys(found)
 	defer quic_direction_keys_clear(&refused)
 	testing.expect_value(t, refused_err.kind, .Early_Data_Disabled)
-	bare, bare_err := quic_early_packet_keys(found.psk)
+	bare, bare_err := engine_quic_early_packet_keys(found.psk)
 	defer quic_direction_keys_clear(&bare)
 	testing.expect_value(t, bare_err.kind, .Early_Data_Disabled)
 
 	flight_buf: [80]u8
 	flight := resumption_test_arm_flight(resume, flight_buf[:], found.psk[:], false)
 	testing.expect(t, flight != nil)
-	resumed := handshake_server_flight_verify(resume, flight)
+	resumed := engine_handshake_server_flight_verify(resume, flight)
 	testing.expect_value(t, resumed.kind, .None)
 	testing.expect(t, !resume.early_offered && !resume.early_accepted)
 
 	other := resumption_test_pending("other.example", &cache, nil)
 	defer free(other)
-	testing.expect_value(t, client_hello_prepare(other).kind, .None)
+	testing.expect_value(t, engine_client_hello_prepare(other).kind, .None)
 	testing.expect(t, !other.psk_offered && other.offered_session == nil)
 
 	mismatch := resumption_test_pending("example.com", &cache, nil)
 	defer free(mismatch)
 	defer handshake_keys_clear(mismatch)
-	testing.expect_value(t, client_hello_prepare(mismatch).kind, .None)
+	testing.expect_value(t, engine_client_hello_prepare(mismatch).kind, .None)
 	bad_flight := resumption_test_arm_flight(mismatch, flight_buf[:], found.psk[:], false)
 	testing.expect(t, bad_flight != nil)
 	bad_flight[len(bad_flight) - 1] ~= 0x01
-	mismatch_err := handshake_server_flight_verify(mismatch, bad_flight)
+	mismatch_err := engine_handshake_server_flight_verify(mismatch, bad_flight)
 	testing.expect_value(t, mismatch_err.kind, .Finished_Failed)
 
 	declined := resumption_test_pending("example.com", &cache, nil)
 	defer free(declined)
 	defer handshake_keys_clear(declined)
-	testing.expect_value(t, client_hello_prepare(declined).kind, .None)
+	testing.expect_value(t, engine_client_hello_prepare(declined).kind, .None)
 	testing.expect(t, declined.psk_offered)
 	declined_flight := resumption_test_arm_flight(declined, flight_buf[:], found.psk[:], false)
 	testing.expect(t, declined_flight != nil)
 	declined.psk_selected = false
-	declined_err := handshake_server_flight_verify(declined, declined_flight)
+	declined_err := engine_handshake_server_flight_verify(declined, declined_flight)
 	testing.expect_value(t, declined_err.kind, .Unexpected_Handshake_Message)
 
 	expired: Session
@@ -539,11 +539,11 @@ resumption_cache_resumes_isolates_and_expires :: proc(t: ^testing.T) {
 	exp := resumption_test_pending("example.com", nil, &expired)
 	defer free(exp)
 	defer handshake_keys_clear(exp)
-	testing.expect_value(t, client_hello_prepare(exp).kind, .None)
+	testing.expect_value(t, engine_client_hello_prepare(exp).kind, .None)
 	testing.expect(t, !exp.psk_offered)
 	exp_flight := resumption_test_arm_flight(exp, flight_buf[:], expired.psk[:], false)
 	testing.expect(t, exp_flight != nil)
-	exp_err := handshake_server_flight_verify(exp, exp_flight)
+	exp_err := engine_handshake_server_flight_verify(exp, exp_flight)
 	testing.expect_value(t, exp_err.kind, .Unexpected_Handshake_Message)
 
 	later := time.time_add(time.now(), 2 * 3600 * time.Second)
@@ -572,11 +572,11 @@ resumption_cache_resumes_isolates_and_expires :: proc(t: ^testing.T) {
 	testing.expect(t, kept.ticket[0] != prior.ticket[0])
 	evicted := resumption_test_pending(names[0], &bound, nil)
 	defer free(evicted)
-	testing.expect_value(t, client_hello_prepare(evicted).kind, .None)
+	testing.expect_value(t, engine_client_hello_prepare(evicted).kind, .None)
 	testing.expect(t, !evicted.psk_offered)
 	survivor := resumption_test_pending(names[SESSION_CACHE_CAP], &bound, nil)
 	defer free(survivor)
-	testing.expect_value(t, client_hello_prepare(survivor).kind, .None)
+	testing.expect_value(t, engine_client_hello_prepare(survivor).kind, .None)
 	testing.expect(t, survivor.psk_offered && survivor.offered_session == kept)
 }
 
@@ -599,14 +599,14 @@ resumption_rejected_early_data_does_not_apply_twice :: proc(t: ^testing.T) {
 
 	plain := resumption_test_pending("example.com", nil, &session)
 	defer free(plain)
-	testing.expect_value(t, client_hello_prepare(plain).kind, .None)
+	testing.expect_value(t, engine_client_hello_prepare(plain).kind, .None)
 	testing.expect(t, plain.psk_offered && !plain.early_offered)
 	plain_hello := plain.client_hello[:plain.client_hello_size]
 	testing.expect(t, resumption_extension_offset(plain_hello, EXTENSION_EARLY_DATA) < 0)
 	disabled, disabled_err := session_early_keys(&session, nil, plain_hello)
 	defer quic_direction_keys_clear(&disabled)
 	testing.expect_value(t, disabled_err.kind, .Early_Data_Disabled)
-	packet_disabled, packet_err := quic_early_packet_keys(session.psk, nil, plain_hello)
+	packet_disabled, packet_err := engine_quic_early_packet_keys(session.psk, nil, plain_hello)
 	defer quic_direction_keys_clear(&packet_disabled)
 	testing.expect_value(t, packet_err.kind, .Early_Data_Disabled)
 
@@ -614,7 +614,7 @@ resumption_rejected_early_data_does_not_apply_twice :: proc(t: ^testing.T) {
 	defer free(rejected)
 	defer handshake_keys_clear(rejected)
 	rejected.config.early_data = &policy
-	testing.expect_value(t, client_hello_prepare(rejected).kind, .None)
+	testing.expect_value(t, engine_client_hello_prepare(rejected).kind, .None)
 	testing.expect(t, rejected.early_offered)
 	rejected_hello := rejected.client_hello[:rejected.client_hello_size]
 	testing.expect(t, resumption_extension_offset(rejected_hello, EXTENSION_EARLY_DATA) > 0)
@@ -634,7 +634,7 @@ resumption_rejected_early_data_does_not_apply_twice :: proc(t: ^testing.T) {
 	flight_buf: [80]u8
 	flight := resumption_test_arm_flight(rejected, flight_buf[:], session.psk[:], false)
 	testing.expect(t, flight != nil)
-	rejected_err := handshake_server_flight_verify(rejected, flight)
+	rejected_err := engine_handshake_server_flight_verify(rejected, flight)
 	testing.expect_value(t, rejected_err.kind, .None)
 	testing.expect(t, rejected.early_rejected && !rejected.early_accepted)
 	effects := 0
@@ -650,10 +650,10 @@ resumption_rejected_early_data_does_not_apply_twice :: proc(t: ^testing.T) {
 	defer free(mutated)
 	defer handshake_keys_clear(mutated)
 	mutated.config.early_data = &policy
-	testing.expect_value(t, client_hello_prepare(mutated).kind, .None)
+	testing.expect_value(t, engine_client_hello_prepare(mutated).kind, .None)
 	mutated_flight := resumption_test_arm_flight(mutated, flight_buf[:], session.psk[:], false)
 	testing.expect(t, mutated_flight != nil)
-	mutated_err := handshake_server_flight_verify(mutated, mutated_flight)
+	mutated_err := engine_handshake_server_flight_verify(mutated, mutated_flight)
 	testing.expect_value(t, mutated_err.kind, .None)
 	posts := 0
 	testing.expect_value(t, connection_early_data_apply(mutated, "POST", resumption_test_count, &posts), .Deferred)
@@ -667,14 +667,14 @@ resumption_rejected_early_data_does_not_apply_twice :: proc(t: ^testing.T) {
 	defer free(accepted)
 	defer handshake_keys_clear(accepted)
 	accepted.config.early_data = &policy
-	testing.expect_value(t, client_hello_prepare(accepted).kind, .None)
+	testing.expect_value(t, engine_client_hello_prepare(accepted).kind, .None)
 	second, second_err := session_early_keys(&session, &policy, accepted.client_hello[:accepted.client_hello_size])
 	defer quic_direction_keys_clear(&second)
 	testing.expect_value(t, second_err.kind, .None)
 	testing.expect(t, second.key != early_keys.key)
 	accepted_flight := resumption_test_arm_flight(accepted, flight_buf[:], session.psk[:], true)
 	testing.expect(t, accepted_flight != nil)
-	accepted_err := handshake_server_flight_verify(accepted, accepted_flight)
+	accepted_err := engine_handshake_server_flight_verify(accepted, accepted_flight)
 	testing.expect_value(t, accepted_err.kind, .None)
 	testing.expect(t, accepted.early_accepted && !accepted.early_rejected)
 	once := 0
@@ -687,7 +687,7 @@ resumption_rejected_early_data_does_not_apply_twice :: proc(t: ^testing.T) {
 	retried := resumption_test_pending("example.com", nil, &session)
 	defer free(retried)
 	retried.config.early_data = &policy
-	testing.expect_value(t, client_hello_prepare(retried).kind, .None)
+	testing.expect_value(t, engine_client_hello_prepare(retried).kind, .None)
 	testing.expect(t, retried.early_offered)
 	cookie := []u8{0x11, 0x22}
 	hrr := []u8{2, 0, 0, 4, 9, 8, 7, 6}

@@ -55,9 +55,9 @@ alpn_bind_schedule :: proc(data: rawptr, callback: proc(rawptr), user_data: rawp
 
 @(test)
 alpn_transport_tcp_and_quic_offers_do_not_share_a_stack :: proc(t: ^testing.T) {
-	testing.expect_value(t, alpn_transport_offers(.TCP, nil), .None)
+	testing.expect_value(t, engine_alpn_transport_offers(.TCP, nil), .None)
 	for protocols in ([?][]string{{"http/1.1"}, {"h2"}, {"http/1.1", "h2"}, {"h2", "http/1.1"}}) {
-		testing.expect_value(t, alpn_transport_offers(.TCP, protocols), .None)
+		testing.expect_value(t, engine_alpn_transport_offers(.TCP, protocols), .None)
 	}
 	for protocols in ([?][]string {
 			{"h3"},
@@ -68,17 +68,17 @@ alpn_transport_tcp_and_quic_offers_do_not_share_a_stack :: proc(t: ^testing.T) {
 			{"H3"},
 			{"private/client"},
 		}) {
-		testing.expect_value(t, alpn_transport_offers(.TCP, protocols), .Invalid_ALPN)
+		testing.expect_value(t, engine_alpn_transport_offers(.TCP, protocols), .Invalid_ALPN)
 	}
 	h3 := [1]string{ALPN_H3}
-	testing.expect_value(t, alpn_transport_offers(.QUIC, h3[:]), .None)
-	testing.expect_value(t, alpn_transport_offers(.QUIC, nil), .Invalid_ALPN)
+	testing.expect_value(t, engine_alpn_transport_offers(.QUIC, h3[:]), .None)
+	testing.expect_value(t, engine_alpn_transport_offers(.QUIC, nil), .Invalid_ALPN)
 	for protocols in ([?][]string{{"h2"}, {"http/1.1"}, {"h3", "h3"}, {"H3"}, {"h3", "http/1.1"}}) {
-		testing.expect_value(t, alpn_transport_offers(.QUIC, protocols), .Invalid_ALPN)
+		testing.expect_value(t, engine_alpn_transport_offers(.QUIC, protocols), .Invalid_ALPN)
 	}
 	// The codec stays opaque. Refusal is the TCP entry, not a replaced handshake.
 	wire: [MAX_CLIENT_HELLO_SIZE]u8
-	n, encode_error := client_hello_encode(wire[:], {server_name = "localhost", alpn_protocols = h3[:]})
+	n, encode_error := engine_client_hello_encode(wire[:], {server_name = "localhost", alpn_protocols = h3[:]})
 	testing.expect_value(t, encode_error, .None)
 	testing.expect(t, n > 0)
 
@@ -143,7 +143,7 @@ alpn_transport_tcp_and_quic_offers_do_not_share_a_stack :: proc(t: ^testing.T) {
 	executor := net.Async_Executor {
 		schedule = alpn_bind_schedule,
 	}
-	testing.expect_value(t, async_client(async_conn, underlying, executor, h3_config), .Invalid_ALPN)
+	testing.expect_value(t, engine_async_client(async_conn, underlying, executor, h3_config), .Invalid_ALPN)
 	testing.expect_value(t, probe.writes, 0)
 	testing.expect(t, !async_conn.initialized)
 }

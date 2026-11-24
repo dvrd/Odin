@@ -12,7 +12,7 @@ server_async_handshake_drive :: proc(s: ^Server_Async_Conn) {
 			server_async_fail(s, {kind = .Timeout}, {kind = .Handshake})
 			return
 		}
-		event, event_error := server_handshake_peek(&s._engine)
+		event, event_error := engine_server_handshake_peek(&s._engine)
 		if event_error != .None {
 			server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Handshake, engine = event_error})
 			return
@@ -28,7 +28,7 @@ server_async_handshake_drive :: proc(s: ^Server_Async_Conn) {
 				return
 			}
 			s._name_size = copy(s._name[:], event.peer.server_name)
-			e := server_handshake_select_parameters(&s._engine, event.id, s._config.parameters)
+			e := engine_server_handshake_select_parameters(&s._engine, event.id, s._config.parameters)
 			if e != .None {
 				server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Handshake, engine = e})
 				return
@@ -37,7 +37,7 @@ server_async_handshake_drive :: proc(s: ^Server_Async_Conn) {
 			if now == (time.Time{}) {
 				now = time.now()
 			}
-			e = server_handshake_start_flight(&s._engine, s._config.store, now)
+			e = engine_server_handshake_start_flight(&s._engine, s._config.store, now)
 			if e != .None {
 				server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Handshake, engine = e})
 				return
@@ -83,7 +83,7 @@ server_async_handshake_drive :: proc(s: ^Server_Async_Conn) {
 			// and the two pending/current application secrets survive here. The
 			// server write direction changes after its Finished, including alerts;
 			// application API readiness still requires authenticated Complete.
-			if e := server_handshake_accept(&s._engine, event.id); e != .None {
+			if e := engine_server_handshake_accept(&s._engine, event.id); e != .None {
 				server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Handshake, engine = e})
 				return
 			}
@@ -92,7 +92,7 @@ server_async_handshake_drive :: proc(s: ^Server_Async_Conn) {
 				server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Handshake, engine = .Invalid_State})
 				return
 			}
-			p, e := server_handshake_parameters(&s._engine)
+			p, e := engine_server_handshake_parameters(&s._engine)
 			if e != .None || !p.authenticated {
 				server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Handshake, engine = .Invalid_State})
 				return
@@ -100,12 +100,12 @@ server_async_handshake_drive :: proc(s: ^Server_Async_Conn) {
 			s._alpn_size = copy(s._alpn[:], p.alpn)
 			s._peer_identity = server_handshake_peer_identity(&s._engine)
 			s._resumed = server_handshake_resumed(&s._engine)
-			if server_handshake_accept(&s._engine, event.id) != .None {
+			if engine_server_handshake_accept(&s._engine, event.id) != .None {
 				server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Handshake, engine = .Invalid_Event})
 				return
 			}
 			server_async_application_install(s, .Read)
-			_ = server_handshake_destroy(&s._engine)
+			_ = engine_server_handshake_destroy(&s._engine)
 			s._phase = .Established
 			s._ccs_allowed = false
 			s._non_application_records = 0
@@ -159,7 +159,7 @@ server_async_handshake_drive :: proc(s: ^Server_Async_Conn) {
 				server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Record, record = .Unexpected_Content_Type})
 				return
 			}
-			n, _, e := server_handshake_feed(&s._engine, level, body)
+			n, _, e := engine_server_handshake_feed(&s._engine, level, body)
 			if e != .None || n != len(body) {
 				if e == .None {
 					e = .Malformed

@@ -57,7 +57,7 @@ zero_rtt_install_requires_policy :: proc(t: ^testing.T) {
 	conn.phase = .Handshake_Pending
 	conn.config.server_name = "example.com"
 	conn.config.session = &session
-	testing.expect_value(t, tls.client_hello_prepare(conn).kind, .None)
+	testing.expect_value(t, tls.client_hello_prepare(conn), nil)
 	testing.expect(t, conn.psk_offered && !conn.early_offered)
 	default_buf: [tls.MAX_CLIENT_HELLO_SIZE]u8
 	default_n := copy(default_buf[:], conn.client_hello[:conn.client_hello_size])
@@ -77,7 +77,7 @@ zero_rtt_install_requires_policy :: proc(t: ^testing.T) {
 
 	conn.config.early_data = &policy
 	conn.phase = .Handshake_Pending
-	testing.expect_value(t, tls.client_hello_prepare(conn).kind, .None)
+	testing.expect_value(t, tls.client_hello_prepare(conn), nil)
 	testing.expect(t, conn.early_offered)
 	early_hello := conn.client_hello[:conn.client_hello_size]
 	// Opt-in unset on the install call still refuses, even if the hello offered early data.

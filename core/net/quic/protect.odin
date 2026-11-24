@@ -41,7 +41,7 @@ packet_keys_clear :: proc(keys: ^Packet_Keys) {
 packet_keys_from_tls :: proc(dst: ^Packet_Keys, secret: [32]u8, level: tls.Quic_Secret_Level) -> Protection_Error {
 	keys, e := tls.quic_packet_keys_derive(secret, level)
 	defer tls.quic_direction_keys_clear(&keys)
-	if e.kind != .None || dst == nil {
+	if e != nil || dst == nil {
 		return .Invalid_Keys
 	}
 	return packet_keys_set_aes(dst, keys.key[:], keys.iv[:], keys.hp[:], keys.secret[:], level == .Application)
@@ -75,9 +75,9 @@ packet_keys_chacha :: proc(dst: ^Packet_Keys, secret: []u8) -> Protection_Error 
 	defer crypto.zero_explicit(&key, size_of(key))
 	defer crypto.zero_explicit(&hp, size_of(hp))
 	defer crypto.zero_explicit(&iv, size_of(iv))
-	if tls.hkdf_expand_label(secret, "quic key", nil, key[:]) != .None ||
-	   tls.hkdf_expand_label(secret, "quic iv", nil, iv[:]) != .None ||
-	   tls.hkdf_expand_label(secret, "quic hp", nil, hp[:]) != .None {
+	if tls.hkdf_expand_label(secret, "quic key", nil, key[:]) != nil ||
+	   tls.hkdf_expand_label(secret, "quic iv", nil, iv[:]) != nil ||
+	   tls.hkdf_expand_label(secret, "quic hp", nil, hp[:]) != nil {
 		return .Invalid_Keys
 	}
 	packet_keys_clear(dst)
@@ -137,11 +137,11 @@ packet_keys_next :: proc(keys: ^Packet_Keys, secret: ^[32]u8, key: ^[32]u8, iv: 
 	}
 	current := keys.secret
 	defer crypto.zero_explicit(&current, size_of(current))
-	if tls.hkdf_expand_label(current[:], "quic ku", nil, secret[:]) != .None {
+	if tls.hkdf_expand_label(current[:], "quic ku", nil, secret[:]) != nil {
 		return .Invalid_Keys
 	}
-	if tls.hkdf_expand_label(secret[:], "quic key", nil, key[:int(keys.key_len)]) != .None ||
-	   tls.hkdf_expand_label(secret[:], "quic iv", nil, iv[:]) != .None {
+	if tls.hkdf_expand_label(secret[:], "quic key", nil, key[:int(keys.key_len)]) != nil ||
+	   tls.hkdf_expand_label(secret[:], "quic iv", nil, iv[:]) != nil {
 		return .Invalid_Keys
 	}
 	return .None

@@ -240,7 +240,7 @@ tcp_test_init :: proc(
 	config.credential_time = time.from_nanoseconds(1790000000 * 1000000000)
 	testing.expect_value(
 		t,
-		server_async_server(
+		engine_server_async_server(
 			s,
 			{data = stream, submit = tcp_test_submit, cancel = tcp_test_cancel},
 			{data = stream, schedule = tcp_test_schedule},
@@ -276,7 +276,7 @@ tcp_test_plain :: proc(stream: ^TCP_Test_Stream, kind: TLS_Content_Type, body: [
 
 tcp_test_record :: proc(stream: ^TCP_Test_Stream, protection: ^Record_Protection, kind: TLS_Content_Type, body: []u8) {
 	wire: [RECORD_HEADER_SIZE + MAX_CIPHERTEXT_SIZE]u8
-	n, e := record_seal(protection, wire[:], kind, body)
+	n, e := engine_record_seal(protection, wire[:], kind, body)
 	assert(e == .None)
 	append(&stream.input, ..wire[:n])
 	tcp_test_wake(stream)
@@ -305,7 +305,7 @@ tcp_test_establish :: proc(
 		callback  = tcp_test_handshake,
 		user_data = &result,
 	}
-	testing.expect_value(t, server_async_handshake(s, &op).kind, .None)
+	testing.expect_value(t, engine_server_async_handshake(s, &op).kind, .None)
 	testing.expect_value(t, result.calls, 0)
 	tcp_test_run(stream)
 	testing.expect_value(t, result.calls, 0)
@@ -326,7 +326,7 @@ tcp_test_establish :: proc(
 	for at := size; at < len(stream.output); {
 		n := 5 + (int(stream.output[at + 3]) << 8 | int(stream.output[at + 4]))
 		plain: [MAX_CIPHERTEXT_SIZE]u8
-		kind, body, error := record_open(&server, plain[:], stream.output[at:at + n])
+		kind, body, error := engine_record_open(&server, plain[:], stream.output[at:at + n])
 		assert(error == .None && kind == .Handshake)
 		transcript_update(&transcript, body)
 		at += n
@@ -380,7 +380,7 @@ server_async_initialization_size_and_deferred_close :: proc(t: ^testing.T) {
 		c.store = store
 		testing.expect_value(
 			t,
-			server_async_server(
+			engine_server_async_server(
 				&s,
 				{data = &stream, submit = tcp_test_submit, cancel = tcp_test_cancel},
 				{data = &stream, schedule = tcp_test_schedule},
@@ -432,7 +432,7 @@ server_async_authenticated_records_buffering_and_overlap :: proc(t: ^testing.T) 
 	for at := start; at < len(stream.output); {
 		n := 5 + (int(stream.output[at + 3]) << 8 | int(stream.output[at + 4]))
 		plain: [MAX_CIPHERTEXT_SIZE]u8
-		kind, body, e := record_open(&receiver, plain[:], stream.output[at:at + n])
+		kind, body, e := engine_record_open(&receiver, plain[:], stream.output[at:at + n])
 		testing.expect_value(t, e, .None)
 		testing.expect_value(t, kind, .Application_Data)
 		testing.expect_value(t, string(body), string(input[copied:copied + len(body)]))
@@ -462,7 +462,7 @@ server_async_partial_record_cancel_timeout_and_resume :: proc(t: ^testing.T) {
 		s: Server_Async_Conn
 		peer, _, _ := tcp_test_establish(t, &s, &stream, &a, store)
 		wire: [128]u8
-		n, e := record_seal(&peer, wire[:], .Application_Data, []u8{7, 8, 9})
+		n, e := engine_record_seal(&peer, wire[:], .Application_Data, []u8{7, 8, 9})
 		assert(e == .None)
 		prefix := 3 if mode == 0 else 9
 		append(&stream.input, ..wire[:prefix])
@@ -561,7 +561,7 @@ server_async_key_update_role_order_and_boundaries :: proc(t: ^testing.T) {
 	testing.expect_value(t, r.error.kind, .None)
 	testing.expect_value(t, buffer, [4]u8{9, 8, 7, 6})
 	plain: [128]u8
-	kind, body, e := record_open(&receiver, plain[:], stream.output[at:])
+	kind, body, e := engine_record_open(&receiver, plain[:], stream.output[at:])
 	testing.expect_value(t, e, .None)
 	testing.expect_value(t, kind, .Handshake)
 	testing.expect_value(t, string(body), "\x18\x00\x00\x01\x00")
@@ -569,9 +569,9 @@ server_async_key_update_role_order_and_boundaries :: proc(t: ^testing.T) {
 	key, iv = traffic_key_iv(updated)
 	record_protection_init(&receiver, key, iv)
 	at = len(stream.output)
-	testing.expect_value(t, server_async_key_update(&s, true).kind, .None)
+	testing.expect_value(t, engine_server_async_key_update(&s, true).kind, .None)
 	tcp_test_run(&stream)
-	kind, body, e = record_open(&receiver, plain[:], stream.output[at:])
+	kind, body, e = engine_record_open(&receiver, plain[:], stream.output[at:])
 	testing.expect_value(t, e, .None)
 	testing.expect_value(t, string(body), "\x18\x00\x00\x01\x01")
 	testing.expect_value(t, server_async_stats(&s).sent_key_updates, 2)
@@ -653,7 +653,7 @@ server_async_allocation_failure_and_handshake_cancel :: proc(t: ^testing.T) {
 				callback  = tcp_test_handshake,
 				user_data = &r,
 			}
-			server_async_handshake(&s, &op)
+			engine_server_async_handshake(&s, &op)
 			tcp_test_run(&stream)
 			if point == 6 && r.calls == 0 {
 				secret: [32]u8
@@ -720,10 +720,10 @@ server_async_handshake_policy_budget_deadline_and_bad_finished :: proc(t: ^testi
 		if mode == 2 {
 			deadline = time.time_add(time.now(), -time.Second)
 		}
-		server_async_handshake(&s, &op, deadline)
+		engine_server_async_handshake(&s, &op, deadline)
 		tcp_test_run(&stream)
 		if mode == 6 {
-			testing.expect_value(t, server_async_cancel_handshake(&s).kind, .None)
+			testing.expect_value(t, engine_server_async_cancel_handshake(&s).kind, .None)
 			tcp_test_run(&stream)
 		}
 		testing.expect_value(t, r.calls, 1)
@@ -747,11 +747,11 @@ server_async_handshake_policy_budget_deadline_and_bad_finished :: proc(t: ^testi
 	s: Server_Async_Conn
 	_, reader, _ := tcp_test_establish(t, &s, &stream, &a, store, true)
 	plain: [64]u8
-	kind, body, error := record_open(&reader, plain[:], stream.output[len(stream.output) - 24:])
+	kind, body, error := engine_record_open(&reader, plain[:], stream.output[len(stream.output) - 24:])
 	testing.expect_value(t, error, .None)
 	testing.expect_value(t, kind, .Alert)
 	testing.expect_value(t, string(body), "\x02\x33")
-	testing.expect_value(t, server_async_failure(&s).engine, .Finished_Failed)
+	testing.expect_value(t, engine_server_async_failure(&s).engine, .Finished_Failed)
 	tcp_test_clean(t, &s, &a)
 	tcp_test_close(t, &s, &stream, &a)
 }
@@ -799,7 +799,7 @@ server_async_pending_close_callback_can_free_owner :: proc(t: ^testing.T) {
 			stream.hold_write = true
 			net.async_write(server_async_connection(s), &wop, []u8{1, 2, 3, 4})
 		} else {
-			server_async_handshake(s, &hs)
+			engine_server_async_handshake(s, &hs)
 		}
 		tcp_test_run(&stream)
 		state := TCP_Test_Free {
@@ -848,14 +848,14 @@ server_async_key_usage_reservation_and_control_caps :: proc(t: ^testing.T) {
 			testing.expect_value(t, r.error.kind, .None)
 			first := 5 + (int(stream.output[at + 3]) << 8 | int(stream.output[at + 4]))
 			plain: [128]u8
-			kind, body, e := record_open(&receiver, plain[:], stream.output[at:at + first])
+			kind, body, e := engine_record_open(&receiver, plain[:], stream.output[at:at + first])
 			testing.expect_value(t, e, .None)
 			testing.expect_value(t, kind, .Handshake)
 			testing.expect_value(t, string(body), "\x18\x00\x00\x01\x00")
 			secret := traffic_secret_update(secrets.server_traffic_secret)
 			key, iv := traffic_key_iv(secret)
 			record_protection_init(&receiver, key, iv)
-			kind, body, e = record_open(&receiver, plain[:], stream.output[at + first:])
+			kind, body, e = engine_record_open(&receiver, plain[:], stream.output[at + first:])
 			testing.expect_value(t, e, .None)
 			testing.expect_value(t, kind, .Application_Data)
 			testing.expect_value(t, string(body), "\x09\x08")
@@ -903,7 +903,7 @@ server_async_maximum_retry_budget_is_charged_and_erased :: proc(t: ^testing.T) {
 			callback  = tcp_test_handshake,
 			user_data = &r,
 		}
-		server_async_handshake(&s, &op)
+		engine_server_async_handshake(&s, &op)
 		tcp_test_run(&stream)
 		testing.expect_value(t, r.calls, 0)
 		for at := 0;
@@ -921,7 +921,7 @@ server_async_maximum_retry_budget_is_charged_and_erased :: proc(t: ^testing.T) {
 				server_async_stats(&s).peak_bytes,
 				size_of(s),
 			)
-			server_async_cancel_handshake(&s)
+			engine_server_async_cancel_handshake(&s)
 			tcp_test_run(&stream)
 		}
 		tcp_test_clean(t, &s, &a)

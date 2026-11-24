@@ -44,7 +44,7 @@ dial :: proc(conn: ^Conn, host: string, port: int, config: Config) -> Error {
 		}
 		return General_Error.Name_Resolution_Failed
 	case .Handshake_Failed:
-		return socket_handshake_error(failure.handshake)
+		return handshake_error(failure.handshake)
 	}
 	return Protocol_Error.Internal_Error
 }
@@ -52,13 +52,13 @@ dial :: proc(conn: ^Conn, host: string, port: int, config: Config) -> Error {
 // handshake completes the handshake. It blocks on the transport.
 @(require_results)
 handshake :: proc(conn: ^Conn) -> Error {
-	return socket_handshake_error(engine_handshake(conn))
+	return handshake_error(engine_handshake(conn))
 }
 
 // handshake_until is `handshake` with an absolute deadline for the whole of it.
 @(require_results)
 handshake_until :: proc(conn: ^Conn, deadline: time.Time) -> Error {
-	return socket_handshake_error(engine_handshake_until(conn, deadline))
+	return handshake_error(engine_handshake_until(conn, deadline))
 }
 
 // read receives application data, and returns the number of bytes read and
@@ -72,7 +72,7 @@ read :: proc(conn: ^Conn, dst: []u8) -> (received: int, err: Error) {
 	failure: IO_Error
 	received, failure = engine_read(conn, dst)
 	if failure.kind != .None {
-		err = socket_recv_error(conn, failure)
+		err = failed(socket_recv_error(conn, failure))
 	}
 	return
 }
@@ -83,17 +83,17 @@ read :: proc(conn: ^Conn, dst: []u8) -> (received: int, err: Error) {
 write :: proc(conn: ^Conn, src: []u8) -> (written: int, err: Error) {
 	failure: IO_Error
 	written, failure = engine_write(conn, src)
-	return written, socket_io_error(failure)
+	return written, io_error(failure)
 }
 
 // conn_close sends close_notify and closes the transport.
 conn_close :: proc(conn: ^Conn) -> Error {
-	return socket_io_error(engine_close(conn))
+	return io_error(engine_close(conn))
 }
 
 // abort closes the transport without telling the peer.
 abort :: proc(conn: ^Conn) -> Error {
-	return socket_io_error(engine_abort(conn))
+	return io_error(engine_abort(conn))
 }
 
 // set_read_deadline bounds every later read by an absolute time. The zero
@@ -123,9 +123,42 @@ conn_error :: proc(conn: ^Conn) -> Error {
 		return General_Error.Invalid_State
 	}
 	if conn.handshake_error.kind != .None {
-		return socket_handshake_error(conn.handshake_error)
+		return handshake_error(conn.handshake_error)
 	}
-	return socket_io_error(conn.application.failure)
+	return io_error(conn.application.failure)
+}
+
+// A handshake failure as a Conn reports it. A Socket names an extension the
+// client did not ask for the way upstream's client does, as an illegal
+// parameter; everywhere else it is the alert RFC 8446 gives it.
+@(private, require_results)
+handshake_error :: proc(failure: Handshake_Error) -> Error {
+	if failure.kind == .None {
+		return nil
+	}
+	if failure.kind == .Unsupported_Extension && failure.upstream_alert == .Close_Notify {
+		return Protocol_Error.Unsupported_Extension
+	}
+	return failed(socket_handshake_error(failure))
+}
+
+// A failure as a Conn reports it from `read`, `write` and `conn_close`.
+@(private, require_results)
+io_error :: proc(failure: IO_Error) -> Error {
+	if failure.kind == .None {
+		return nil
+	}
+	return failed(socket_io_error(failure))
+}
+
+// A failure is never reported as no error: where its cause was not recorded,
+// it is an internal error.
+@(private, require_results)
+failed :: proc(err: Error) -> Error {
+	if err == nil {
+		return Protocol_Error.Internal_Error
+	}
+	return err
 }
 
 @(private, require_results)
@@ -163,5 +196,5 @@ transport_error :: proc(failure: net.Connection_Error) -> Error {
 	case .Invalid_Connection, .Invalid_Count, .Invalid_Operation, .Operation_Pending:
 		return General_Error.Invalid_State
 	}
-	return socket_transport_error(failure)
+	return failed(socket_transport_error(failure))
 }

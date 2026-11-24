@@ -100,14 +100,14 @@ session_early_keys :: proc(
 	   policy == nil ||
 	   policy.allow == nil ||
 	   len(client_hello) == 0 {
-		return quic_early_packet_keys({})
+		return engine_quic_early_packet_keys({})
 	}
 	secret, ok := session_early_secret(session)
 	defer crypto.zero_explicit(&secret, size_of(secret))
 	if !ok {
-		return quic_early_packet_keys({})
+		return engine_quic_early_packet_keys({})
 	}
-	return quic_early_packet_keys(secret, policy, client_hello)
+	return engine_quic_early_packet_keys(secret, policy, client_hello)
 }
 
 // HKDF-Extract(0, PSK). Not an early traffic secret and not packet keys.

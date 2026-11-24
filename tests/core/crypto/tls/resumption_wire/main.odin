@@ -55,7 +55,7 @@ handler :: proc(data: rawptr, conn: ^saba.Connection, req: ^saba.Request) -> sab
 	s := cast(^State)data
 	n := sync.atomic_add(&s.count, 1)
 	if s.mode == "rotate" && n == 0 {
-		assert(tls.server_ticket_keys_rotate(s.keys, time.now()) == .None)
+		assert(tls.server_ticket_keys_rotate(s.keys, time.now()) == nil)
 	}
 	if s.mode == "credential" && n == 0 {
 		replacement := load_store(s.dir, "server")
@@ -129,7 +129,7 @@ main :: proc() {
 	assert(len(os.args) == 4)
 	dir, mode, policy := os.args[1], os.args[2], os.args[3]
 	root: tls.Root_Pool
-	assert(tls.root_pool_load_file(&root, fmt.tprintf("%s/root.pem", dir)).kind == .None)
+	assert(tls.root_pool_load_file(&root, fmt.tprintf("%s/root.pem", dir)) == nil)
 	defer tls.root_pool_destroy(&root)
 	if mode == "client" || mode == "client-mtls" || mode == "client-async" || mode == "client-async-mtls" {
 		client_store: ^store.Store
@@ -162,13 +162,13 @@ main :: proc() {
 				}
 				assert(
 					tls.async_client(&s.owner, nbio.tcp_async_connection(&s.tcp), nbio.async_executor(), config) ==
-					.None,
+					nil,
 				)
 				s.hs = {
 					callback  = async_handshake,
 					user_data = &s,
 				}
-				assert(tls.async_handshake(&s.owner, &s.hs).kind == .None)
+				assert(tls.async_handshake(&s.owner, &s.hs) == nil)
 				assert(nbio.run() == nil)
 				assert(s.closed)
 				nbio.release_thread_event_loop()
@@ -189,11 +189,11 @@ main :: proc() {
 					alpn_protocols = []string{"http/1.1"},
 				},
 			)
-			assert(error.kind == .None)
+			assert(error == nil)
 			assert(tls.connection_state(&client).resumed == (i == 1))
 			buffer: [2]u8
 			at := 0
-			for at < 2 {n, re := tls.read(&client, buffer[at:]); assert(re.kind == .None && n > 0); at += n}
+			for at < 2 {n, re := tls.read(&client, buffer[at:]); assert(re == nil && n > 0); at += n}
 			assert(string(buffer[:]) == "OK")
 			tls.conn_close(&client)
 			fmt.println("PASS native client", i)
@@ -203,7 +203,7 @@ main :: proc() {
 	owner := load_store(dir, "server")
 	defer store.destroy(&owner)
 	keys: tls.Server_Ticket_Keys
-	assert(tls.server_ticket_keys_init(&keys) == .None)
+	assert(tls.server_ticket_keys_init(&keys) == nil)
 	defer tls.server_ticket_keys_close(&keys)
 	ticket := tls.Server_Ticket_Config {
 		keys         = &keys,

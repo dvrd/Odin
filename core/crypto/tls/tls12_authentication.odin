@@ -206,7 +206,7 @@ tls12_authenticate_server_key_exchange :: proc(
 	offered_schemes: []Signature_Scheme,
 	now: time.Time,
 ) -> (TLS12_Server_Key_Exchange, TLS12_Authentication_Error) {
-	if cause := verify_server_certificates(certs, config.server_name, config.root_cas, now); cause.kind != .None {
+	if cause := engine_verify_server_certificates(certs, config.server_name, config.root_cas, now); cause.kind != .None {
 		return {}, {kind = .Invalid_Certificates, authentication = cause}
 	}
 	return tls12_verify_server_key_exchange(certs, message, client_random, server_random, cipher_suite, offered_groups, offered_schemes)

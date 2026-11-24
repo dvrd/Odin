@@ -65,7 +65,7 @@ main :: proc() {
 	}
 
 	roots := new(tls.Root_Pool)
-	if parsed := tls.root_pool_parse(roots, pem); parsed.kind != .None {
+	if parsed := tls.root_pool_parse(roots, pem); parsed != nil {
 		fail("roots: %v", parsed)
 	}
 

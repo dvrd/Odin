@@ -1320,7 +1320,7 @@ advance_crypto :: proc(c: ^Connection) -> Error {
 				c.material.server_hello,
 				c.material.params,
 			)
-			if he.kind != .None {
+			if he != nil {
 				fail(c, "client hello")
 				return .Handshake
 			}
@@ -1344,7 +1344,7 @@ advance_crypto :: proc(c: ^Connection) -> Error {
 				c.material.now,
 				c.material.params,
 			)
-			if ae.kind != .None {
+			if ae != nil {
 				fail(c, "authenticate")
 				return .Handshake
 			}
@@ -1374,7 +1374,7 @@ install_server_keys :: proc(c: ^Connection) -> Error {
 	defer crypto.zero_explicit(&shared, size_of(shared))
 	hs, he := tls.quic_handshake_secrets(shared, c.material.client_hello, c.material.server_hello, c.material.params)
 	defer tls.quic_handshake_keys_clear(&hs)
-	if he.kind != .None {
+	if he != nil {
 		fail(c, "server handshake secrets")
 		return .Handshake
 	}
@@ -1415,7 +1415,7 @@ install_server_keys :: proc(c: ^Connection) -> Error {
 	)
 	defer tls.quic_application_keys_clear(&app)
 	defer crypto.zero_explicit(&finished, size_of(finished))
-	if ae.kind != .None {
+	if ae != nil {
 		fail(c, "server application secrets")
 		return .Handshake
 	}

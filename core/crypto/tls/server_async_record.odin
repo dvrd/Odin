@@ -162,7 +162,7 @@ server_async_open :: proc(s: ^Server_Async_Conn) -> (TLS_Content_Type, []u8, boo
 	if !server_async_grant(s, &s._rx_plain, MAX_CIPHERTEXT_SIZE) {
 		return {}, nil, false
 	}
-	kind, body, e := record_open(&server_async_keys(s).read, s._rx_plain, s._rx_wire[:s._rx_expected])
+	kind, body, e := engine_record_open(&server_async_keys(s).read, s._rx_plain, s._rx_wire[:s._rx_expected])
 	if e != .None {
 		server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Record, protection = e})
 		return {}, nil, false
@@ -183,7 +183,7 @@ server_async_send_record :: proc(
 	}
 	n := 0
 	if s._write_keys {
-		size, e := record_seal(&server_async_keys(s).write, s._tx_wire, content, body)
+		size, e := engine_record_seal(&server_async_keys(s).write, s._tx_wire, content, body)
 		if e != .None {
 			server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Record, protection = e})
 			return false
@@ -253,7 +253,7 @@ server_async_send_process :: proc(s: ^Server_Async_Conn) {
 	}
 	switch kind {
 	case .Handshake:
-		e := server_handshake_accept(&s._engine, s._engine_event)
+		e := engine_server_handshake_accept(&s._engine, s._engine_event)
 		s._engine_event = 0
 		if e != .None {
 			server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Handshake, engine = e})

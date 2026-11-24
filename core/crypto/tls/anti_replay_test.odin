@@ -11,7 +11,7 @@ Replay_Attempt :: struct {
 @(test)
 anti_replay_atomic_reservation_expiry_and_capacity :: proc(t: ^testing.T) {
 	owner: Anti_Replay
-	testing.expect_value(t, anti_replay_init(&owner, 1), .None)
+	testing.expect_value(t, engine_anti_replay_init(&owner, 1), .None)
 	defer anti_replay_close(&owner)
 	attempts: [16]Replay_Attempt
 	workers: [16]^thread.Thread

@@ -105,14 +105,14 @@ test_destroy :: proc(s: ^Test_Stream) {
 }
 
 test_client :: proc(t: ^testing.T, s: ^Test_Stream, pool: ^tls.Root_Pool, conn: ^tls.Async_Conn) {
-	testing.expect_value(t, tls.root_pool_parse(pool, #load("testdata/root.pem")).kind, .None)
+	testing.expect_value(t, tls.root_pool_parse(pool, #load("testdata/root.pem")), nil)
 	err := tls.async_client(
 		conn,
 		{data = s, submit = test_submit, cancel = test_cancel},
 		{data = s, schedule = test_schedule},
 		{server_name = "localhost", root_cas = pool.roots[:pool.count]},
 	)
-	testing.expect_value(t, err, .None)
+	testing.expect_value(t, err, nil)
 }
 
 Result :: struct {
@@ -147,11 +147,11 @@ async_handshake_cancel_and_close :: proc(t: ^testing.T) {
 			assert(op.err.kind == .Cancelled)
 		},
 	}
-	testing.expect_value(t, tls.async_handshake(conn, &hs).kind, .None)
+	testing.expect_value(t, tls.async_handshake(conn, &hs), nil)
 	testing.expect_value(t, calls, 0)
 	test_run(&s)
 	testing.expect(t, len(s.output) > 5 && s.read != nil)
-	testing.expect_value(t, tls.async_cancel_handshake(conn).kind, .None)
+	testing.expect_value(t, tls.async_cancel_handshake(conn), nil)
 	test_run(&s)
 	testing.expect_value(t, calls, 1)
 	result: Result
@@ -192,7 +192,7 @@ async_buffered_plaintext_is_deferred :: proc(t: ^testing.T) {
 	peer := test_established(conn)
 	wire: [256]u8
 	n, err := tls.record_seal(&peer, wire[:], .Application_Data, []u8{1, 2, 3, 4})
-	testing.expect_value(t, err, .None)
+	testing.expect_value(t, err, nil)
 	append(&s.input, ..wire[:n])
 	buffer: [2]u8
 	r: Result
@@ -283,7 +283,7 @@ async_tampered_record_never_releases_plaintext :: proc(t: ^testing.T) {
 	testing.expect_value(t, r.error, .Protocol_Failed)
 	testing.expect_value(t, r.count, 0)
 	testing.expect_value(t, buffer, [3]u8{99, 99, 99})
-	testing.expect_value(t, tls.async_failure(conn).kind, .Decryption_Failed)
+	testing.expect_value(t, tls.async_failure(conn), tls.Error(tls.Protocol_Error.Bad_Record_Mac))
 	testing.expect(t, s.closed)
 	net.async_close(stream, &op)
 	test_run(&s)
@@ -314,7 +314,7 @@ async_authenticated_close_and_truncation :: proc(t: ^testing.T) {
 		net.async_read(stream, &op, buffer[:])
 		test_run(&s)
 		testing.expect_value(t, r.error, net.Connection_Error_Kind.Peer_Closed if authenticated else .Protocol_Failed)
-		if !authenticated do testing.expect_value(t, tls.async_failure(conn).kind, .Unexpected_EOF)
+		if !authenticated do testing.expect_value(t, tls.async_failure(conn), tls.Error(net.TCP_Recv_Error.Connection_Closed))
 		net.async_close(stream, &op)
 		test_run(&s)
 		test_destroy(&s)
@@ -387,7 +387,7 @@ async_key_update_response_uses_old_key :: proc(t: ^testing.T) {
 	tls.record_protection_init(&old, [16]u8{}, [12]u8{})
 	plaintext: [128]u8
 	kind, body, err := tls.record_open(&old, plaintext[:], s.output[:])
-	testing.expect_value(t, err, .None)
+	testing.expect_value(t, err, nil)
 	testing.expect_value(t, kind, .Handshake)
 	testing.expect_value(t, len(body), 5)
 	testing.expect_value(t, body[4], u8(0))
@@ -460,7 +460,7 @@ async_close_drains_handshake_before_releasing_storage :: proc(t: ^testing.T) {
 			free(op)
 		},
 	}
-	tls.async_handshake(conn, hs)
+	_ = tls.async_handshake(conn, hs)
 	test_run(&s)
 	close := net.Async_Operation {
 		user_data = &state,

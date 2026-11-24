@@ -110,13 +110,13 @@ socket_test_serve :: proc(server: ^Socket_Test_Server) {
 	config.parameters.alpn_protocols = server.alpn
 	transport := net.Async_Connection{data = &peer.stream, submit = tcp_test_submit, cancel = tcp_test_cancel}
 	executor := net.Async_Executor{data = &peer.stream, schedule = tcp_test_schedule}
-	if server_async_server(engine, transport, executor, config, context.allocator) != .None {
+	if engine_server_async_server(engine, transport, executor, config, context.allocator) != .None {
 		return
 	}
 
 	accepted: TCP_Test_Result
 	accept := Server_Async_Handshake_Operation{callback = tcp_test_handshake, user_data = &accepted}
-	server_async_handshake(engine, &accept)
+	engine_server_async_handshake(engine, &accept)
 	socket_test_pump(peer, &accepted.calls)
 
 	if accepted.calls == 1 && accepted.error.kind == .None {
@@ -129,7 +129,7 @@ socket_test_serve :: proc(server: ^Socket_Test_Server) {
 
 	server.key_updates = server_async_stats(engine).received_key_updates
 	server.clean_close = engine._peer_closed
-	if detail := server_async_failure(engine); detail.kind == .Peer_Alert {
+	if detail := engine_server_async_failure(engine); detail.kind == .Peer_Alert {
 		server.peer_alert = detail.alert_description
 	}
 
@@ -147,7 +147,7 @@ socket_test_script :: proc(server: ^Socket_Test_Server, engine: ^Server_Async_Co
 	}
 
 	if server.script == .Echo_After_Key_Update_Request {
-		server_async_key_update(engine, true)
+		engine_server_async_key_update(engine, true)
 	}
 
 	storage := make([]u8, 16 * 1024)
@@ -823,7 +823,7 @@ socket_offers_upstreams_client_hello :: proc(t: ^testing.T) {
 	conn.phase = .Handshake_Pending
 	conn.upstream_client = true
 	conn.config = {server_name = "under_score.example", offer = .Upstream, alpn_protocols = protocols[:]}
-	testing.expect_value(t, client_hello_prepare(conn).kind, Client_Hello_Send_Error_Kind.None)
+	testing.expect_value(t, engine_client_hello_prepare(conn).kind, Client_Hello_Send_Error_Kind.None)
 
 	types: [dynamic]u16
 	defer delete(types)
@@ -849,7 +849,7 @@ socket_offers_upstreams_client_hello :: proc(t: ^testing.T) {
 	defer handshake_keys_clear(compatible)
 	compatible.phase = .Handshake_Pending
 	compatible.config = {server_name = "example.com"}
-	testing.expect_value(t, client_hello_prepare(compatible).kind, Client_Hello_Send_Error_Kind.None)
+	testing.expect_value(t, engine_client_hello_prepare(compatible).kind, Client_Hello_Send_Error_Kind.None)
 	clear(&types)
 	testing.expect_value(t, socket_test_hello_shape(compatible.client_hello[:compatible.client_hello_size], &types), 0)
 	storage: [8]u8

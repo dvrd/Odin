@@ -631,6 +631,7 @@ socket_handshake_error :: proc(failure: Handshake_Error) -> Error {
 
 @(private, require_results)
 socket_client_hello_error :: proc(failure: Client_Hello_Send_Error) -> Error {
+
 	switch failure.kind {
 	case .Entropy_Unavailable:
 		return General_Error.Failed_Key_Share_Generation
@@ -650,6 +651,7 @@ socket_client_hello_error :: proc(failure: Client_Hello_Send_Error) -> Error {
 
 @(private, require_results)
 socket_server_hello_error :: proc(failure: Server_Hello_Read_Error) -> Error {
+
 	switch failure.kind {
 	case .Record_Read_Failed:
 		if failure.record.transport.kind != .None {
@@ -706,6 +708,7 @@ socket_server_hello_decode_error :: proc(failure: Server_Hello_Error) -> Error {
 
 @(private, require_results)
 socket_flight_read_error :: proc(failure: Handshake_Record_Read_Error) -> Error {
+
 	switch failure.kind {
 	case .Header_Read_Failed, .Body_Read_Failed:
 		return socket_transport_error(failure.transport)
@@ -734,6 +737,7 @@ socket_flight_read_error :: proc(failure: Handshake_Record_Read_Error) -> Error 
 // answer to a handshake record without content, which depends on the stage.
 @(private, require_results)
 socket_protection_error :: proc(failure: Record_Protection_Error, empty_handshake: Protocol_Error) -> Error {
+
 	#partial switch failure {
 	case .Ciphertext_Too_Short:
 		return Protocol_Error.Decode_Error
@@ -751,6 +755,7 @@ socket_protection_error :: proc(failure: Record_Protection_Error, empty_handshak
 
 @(private, require_results)
 socket_authentication_error :: proc(failure: Authentication_Error) -> Error {
+
 	switch failure.kind {
 	case .Certificate_Chain_Invalid, .Invalid_Certificate_Usage:
 		return socket_chain_error(failure.x509)

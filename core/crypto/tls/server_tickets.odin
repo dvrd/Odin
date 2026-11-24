@@ -41,7 +41,8 @@ Server_Ticket_Config :: struct {
 	early_data:   ^Server_Early_Data_Config,
 }
 
-server_ticket_keys_init :: proc(
+@(private)
+engine_server_ticket_keys_init :: proc(
 	keys: ^Server_Ticket_Keys,
 	max_lifetime: time.Duration = 24 * time.Hour,
 ) -> Server_Ticket_Error {
@@ -67,7 +68,8 @@ server_ticket_keys_init :: proc(
 
 // Retain at most one previous key for max_lifetime. A second rotation revokes
 // older tickets immediately. Secret keys are always freshly generated.
-server_ticket_keys_rotate :: proc(keys: ^Server_Ticket_Keys, now: time.Time) -> Server_Ticket_Error {
+@(private)
+engine_server_ticket_keys_rotate :: proc(keys: ^Server_Ticket_Keys, now: time.Time) -> Server_Ticket_Error {
 	if keys == nil {
 		return .Invalid
 	}

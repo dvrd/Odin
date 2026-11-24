@@ -119,11 +119,11 @@ main :: proc() {
 	config.handshake = tls.SERVER_HANDSHAKE_DEFAULT_CONFIG
 	config.handshake.offer = .Upstream
 	started := tls.server_async_server(&s.server, nbio.tcp_async_connection(&s.tcp), nbio.async_executor(), config, context.allocator)
-	assert(started == .None)
+	assert(started == nil)
 
 	s.handshake = {callback = session_established, user_data = s}
 	submitted := tls.server_async_handshake(&s.server, &s.handshake)
-	assert(submitted.kind == .None)
+	assert(submitted == nil)
 
 	run_error := nbio.run()
 	assert(run_error == nil)

@@ -83,7 +83,8 @@ quic_application_keys_clear :: proc(keys: ^Quic_Application_Keys) {
 // RFC 9001 section 5.1. Level selects handshake versus application secrets.
 // Early data is not a level here. quic_early_packet_keys derives it only when
 // the caller passes a replay-safe policy and a ClientHello that offered it.
-quic_packet_keys_derive :: proc(
+@(private)
+engine_quic_packet_keys_derive :: proc(
 	traffic_secret: [32]u8,
 	level: Quic_Secret_Level,
 ) -> (
@@ -109,7 +110,8 @@ quic_packet_keys_derive :: proc(
 // early_secret is HKDF-Extract(0, PSK), not the resumption PSK and not packet
 // keys. A nil policy, or a ClientHello that did not offer early_data, refuses
 // 0-RTT and produces no key bytes. The secret is erased either way.
-quic_early_packet_keys :: proc(
+@(private)
+engine_quic_early_packet_keys :: proc(
 	early_secret: [32]u8,
 	policy: ^Early_Data_Policy = nil,
 	client_hello: []u8 = nil,
@@ -142,7 +144,8 @@ quic_early_packet_keys :: proc(
 // Handshake keys from CH||SH. local_parameters must be the exact
 // quic_transport_parameters extension payload inside client_hello.
 // Certificate and Finished checks are not done here; these keys are unauthenticated.
-quic_handshake_secrets :: proc(
+@(private)
+engine_quic_handshake_secrets :: proc(
 	shared_secret: [32]u8,
 	client_hello, server_hello, local_parameters: []u8,
 	session: ^Session = nil,
@@ -161,7 +164,7 @@ quic_handshake_secrets :: proc(
 	if e := quic_client_hello_policy(client_hello, local_parameters, early_allowed); e.kind != .None {
 		return {}, e
 	}
-	hello, hello_error := server_hello_decode(server_hello, session != nil)
+	hello, hello_error := engine_server_hello_decode(server_hello, session != nil)
 	defer crypto.zero_explicit(&hello, size_of(hello))
 	if hello_error != .None {
 		kind: Quic_Secret_Kind = .Malformed
@@ -183,12 +186,12 @@ quic_handshake_secrets :: proc(
 		return {}, {kind = .Derivation_Failed, schedule = schedule}
 	}
 	local.handshake_secret = secrets.handshake_secret
-	client, client_error := quic_packet_keys_derive(secrets.client_traffic_secret, .Handshake)
+	client, client_error := engine_quic_packet_keys_derive(secrets.client_traffic_secret, .Handshake)
 	defer quic_direction_keys_clear(&client)
 	if client_error.kind != .None {
 		return {}, client_error
 	}
-	server, server_error := quic_packet_keys_derive(secrets.server_traffic_secret, .Handshake)
+	server, server_error := engine_quic_packet_keys_derive(secrets.server_traffic_secret, .Handshake)
 	defer quic_direction_keys_clear(&server)
 	if server_error.kind != .None {
 		return {}, server_error
@@ -201,7 +204,8 @@ quic_handshake_secrets :: proc(
 // Server authentication uses the existing certificate, signature and Finished
 // checks. peer_parameters must equal the extension inside EncryptedExtensions.
 // Success also returns the client Finished message (handshake keys, not 1-RTT).
-quic_application_secrets :: proc(
+@(private)
+engine_quic_application_secrets :: proc(
 	handshake_secret: [32]u8,
 	client_hello, server_hello, handshake_messages: []u8,
 	server_name: string,
@@ -241,17 +245,17 @@ quic_application_secrets :: proc(
 	if e := quic_encrypted_extensions_policy(messages[0], peer_parameters); e.kind != .None {
 		return {}, {}, e
 	}
-	certs, auth := server_certificates_parse(messages[1])
+	certs, auth := engine_server_certificates_parse(messages[1])
 	defer server_certificates_destroy(&certs)
 	if auth.kind != .None {
 		return {}, {}, {kind = .Authentication_Failed, authentication = auth}
 	}
-	auth = verify_server_certificates(&certs, server_name, roots, now)
+	auth = engine_verify_server_certificates(&certs, server_name, roots, now)
 	if auth.kind != .None {
 		return {}, {}, {kind = .Authentication_Failed, authentication = auth}
 	}
 	through_certificate := quic_hash(client_hello, server_hello, messages[0], messages[1])
-	auth = verify_server_certificate_signature(&certs, messages[2], through_certificate)
+	auth = engine_verify_server_certificate_signature(&certs, messages[2], through_certificate)
 	crypto.zero_explicit(&through_certificate, size_of(through_certificate))
 	if auth.kind != .None {
 		return {}, {}, {kind = .Authentication_Failed, authentication = auth}
@@ -259,7 +263,7 @@ quic_application_secrets :: proc(
 	through_verify := quic_hash(client_hello, server_hello, messages[0], messages[1], messages[2])
 	server_traffic := quic_server_traffic(secret, client_hello, server_hello)
 	defer crypto.zero_explicit(&server_traffic, size_of(server_traffic))
-	finished := finished_verify(messages[3], server_traffic, through_verify)
+	finished := engine_finished_verify(messages[3], server_traffic, through_verify)
 	crypto.zero_explicit(&through_verify, size_of(through_verify))
 	if finished != .None {
 		return {}, {}, {kind = .Finished_Failed, finished = finished}
@@ -281,12 +285,12 @@ quic_application_secrets :: proc(
 	}
 	application := application_secrets_derive(secret, through_server_finished)
 	defer crypto.zero_explicit(&application, size_of(application))
-	client, client_error := quic_packet_keys_derive(application.client_traffic_secret, .Application)
+	client, client_error := engine_quic_packet_keys_derive(application.client_traffic_secret, .Application)
 	defer quic_direction_keys_clear(&client)
 	if client_error.kind != .None {
 		return {}, {}, client_error
 	}
-	server, server_error := quic_packet_keys_derive(application.server_traffic_secret, .Application)
+	server, server_error := engine_quic_packet_keys_derive(application.server_traffic_secret, .Application)
 	defer quic_direction_keys_clear(&server)
 	if server_error.kind != .None {
 		return {}, {}, server_error
@@ -298,13 +302,13 @@ quic_application_secrets :: proc(
 
 @(private)
 quic_expand_aead :: proc(keys: ^Quic_Direction_Keys) -> Key_Schedule_Error {
-	if e := hkdf_expand_label(keys.secret[:], "quic key", nil, keys.key[:]); e != .None {
+	if e := engine_hkdf_expand_label(keys.secret[:], "quic key", nil, keys.key[:]); e != .None {
 		return e
 	}
-	if e := hkdf_expand_label(keys.secret[:], "quic iv", nil, keys.iv[:]); e != .None {
+	if e := engine_hkdf_expand_label(keys.secret[:], "quic iv", nil, keys.iv[:]); e != .None {
 		return e
 	}
-	return hkdf_expand_label(keys.secret[:], "quic hp", nil, keys.hp[:])
+	return engine_hkdf_expand_label(keys.secret[:], "quic hp", nil, keys.hp[:])
 }
 
 @(private)
@@ -498,7 +502,7 @@ quic_alpn_exact_h3 :: proc(payload: []u8, offer: bool) -> Quic_Secret_Kind {
 	if at != len(payload) {
 		return .Malformed
 	}
-	if alpn_transport_offers(.QUIC, names[:count]) != .None {
+	if engine_alpn_transport_offers(.QUIC, names[:count]) != .None {
 		return .Invalid_ALPN
 	}
 	if !offer && (count != 1 || names[0] != ALPN_H3) {
@@ -530,7 +534,8 @@ quic_split_messages :: proc(src: []u8, dst: [][]u8) -> bool {
 // Finished authenticates the additional client-authentication messages. No TLS
 // records are produced. The caller must retain/retransmit every returned byte
 // before declaring Finished sent, then erase/free it after handshake retirement.
-quic_application_secrets_mutual :: proc(
+@(private)
+engine_quic_application_secrets_mutual :: proc(
 	handshake_secret: [32]u8,
 	client_hello, server_hello, handshake_messages: []u8,
 	server_name: string,
@@ -572,7 +577,7 @@ quic_application_secrets_mutual :: proc(
 		count += 1
 		at += n
 	}
-	hello, hello_error := server_hello_decode(server_hello, session != nil)
+	hello, hello_error := engine_server_hello_decode(server_hello, session != nil)
 	defer crypto.zero_explicit(&hello, size_of(hello))
 	if hello_error != .None {
 		return {}, nil, {kind = .Malformed}
@@ -612,16 +617,16 @@ quic_application_secrets_mutual :: proc(
 		previous := context.allocator
 		context.allocator = allocator
 		defer context.allocator = previous
-		certs, ae := server_certificates_parse(messages[cert_at])
+		certs, ae := engine_server_certificates_parse(messages[cert_at])
 		defer server_certificates_destroy(&certs)
 		if ae.kind != .None {
 			return {}, nil, {kind = .Authentication_Failed, authentication = ae}
 		}
-		if ae = verify_server_certificates(&certs, server_name, roots, now); ae.kind != .None {
+		if ae = engine_verify_server_certificates(&certs, server_name, roots, now); ae.kind != .None {
 			return {}, nil, {kind = .Authentication_Failed, authentication = ae}
 		}
 		transcript_update(&transcript, messages[cert_at])
-		if ae = verify_server_certificate_signature(&certs, messages[cert_at + 1], transcript_snapshot(&transcript));
+		if ae = engine_verify_server_certificate_signature(&certs, messages[cert_at + 1], transcript_snapshot(&transcript));
 		   ae.kind != .None {
 			return {}, nil, {kind = .Authentication_Failed, authentication = ae}
 		}
@@ -636,7 +641,7 @@ quic_application_secrets_mutual :: proc(
 	}
 	server_traffic := quic_server_traffic(secret, client_hello, server_hello)
 	defer crypto.zero_explicit(&server_traffic, size_of(server_traffic))
-	if e := finished_verify(messages[finished_at], server_traffic, transcript_snapshot(&transcript)); e != .None {
+	if e := engine_finished_verify(messages[finished_at], server_traffic, transcript_snapshot(&transcript)); e != .None {
 		return {}, nil, {kind = .Finished_Failed, finished = e}
 	}
 	transcript_update(&transcript, messages[finished_at])
@@ -644,12 +649,12 @@ quic_application_secrets_mutual :: proc(
 	defer crypto.zero_explicit(&application, size_of(application))
 	local: Quic_Application_Keys
 	defer quic_application_keys_clear(&local)
-	client, ce := quic_packet_keys_derive(application.client_traffic_secret, .Application)
+	client, ce := engine_quic_packet_keys_derive(application.client_traffic_secret, .Application)
 	defer quic_direction_keys_clear(&client)
 	if ce.kind != .None {
 		return {}, nil, ce
 	}
-	server, se := quic_packet_keys_derive(application.server_traffic_secret, .Application)
+	server, se := engine_quic_packet_keys_derive(application.server_traffic_secret, .Application)
 	defer quic_direction_keys_clear(&server)
 	if se.kind != .None {
 		return {}, nil, se

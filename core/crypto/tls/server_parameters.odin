@@ -37,7 +37,8 @@ Server_Parameters :: struct {
 // validate peer transport-parameter semantics and its own local parameters.
 // Configuration is borrowed for this call only. API/config errors preserve the
 // pending event; protocol/resource rejection terminates and revokes all borrows.
-server_handshake_select_parameters :: proc(
+@(private)
+engine_server_handshake_select_parameters :: proc(
 	owner: ^Server_Handshake,
 	id: u64,
 	config: Server_Handshake_Parameters_Config,
@@ -59,14 +60,15 @@ server_handshake_select_parameters :: proc(
 		server_handshake_fail(owner, e)
 		return e
 	}
-	return server_handshake_accept(owner, id)
+	return engine_server_handshake_accept(owner, id)
 }
 
 // Borrowed final selections, tentative until Finished verification. Even an
 // authenticated value does not permit application delivery until Complete is
 // accepted. Copy durable values before accepting Complete; all borrows end then,
 // or on failure/abort/destroy. This query never exposes the raw offer as selected.
-server_handshake_parameters :: proc(
+@(private)
+engine_server_handshake_parameters :: proc(
 	owner: ^Server_Handshake,
 ) -> (
 	Server_Handshake_Parameters,

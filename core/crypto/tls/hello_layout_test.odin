@@ -12,7 +12,7 @@ layout_test_hello :: proc(conn: ^Conn, extended: bool) -> int {
 		alpn_protocols = {"http/1.1"},
 	}
 	for &value, i in hello.random {value = byte(i)}
-	size, error := client_hello_encode(conn.client_hello[:], hello)
+	size, error := engine_client_hello_encode(conn.client_hello[:], hello)
 	assert(error == .None)
 	if extended {
 		// Insert two legacy suites into the offered cipher vector, preserving

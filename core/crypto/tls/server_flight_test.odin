@@ -53,7 +53,7 @@ flight_test_start :: proc(
 	owner_test_ready(t, o, a, wire)
 	testing.expect_value(
 		t,
-		server_handshake_start_flight(o, store, time.from_nanoseconds(1790000000 * 1000000000)),
+		engine_server_handshake_start_flight(o, store, time.from_nanoseconds(1790000000 * 1000000000)),
 		.None,
 	)
 }
@@ -89,17 +89,17 @@ server_flight_crypto_order_streaming_and_pin :: proc(t: ^testing.T) {
 		secret_index := 0
 		started := time.tick_now()
 		for events := 0; events < 100; events += 1 {
-			event, e := server_handshake_peek(&o)
+			event, e := engine_server_handshake_peek(&o)
 			testing.expect_value(t, e, .None)
 			if event.kind == .None {
 				break
 			}
 			before := transcript_snapshot(&o._transcript)
 			for _ in 0 ..< 3 {
-				again, _ := server_handshake_peek(&o)
+				again, _ := engine_server_handshake_peek(&o)
 				testing.expect_value(t, again.id, event.id)
 				testing.expect_value(t, transcript_snapshot(&o._transcript), before)
-				testing.expect_value(t, server_handshake_accept(&o, event.id + 1), .Invalid_Event)
+				testing.expect_value(t, engine_server_handshake_accept(&o, event.id + 1), .Invalid_Event)
 			}
 			testing.expect(t, event.kind != .Complete && event.kind != .Fatal)
 			if event.kind == .Handshake_Bytes {
@@ -152,7 +152,7 @@ server_flight_crypto_order_streaming_and_pin :: proc(t: ^testing.T) {
 				testing.expect_value(t, string(event.secret), string(expected[:]))
 				secret_index += 1
 			}
-			testing.expect_value(t, server_handshake_accept(&o, event.id), .None)
+			testing.expect_value(t, engine_server_handshake_accept(&o, event.id), .None)
 			testing.expect_value(t, transcript_snapshot(&o._transcript), transcript_snapshot(&reference))
 			// Closing the store retires the generation, but every pending DER
 			// chunk/signature still succeeds under the same live lease.
@@ -205,7 +205,7 @@ server_flight_crypto_order_streaming_and_pin :: proc(t: ^testing.T) {
 			if kind == 20 {
 				testing.expect_value(
 					t,
-					finished_verify(msg, expected_hs.server_traffic_secret, transcript_snapshot(&verify_transcript)),
+					engine_finished_verify(msg, expected_hs.server_traffic_secret, transcript_snapshot(&verify_transcript)),
 					.None,
 				)
 			}
@@ -222,7 +222,7 @@ server_flight_crypto_order_streaming_and_pin :: proc(t: ^testing.T) {
 			a.calls,
 			time.tick_since(started),
 		)
-		server_handshake_destroy(&o)
+		engine_server_handshake_destroy(&o)
 		owner_test_clean(t, &a)
 		ss, _ = credential_store.stats(store)
 		testing.expect_value(t, ss.active_leases, 0)
@@ -256,13 +256,13 @@ server_flight_admission_rejections :: proc(t: ^testing.T) {
 		if mode == 4 {
 			s = nil
 		}
-		e := server_handshake_start_flight(&o, s, now)
+		e := engine_server_handshake_start_flight(&o, s, now)
 		testing.expect(t, e == .Unsupported || e == .Credential_Failed)
-		event, _ := server_handshake_peek(&o)
+		event, _ := engine_server_handshake_peek(&o)
 		testing.expect_value(t, event.kind, .Fatal)
 		stats, _ := credential_store.stats(store)
 		testing.expect_value(t, stats.active_leases, 0)
-		server_handshake_destroy(&o)
+		engine_server_handshake_destroy(&o)
 		owner_test_clean(t, &a)
 	}
 	for algorithm in x509.Signature_Algorithm {
@@ -291,19 +291,19 @@ server_flight_abort_each_event_and_allocation_failure :: proc(t: ^testing.T) {
 		wire, _ := flight_test_hello(storage[:])
 		flight_test_start(t, &o, &a, store, wire)
 		for _ in 0 ..< stop {
-			event, _ := server_handshake_peek(&o)
+			event, _ := engine_server_handshake_peek(&o)
 			if event.kind == .None {
 				break
 			}
-			testing.expect_value(t, server_handshake_accept(&o, event.id), .None)
+			testing.expect_value(t, engine_server_handshake_accept(&o, event.id), .None)
 		}
-		event, _ := server_handshake_peek(&o)
-		server_handshake_abort(&o)
-		testing.expect_value(t, server_handshake_accept(&o, event.id), .Invalid_Event)
+		event, _ := engine_server_handshake_peek(&o)
+		engine_server_handshake_abort(&o)
+		testing.expect_value(t, engine_server_handshake_accept(&o, event.id), .Invalid_Event)
 		stats, _ := credential_store.stats(store)
 		testing.expect_value(t, stats.active_leases, 0)
 		testing.expect(t, mem.check_zero_ptr(&o._flight, size_of(o._flight)))
-		server_handshake_destroy(&o)
+		engine_server_handshake_destroy(&o)
 		owner_test_clean(t, &a)
 	}
 	for mode in 0 ..< 4 {
@@ -324,11 +324,11 @@ server_flight_abort_each_event_and_allocation_failure :: proc(t: ^testing.T) {
 		case 3:
 			o._next_id = max(u64)
 		}
-		event, _ := server_handshake_peek(&o)
+		event, _ := engine_server_handshake_peek(&o)
 		testing.expect_value(t, event.kind, .Fatal if mode != 3 else .None)
 		stats, _ := credential_store.stats(store)
 		testing.expect_value(t, stats.active_leases, 0)
-		server_handshake_destroy(&o)
+		engine_server_handshake_destroy(&o)
 		owner_test_clean(t, &a)
 	}
 }
@@ -349,20 +349,20 @@ server_flight_rejects_zero_share_and_signing_failure :: proc(t: ^testing.T) {
 			for &b in o._selection.peer_key_share {b = 0}
 		} else {
 			for o._flight.stage != .Verify {
-				event, _ := server_handshake_peek(&o)
+				event, _ := engine_server_handshake_peek(&o)
 				assert(event.kind != .None && event.kind != .Fatal)
-				assert(server_handshake_accept(&o, event.id) == .None)
+				assert(engine_server_handshake_accept(&o, event.id) == .None)
 			}
 			// Simulate a lost lease at the signing boundary (internal fault
 			// injection only). It must terminate without bytes or success.
 			assert(credential_store.release(store, &o._flight.lease).kind == .None)
 		}
-		event, _ := server_handshake_peek(&o)
+		event, _ := engine_server_handshake_peek(&o)
 		testing.expect_value(t, event.kind, .Fatal)
 		testing.expect_value(t, event.error, .Malformed if bad_share else .Signing_Failed)
 		stats, _ := credential_store.stats(store)
 		testing.expect_value(t, stats.active_leases, 0)
-		server_handshake_destroy(&o)
+		engine_server_handshake_destroy(&o)
 		owner_test_clean(t, &a)
 	}
 }

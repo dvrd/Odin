@@ -49,7 +49,7 @@ server_client_auth_verify_chain :: proc(owner: ^Server_Handshake, message: []u8)
 	previous := context.allocator
 	context.allocator = owner._allocator
 	defer context.allocator = previous
-	certs, e := server_certificates_parse(message)
+	certs, e := engine_server_certificates_parse(message)
 	if e.kind != .None {
 		return false
 	}

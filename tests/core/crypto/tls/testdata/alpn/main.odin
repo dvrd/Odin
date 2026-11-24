@@ -130,7 +130,7 @@ async_case :: proc(c: Case) -> int {
 		callback  = handshake_done,
 		user_data = &state,
 	}
-	assert(tls.async_handshake(conn, &op, time.time_add(time.now(), 2 * time.Second)).kind == .None)
+	assert(tls.async_handshake(conn, &op, time.time_add(time.now(), 2 * time.Second)) == nil)
 	assert(tls.async_connection_state(conn).negotiated_protocol == "")
 	assert(nbio.run() == nil && state.done)
 	if c.failure {
@@ -197,7 +197,7 @@ main :: proc() {
 	pool := new(tls.Root_Pool)
 	defer free(pool)
 	defer tls.root_pool_destroy(pool)
-	assert(tls.root_pool_parse(pool, #load("../root.pem")).kind == .None)
+	assert(tls.root_pool_parse(pool, #load("../root.pem")) == nil)
 	wrong_root, parse_error := x509.parse(#load("../../../x509/testdata/chain_ed_root.der"))
 	assert(parse_error == .None)
 	defer x509.destroy(&wrong_root)

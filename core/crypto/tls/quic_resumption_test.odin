@@ -21,7 +21,7 @@ early_test_hello :: proc(dst: []u8, session: ^Session, scope: Quic_Session_Scope
 	}
 	x25519.scalarmult_basepoint(hello.x25519_public_key[:], private[:])
 	crypto.zero_explicit(&private, size_of(private))
-	n, e := client_hello_encode(dst, hello)
+	n, e := engine_client_hello_encode(dst, hello)
 	assert(e == .None)
 	layout, valid := client_hello_layout_decode(dst[:n])
 	assert(valid)
@@ -29,7 +29,7 @@ early_test_hello :: proc(dst: []u8, session: ^Session, scope: Quic_Session_Scope
 	n += 5
 	retry_put_u24(dst, 1, n - 4)
 	retry_put_u16(dst, layout.extensions_length_offset, u16(layout.extensions_size + 5))
-	size, error := quic_client_hello_offer(dst, n, session, scope, time.now(), early)
+	size, error := engine_quic_client_hello_offer(dst, n, session, scope, time.now(), early)
 	assert(error.kind == .None)
 	return dst[:size]
 }
@@ -42,22 +42,22 @@ early_test_admit :: proc(
 	hello: []u8,
 	now: time.Time,
 ) -> Server_Handshake_Error {
-	assert(server_handshake_init(owner, config, context.allocator) == .None)
-	_, _, e := server_handshake_feed(owner, .Initial, hello)
+	assert(engine_server_handshake_init(owner, config, context.allocator) == .None)
+	_, _, e := engine_server_handshake_feed(owner, .Initial, hello)
 	if e != .None {
 		return e
 	}
-	event, _ := server_handshake_peek(owner)
+	event, _ := engine_server_handshake_peek(owner)
 	assert(event.kind == .Peer_Parameters)
 	assert(
-		server_handshake_select_parameters(
+		engine_server_handshake_select_parameters(
 			owner,
 			event.id,
 			{mode = .QUIC, alpn_protocols = []string{"h3"}, quic_transport_parameters = []u8{0}},
 		) ==
 		.None,
 	)
-	return server_handshake_start_flight(owner, identity, now)
+	return engine_server_handshake_start_flight(owner, identity, now)
 }
 
 @(private)
@@ -67,17 +67,17 @@ early_test_ticket :: proc(
 	scope: Quic_Session_Scope,
 ) -> Session {
 	owner: Server_Handshake
-	defer server_handshake_destroy(&owner)
+	defer engine_server_handshake_destroy(&owner)
 	bytes: [4096]u8
 	hello := early_test_hello(bytes[:], nil, scope, false)
 	assert(early_test_admit(&owner, config, identity, hello, time.now()) == .None)
 	for _ in 0 ..< 100 {
-		event, _ := server_handshake_peek(&owner)
+		event, _ := engine_server_handshake_peek(&owner)
 		if event.kind == .None {
 			break
 		}
 		assert(event.kind != .Fatal)
-		assert(server_handshake_accept(&owner, event.id) == .None)
+		assert(engine_server_handshake_accept(&owner, event.id) == .None)
 	}
 	master := owner._resumption.master
 	defer crypto.zero_explicit(&master, size_of(master))
@@ -90,16 +90,16 @@ early_test_ticket :: proc(
 	secret: [32]u8
 	schedule_expand(.SHA256, master[:], "res master", hash[:], secret[:])
 	defer crypto.zero_explicit(&secret, size_of(secret))
-	_, _, fe := server_handshake_feed(&owner, .Handshake, finished[:])
+	_, _, fe := engine_server_handshake_feed(&owner, .Handshake, finished[:])
 	assert(fe == .None)
-	event, _ := server_handshake_peek(&owner)
+	event, _ := engine_server_handshake_peek(&owner)
 	assert(event.kind == .Handshake_Bytes && event.level == .Application)
 	session: Session
-	assert(quic_session_remember(&session, secret, event.bytes, scope, time.now()).kind == .None)
-	assert(server_handshake_accept(&owner, event.id) == .None)
-	event, _ = server_handshake_peek(&owner)
+	assert(engine_quic_session_remember(&session, secret, event.bytes, scope, time.now()).kind == .None)
+	assert(engine_server_handshake_accept(&owner, event.id) == .None)
+	event, _ = engine_server_handshake_peek(&owner)
 	assert(event.kind == .Complete)
-	assert(server_handshake_accept(&owner, event.id) == .None)
+	assert(engine_server_handshake_accept(&owner, event.id) == .None)
 	return session
 }
 
@@ -109,10 +109,10 @@ quic_early_ticket_real_binder_replay_age_profile_and_capacity :: proc(t: ^testin
 	defer store.destroy(&identity)
 	for mode in 0 ..< 7 {
 		keys: Server_Ticket_Keys
-		assert(server_ticket_keys_init(&keys) == .None)
+		assert(engine_server_ticket_keys_init(&keys) == .None)
 		defer server_ticket_keys_close(&keys)
 		replay: Anti_Replay
-		assert(anti_replay_init(&replay, 1) == .None)
+		assert(engine_anti_replay_init(&replay, 1) == .None)
 		defer anti_replay_close(&replay)
 		profile := [1]u8{1}
 		early := Server_Early_Data_Config {
@@ -156,8 +156,8 @@ quic_early_ticket_real_binder_replay_age_profile_and_capacity :: proc(t: ^testin
 			tickets.early_data = nil
 		}
 		if mode == 5 {
-			assert(server_ticket_keys_rotate(&keys, time.now()) == .None)
-			assert(server_ticket_keys_rotate(&keys, time.now()) == .None)
+			assert(engine_server_ticket_keys_rotate(&keys, time.now()) == .None)
+			assert(engine_server_ticket_keys_rotate(&keys, time.now()) == .None)
 		}
 		bytes: [4096]u8
 		hello := early_test_hello(bytes[:], &session, scope, true)
@@ -177,24 +177,24 @@ quic_early_ticket_real_binder_replay_age_profile_and_capacity :: proc(t: ^testin
 			testing.expect_value(t, owner._resumed, mode != 5)
 			testing.expect_value(t, server_handshake_early_accepted(&owner), mode == 0)
 			if mode == 0 {
-				event, _ := server_handshake_peek(&owner)
+				event, _ := engine_server_handshake_peek(&owner)
 				testing.expect_value(t, event.kind, .Early_Traffic_Secret)
 				secret, valid := session_early_secret(&session)
 				assert(valid)
 				policy := Early_Data_Policy {
 					allow = early_test_allow,
 				}
-				expected, ke := quic_early_packet_keys(secret, &policy, hello)
+				expected, ke := engine_quic_early_packet_keys(secret, &policy, hello)
 				assert(ke.kind == .None)
 				testing.expect_value(t, string(event.secret), string(expected.secret[:]))
 				crypto.zero_explicit(&secret, size_of(secret))
 				quic_direction_keys_clear(&expected)
-				assert(server_handshake_accept(&owner, event.id) == .None)
+				assert(engine_server_handshake_accept(&owner, event.id) == .None)
 				testing.expect(t, crypto.is_zero_constant_time(owner._resumption.early_secret[:]) == 1)
 			}
 		}
-		server_handshake_abort(&owner)
-		server_handshake_destroy(&owner)
+		engine_server_handshake_abort(&owner)
+		engine_server_handshake_destroy(&owner)
 		testing.expect_value(t, owner._stats.live_bytes, 0)
 		if mode == 0 || mode == 6 {
 			if mode == 6 {
@@ -204,7 +204,7 @@ quic_early_ticket_real_binder_replay_age_profile_and_capacity :: proc(t: ^testin
 			testing.expect_value(t, early_test_admit(&next, config, identity, hello, time.now()), .None)
 			// A failed binder cannot consume a reservation; an admitted connection can.
 			testing.expect_value(t, server_handshake_early_accepted(&next), mode == 6)
-			server_handshake_destroy(&next)
+			engine_server_handshake_destroy(&next)
 		}
 	}
 }

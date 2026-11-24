@@ -362,7 +362,7 @@ application_record_write :: proc(
 	content: []u8,
 ) -> IO_Error {
 	wire: [RECORD_HEADER_SIZE + MAX_INNER_PLAINTEXT_SIZE + GCM_TAG_SIZE]u8
-	size, protection_err := record_seal(&conn.application.send, wire[:], content_type, content)
+	size, protection_err := engine_record_seal(&conn.application.send, wire[:], content_type, content)
 	if protection_err != .None {
 		return {kind = .Encryption_Failed, protection = protection_err}
 	}
@@ -380,7 +380,7 @@ application_record_read :: proc(conn: ^Conn) -> (TLS_Content_Type, []u8, IO_Erro
 	wire: [RECORD_HEADER_SIZE + MAX_CIPHERTEXT_SIZE]u8
 	wire_size, wire_error := application_record_wire_read(conn, wire[:])
 	if wire_error.kind != .None do return {}, nil, wire_error
-	content_type, content, protection_err := record_open(
+	content_type, content, protection_err := engine_record_open(
 		&conn.application.receive,
 		conn.application.inbound[:],
 		wire[:wire_size],
@@ -663,7 +663,7 @@ async_application_drive :: proc(conn: ^Async_Conn) {
 						{kind = .Unexpected_Content_Type},
 					); return
 				}
-				content_type, content, err := record_open(
+				content_type, content, err := engine_record_open(
 					&state.receive,
 					conn.rx_plain[:],
 					conn.rx_wire[:conn.rx_expected],
@@ -711,7 +711,7 @@ async_application_drive :: proc(conn: ^Async_Conn) {
 	if conn.closing || conn.failure.kind != .None || conn.tx.pending || conn.tx_done do return
 	if state.key_update_pending ||
 	   conn.write_op != nil && application_send_key_exhausted(state) {
-		size, err := record_seal(&state.send, conn.tx_wire[:], .Handshake, []u8{24, 0, 0, 1, 0})
+		size, err := engine_record_seal(&state.send, conn.tx_wire[:], .Handshake, []u8{24, 0, 0, 1, 0})
 		if err != .None {
 			async_terminal(
 				conn,
@@ -740,7 +740,7 @@ async_application_drive :: proc(conn: ^Async_Conn) {
 		return
 	}
 	count := min(MAX_PLAINTEXT_SIZE, len(conn.write_buffer) - written)
-	size, err := record_seal(
+	size, err := engine_record_seal(
 		&state.send,
 		conn.tx_wire[:],
 		.Application_Data,

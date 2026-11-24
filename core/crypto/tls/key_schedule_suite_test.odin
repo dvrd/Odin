@@ -86,10 +86,10 @@ schedule_suite_roundtrip :: proc(t: ^testing.T, sender, peer: ^Record_Protection
 	wire: [RECORD_HEADER_SIZE + 64]u8
 	plain: [64]u8
 
-	written, seal_error := record_seal(sender, wire[:], .Application_Data, body[:])
+	written, seal_error := engine_record_seal(sender, wire[:], .Application_Data, body[:])
 	testing.expect_value(t, seal_error, Record_Protection_Error.None, loc)
 
-	kind, opened, open_error := record_open(peer, plain[:], wire[:written])
+	kind, opened, open_error := engine_record_open(peer, plain[:], wire[:written])
 	testing.expect_value(t, open_error, Record_Protection_Error.None, loc)
 	testing.expect_value(t, kind, TLS_Content_Type.Application_Data, loc)
 	testing.expect_value(t, len(opened), len(body), loc)
@@ -255,7 +255,7 @@ schedule_retry_binds_the_transcript_to_the_retry_suite :: proc(t: ^testing.T) {
 	defer handshake_keys_clear(conn)
 	conn.phase = .Handshake_Pending
 	conn.config = {server_name = "example.com", offer = .Upstream, _cipher_suites = suites[:], _groups = groups[:]}
-	testing.expect_value(t, client_hello_prepare(conn).kind, Client_Hello_Send_Error_Kind.None)
+	testing.expect_value(t, engine_client_hello_prepare(conn).kind, Client_Hello_Send_Error_Kind.None)
 	conn.phase = .Awaiting_Server_Hello
 
 	// A retry for a suite outside the offer is refused before any state moves.

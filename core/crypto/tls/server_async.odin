@@ -142,7 +142,8 @@ Server_Async_Conn :: struct {
 @(private)
 server_async_valid :: proc(s: ^Server_Async_Conn) -> bool {return s != nil && s._self == s}
 
-server_async_server :: proc(
+@(private)
+engine_server_async_server :: proc(
 	s: ^Server_Async_Conn,
 	transport: net.Async_Connection,
 	executor: net.Async_Executor,
@@ -208,7 +209,7 @@ server_async_server :: proc(
 	}
 	s._self, s._transport, s._executor, s._allocator, s._config, s._phase =
 		s, transport, executor, allocator, config, .Ready
-	if server_handshake_init(&s._engine, config.handshake, {server_async_allocator, s}) != .None {
+	if engine_server_handshake_init(&s._engine, config.handshake, {server_async_allocator, s}) != .None {
 		s^ = {}
 		return .Invalid_Config
 	}
@@ -227,7 +228,8 @@ server_async_server :: proc(
 	return .None
 }
 
-server_async_handshake :: proc(
+@(private)
+engine_server_async_handshake :: proc(
 	s: ^Server_Async_Conn,
 	op: ^Server_Async_Handshake_Operation,
 	deadline := time.Time{},
@@ -263,7 +265,8 @@ server_async_handshake :: proc(
 	return {}
 }
 
-server_async_cancel_handshake :: proc(s: ^Server_Async_Conn) -> net.Connection_Error {
+@(private)
+engine_server_async_cancel_handshake :: proc(s: ^Server_Async_Conn) -> net.Connection_Error {
 	if !server_async_valid(s) {
 		return {kind = .Invalid_Connection}
 	}
@@ -295,7 +298,8 @@ server_async_connection_state :: proc(s: ^Server_Async_Conn) -> Connection_State
 	}
 }
 
-server_async_failure :: proc(s: ^Server_Async_Conn) -> Server_Async_Failure {
+@(private)
+engine_server_async_failure :: proc(s: ^Server_Async_Conn) -> Server_Async_Failure {
 	if !server_async_valid(s) {
 		return {kind = .Invalid_State}
 	}
@@ -307,13 +311,14 @@ server_async_stats :: proc(s: ^Server_Async_Conn) -> Server_Async_Stats {
 		return {}
 	}
 	result := s._stats
-	result.engine, _ = server_handshake_stats(&s._engine)
+	result.engine, _ = engine_server_handshake_stats(&s._engine)
 	return result
 }
 
 // Bounded control request, serialized with all record writes. Completion/error
 // belongs to the connection; this does not borrow an operation or caller bytes.
-server_async_key_update :: proc(s: ^Server_Async_Conn, request_peer := false) -> net.Connection_Error {
+@(private)
+engine_server_async_key_update :: proc(s: ^Server_Async_Conn, request_peer := false) -> net.Connection_Error {
 	if !server_async_valid(s) || s._phase != .Established {
 		return {kind = .Invalid_Connection}
 	}
@@ -573,7 +578,7 @@ server_async_cleanup :: proc(s: ^Server_Async_Conn) {
 		return
 	}
 	s._cleaned = true
-	_ = server_handshake_destroy(&s._engine)
+	_ = engine_server_handshake_destroy(&s._engine)
 	server_async_free(s, &s._key_grant, align_of(Server_Async_Keys))
 	server_async_free(s, &s._rx_wire)
 	server_async_free(s, &s._rx_plain)

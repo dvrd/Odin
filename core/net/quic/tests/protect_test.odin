@@ -180,7 +180,7 @@ protect_sign_verify :: proc(dst: []u8, transcript: [32]u8) -> []u8 {
 }
 
 protect_roots :: proc(pool: ^tls.Root_Pool) -> []^x509.Certificate {
-	if tls.root_pool_parse(pool, #load("../../../../tests/core/crypto/tls/testdata/root.pem")).kind != .None {
+	if tls.root_pool_parse(pool, #load("../../../../tests/core/crypto/tls/testdata/root.pem")) != nil {
 		return nil
 	}
 	return pool.roots[:pool.count]
@@ -277,7 +277,7 @@ rfc9001_retry_and_packet_number_and_a5 :: proc(t: ^testing.T) {
 	testing.expect(t, bytes.equal(keys.iv[:], hex(expect_storage[:], "e0459b3474bdd0e44a41c144")))
 	testing.expect(t, bytes.equal(keys.hp[:], hex(expect_storage[:], "25a282b9e82f06f21f488917a4fc8f1b73573685608597d0efcb076b0ab7a7a4")))
 	ku: [32]u8
-	testing.expect_value(t, tls.hkdf_expand_label(secret, "quic ku", nil, ku[:]), .None)
+	testing.expect_value(t, tls.hkdf_expand_label(secret, "quic ku", nil, ku[:]), nil)
 	testing.expect(t, bytes.equal(ku[:], hex(expect_storage[:], "1223504755036d556342ee9361d253421a826c9ecdf3c7148684b36b714881f9")))
 	testing.expect(t, !bytes.equal(keys.key[:], ku[:]))
 
@@ -393,7 +393,7 @@ aes_handshake_and_one_rtt_from_tls_labels :: proc(t: ^testing.T) {
 	}
 	early, ee := tls.quic_early_packet_keys(secret)
 	defer tls.quic_direction_keys_clear(&early)
-	testing.expect_value(t, ee.kind, .Early_Data_Disabled)
+	testing.expect_value(t, ee, tls.Error(tls.General_Error.Early_Data_Rejected))
 	testing.expect(t, crypto.is_zero_constant_time(early.key[:]) == 1)
 
 	zero_rtt: [32]u8
@@ -421,29 +421,29 @@ quic_transcript_authentication_discards_keys :: proc(t: ^testing.T) {
 	shared[0] = 0x42
 	hs, he := tls.quic_handshake_secrets(shared, ch, sh, params[:])
 	defer tls.quic_handshake_keys_clear(&hs)
-	testing.expect_value(t, he.kind, .None)
+	testing.expect_value(t, he, nil)
 	testing.expect(t, crypto.is_zero_constant_time(hs.handshake_secret[:]) == 0)
 
 	zero: [32]u8
 	_, zero_err := tls.quic_handshake_secrets(zero, ch, sh, params[:])
-	testing.expect_value(t, zero_err.kind, .Derivation_Failed)
+	testing.expect_value(t, zero_err, tls.Error(tls.Protocol_Error.Internal_Error))
 	_, mismatch := tls.quic_handshake_secrets(shared, ch, sh, []u8{1, 2, 4})
-	testing.expect_value(t, mismatch.kind, .Transcript_Mismatch)
+	testing.expect_value(t, mismatch, tls.Error(tls.Protocol_Error.Illegal_Parameter))
 	alt: [256]u8
 	_, missing := tls.quic_handshake_secrets(shared, protect_client_hello(alt[:], []string{"h3"}, nil, false, nil), sh, nil)
-	testing.expect_value(t, missing.kind, .Parameters_Missing)
+	testing.expect_value(t, missing, tls.Error(tls.Protocol_Error.Missing_Extension))
 	bad_alpn := protect_client_hello(alt[:], []string{"h2"}, params[:], true, nil)
 	_, alpn_err := tls.quic_handshake_secrets(shared, bad_alpn, sh, params[:])
-	testing.expect_value(t, alpn_err.kind, .Invalid_ALPN)
+	testing.expect_value(t, alpn_err, tls.Error(tls.General_Error.Invalid_Config))
 	two := protect_client_hello(alt[:], []string{"h3", "h3"}, params[:], true, nil)
 	_, two_err := tls.quic_handshake_secrets(shared, two, sh, params[:])
-	testing.expect_value(t, two_err.kind, .Invalid_ALPN)
+	testing.expect_value(t, two_err, tls.Error(tls.General_Error.Invalid_Config))
 	early_ch := protect_client_hello(alt[:], []string{"h3"}, params[:], true, []u8{0x00, 0x2a, 0x00, 0x00})
 	_, early_err := tls.quic_handshake_secrets(shared, early_ch, sh, params[:])
-	testing.expect_value(t, early_err.kind, .Early_Data_Disabled)
+	testing.expect_value(t, early_err, tls.Error(tls.General_Error.Early_Data_Rejected))
 	big: [1025]u8
 	_, big_err := tls.quic_handshake_secrets(shared, ch, sh, big[:])
-	testing.expect_value(t, big_err.kind, .Parameters_Oversized)
+	testing.expect_value(t, big_err, tls.Error(tls.General_Error.Limit_Exceeded))
 
 	ee_storage: [64]u8
 	groups := [?]u8{0x00, 0x0a, 0x00, 0x02, 0x00, 0x1d}
@@ -474,7 +474,7 @@ quic_transcript_authentication_discards_keys :: proc(t: ^testing.T) {
 	now := time.unix(1893456000, 0)
 	app, client_finished, ae := tls.quic_application_secrets(hs.handshake_secret, ch, sh, flight, "localhost", roots, now, params[:], params[:])
 	defer tls.quic_application_keys_clear(&app)
-	testing.expect_value(t, ae.kind, .None)
+	testing.expect_value(t, ae, nil)
 	expect_finished := protect_hash(ch, sh, ee, cert, cv, server_finished[:])
 	encoded: [tls.FINISHED_MESSAGE_SIZE]u8
 	en, ee2 := tls.finished_encode(encoded[:], hs.client.secret, expect_finished)
@@ -482,11 +482,9 @@ quic_transcript_authentication_discards_keys :: proc(t: ^testing.T) {
 	testing.expect(t, crypto.is_zero_constant_time(app.client.key[:]) == 0)
 
 	_, _, wrong_params := tls.quic_application_secrets(hs.handshake_secret, ch, sh, flight, "localhost", roots, now, params[:], []u8{9, 9, 9})
-	testing.expect_value(t, wrong_params.kind, .Transcript_Mismatch)
+	testing.expect_value(t, wrong_params, tls.Error(tls.Protocol_Error.Illegal_Parameter))
 	_, _, wrong_name := tls.quic_application_secrets(hs.handshake_secret, ch, sh, flight, "wrong.example", roots, now, params[:], params[:])
-	testing.expect_value(t, wrong_name.kind, .Authentication_Failed)
-	testing.expect_value(t, wrong_name.authentication.kind, .Certificate_Chain_Invalid)
-	testing.expect_value(t, wrong_name.authentication.x509, .Hostname_Mismatch)
+	testing.expect_value(t, wrong_name, tls.Error(tls.Protocol_Error.Bad_Certificate))
 	cv[8] ~= 1
 	at = 0
 	at += copy(flight_storage[at:], ee)
@@ -494,8 +492,7 @@ quic_transcript_authentication_discards_keys :: proc(t: ^testing.T) {
 	at += copy(flight_storage[at:], cv)
 	at += copy(flight_storage[at:], server_finished[:])
 	_, _, bad_sig := tls.quic_application_secrets(hs.handshake_secret, ch, sh, flight_storage[:at], "localhost", roots, now, params[:], params[:])
-	testing.expect_value(t, bad_sig.kind, .Authentication_Failed)
-	testing.expect_value(t, bad_sig.authentication.kind, .Invalid_Signature)
+	testing.expect_value(t, bad_sig, tls.Error(tls.Protocol_Error.Decrypt_Error))
 	empty_cert := [?]u8{0x0b, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00}
 	at = 0
 	at += copy(flight_storage[at:], ee)
@@ -503,8 +500,7 @@ quic_transcript_authentication_discards_keys :: proc(t: ^testing.T) {
 	at += copy(flight_storage[at:], cv)
 	at += copy(flight_storage[at:], server_finished[:])
 	_, _, empty := tls.quic_application_secrets(hs.handshake_secret, ch, sh, flight_storage[:at], "wrong.example", roots, now, params[:], params[:])
-	testing.expect_value(t, empty.kind, .Authentication_Failed)
-	testing.expect_value(t, empty.authentication.kind, .Empty_Certificate_List)
+	testing.expect_value(t, empty, tls.Error(tls.Protocol_Error.Illegal_Parameter))
 	early_ee := protect_extensions(ee_storage[:], 8, params[:], []u8{0x00, 0x2a, 0x00, 0x00})
 	at = 0
 	at += copy(flight_storage[at:], early_ee)
@@ -512,7 +508,7 @@ quic_transcript_authentication_discards_keys :: proc(t: ^testing.T) {
 	at += copy(flight_storage[at:], cv)
 	at += copy(flight_storage[at:], server_finished[:])
 	_, _, early_ext := tls.quic_application_secrets(hs.handshake_secret, ch, sh, flight_storage[:at], "localhost", roots, now, params[:], params[:])
-	testing.expect_value(t, early_ext.kind, .Early_Data_Disabled)
+	testing.expect_value(t, early_ext, tls.Error(tls.General_Error.Early_Data_Rejected))
 
 	initial_buf, handshake_buf, app_buf: [64]u8
 	h: quic.Handshake
@@ -538,7 +534,7 @@ quic_transcript_authentication_discards_keys :: proc(t: ^testing.T) {
 	testing.expect(t, ioe == .None && opened_initial == 4 && bytes.equal(initial_out[:], initial_plain[:]))
 	testing.expect_value(t, quic.handshake_install_zero_rtt(&h, []u8{1, 2, 3, 4}), .Zero_RTT_Disabled)
 	testing.expect(t, !h.have_one_rtt && !h.one_rtt_write.initialized)
-	testing.expect_value(t, quic.handshake_accept_client_hello(&h, shared, ch, sh, params[:]).kind, .None)
+	testing.expect_value(t, quic.handshake_accept_client_hello(&h, shared, ch, sh, params[:]), nil)
 	testing.expect(t, h.have_handshake && !h.peer_authenticated && !h.initial_discarded)
 	testing.expect_value(t, quic.handshake_note_handshake_packet(&h, true), .None)
 	testing.expect(t, h.initial_discarded && !h.initial.client.initialized && h.have_handshake)
@@ -549,7 +545,7 @@ quic_transcript_authentication_discards_keys :: proc(t: ^testing.T) {
 	testing.expect_value(t, he2, .None)
 	_, unauth := quic.handshake_payload_seal(&h, header[hn:], header[:hn], []u8{1, 2, 3, 4}, .One_RTT, 0)
 	testing.expect_value(t, unauth, .Unauthenticated)
-	testing.expect_value(t, quic.handshake_authenticate_server(&h, ch, sh, flight, "localhost", roots, now, params[:]).kind, .None)
+	testing.expect_value(t, quic.handshake_authenticate_server(&h, ch, sh, flight, "localhost", roots, now, params[:]), nil)
 	testing.expect(t, h.peer_authenticated && h.have_one_rtt && !h.handshake_complete)
 	_, still := quic.handshake_payload_seal(&h, header[hn:], header[:hn], []u8{1, 2, 3, 4}, .One_RTT, 0)
 	testing.expect_value(t, still, .Unauthenticated)
@@ -742,9 +738,9 @@ one_rtt_key_update :: proc(t: ^testing.T) {
 	testing.expect(t, chacha.key != a5_key)
 	ku_key, ku_hp: [32]u8
 	ku_iv: [12]u8
-	testing.expect_value(t, tls.hkdf_expand_label(chacha.secret[:], "quic key", nil, ku_key[:]), .None)
-	testing.expect_value(t, tls.hkdf_expand_label(chacha.secret[:], "quic iv", nil, ku_iv[:]), .None)
-	testing.expect_value(t, tls.hkdf_expand_label(chacha.secret[:], "quic hp", nil, ku_hp[:]), .None)
+	testing.expect_value(t, tls.hkdf_expand_label(chacha.secret[:], "quic key", nil, ku_key[:]), nil)
+	testing.expect_value(t, tls.hkdf_expand_label(chacha.secret[:], "quic iv", nil, ku_iv[:]), nil)
+	testing.expect_value(t, tls.hkdf_expand_label(chacha.secret[:], "quic hp", nil, ku_hp[:]), nil)
 	testing.expect(t, bytes.equal(chacha.key[:], ku_key[:]) && chacha.iv == ku_iv)
 	testing.expect(t, !bytes.equal(chacha.hp[:], ku_hp[:]))
 	testing.expect_value(t, quic.packet_keys_advance(&chacha), .Key_Update_Disabled)

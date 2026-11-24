@@ -24,11 +24,11 @@ rfc8448_record_vector :: proc(t: ^testing.T) {
 	tls.record_protection_init(&reader, key, iv)
 	wire: [28]u8
 	n, err := tls.record_seal(&writer, wire[:], .Application_Data, transmute([]u8)string("ABCDEF"))
-	testing.expect_value(t, err, .None)
+	testing.expect_value(t, err, nil)
 	testing.expect(t, bytes.equal(wire[:n], expected))
 	plaintext: [32]u8
 	kind, body, open_error := tls.record_open(&reader, plaintext[:], expected)
-	testing.expect_value(t, open_error, .None)
+	testing.expect_value(t, open_error, nil)
 	testing.expect_value(t, kind, .Application_Data)
 	testing.expect_value(t, string(body), "ABCDEF")
 	tls.record_protection_clear(&reader)

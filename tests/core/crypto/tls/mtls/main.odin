@@ -113,7 +113,7 @@ main :: proc() {
 		os.args[1], os.args[2], os.args[3], os.args[4], os.args[5], os.args[6]
 	expect := want == "pass"
 	roots: tls.Root_Pool
-	assert(tls.root_pool_load_file(&roots, fmt.tprintf("%s/root.pem", dir)).kind == .None)
+	assert(tls.root_pool_load_file(&roots, fmt.tprintf("%s/root.pem", dir)) == nil)
 	defer tls.root_pool_destroy(&roots)
 	auth := tls.Client_Auth_Config {
 		mode  = .Require,
@@ -216,13 +216,13 @@ main :: proc() {
 			}
 			assert(nbio.tcp_async_connection_init(&s.tcp, socket) == nil)
 			assert(
-				tls.async_client(&s.owner, nbio.tcp_async_connection(&s.tcp), nbio.async_executor(), config) == .None,
+				tls.async_client(&s.owner, nbio.tcp_async_connection(&s.tcp), nbio.async_executor(), config) == nil,
 			)
 			s.hs = {
 				callback  = hs_done,
 				user_data = &s,
 			}
-			assert(tls.async_handshake(&s.owner, &s.hs).kind == .None)
+			assert(tls.async_handshake(&s.owner, &s.hs) == nil)
 			assert(nbio.run() == nil)
 			assert(s.closed)
 		}

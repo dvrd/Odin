@@ -97,7 +97,8 @@ root_pool_add_der :: proc(
 	return {}
 }
 
-root_pool_parse :: proc(
+@(private)
+engine_root_pool_parse :: proc(
 	pool: ^Root_Pool,
 	data: []u8,
 	allocator := context.allocator,
@@ -152,7 +153,8 @@ root_pool_parse :: proc(
 	return {}
 }
 
-root_pool_load_file :: proc(pool: ^Root_Pool, path: string) -> Root_Error {
+@(private)
+engine_root_pool_load_file :: proc(pool: ^Root_Pool, path: string) -> Root_Error {
 	if pool == nil || pool.allocator.procedure != nil {
 		return {kind = .Invalid_State}
 	}
@@ -183,14 +185,15 @@ root_pool_load_file :: proc(pool: ^Root_Pool, path: string) -> Root_Error {
 		return {kind = .Bundle_Oversized}
 	}
 
-	return root_pool_parse(pool, data[:used])
+	return engine_root_pool_parse(pool, data[:used])
 }
 
 // Uses the platform trust store, without shell commands or a bundled frozen
 // CA list. An explicit application path can use load_file and is not merged
 // with this store. Darwin reads Security.framework anchors; other systems
 // read the conventional PEM bundle. Verification is never disabled.
-root_pool_load_system :: proc(pool: ^Root_Pool) -> Root_Error {
+@(private)
+engine_root_pool_load_system :: proc(pool: ^Root_Pool) -> Root_Error {
 	when ODIN_OS == .Darwin {
 		loaded := root_pool_load_darwin(pool)
 		if loaded.kind == .None && pool.count > 0 {
@@ -218,7 +221,7 @@ root_pool_load_system_files :: proc(pool: ^Root_Pool) -> Root_Error {
 		kind = .Read_Failed,
 	}
 	for path in paths {
-		err := root_pool_load_file(pool, path)
+		err := engine_root_pool_load_file(pool, path)
 		if err.kind == .None do return {}
 
 		if err.kind != .Read_Failed do return err

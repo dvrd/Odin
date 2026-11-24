@@ -42,11 +42,11 @@ parameters_test_hello :: proc(
 }
 
 parameters_test_ready :: proc(t: ^testing.T, o: ^Server_Handshake, a: ^Owner_Test_Audit, wire: []u8) -> u64 {
-	testing.expect_value(t, server_handshake_init(o, SERVER_HANDSHAKE_DEFAULT_CONFIG, owner_test_allocator(a)), .None)
-	n, _, e := server_handshake_feed(o, .Initial, wire)
+	testing.expect_value(t, engine_server_handshake_init(o, SERVER_HANDSHAKE_DEFAULT_CONFIG, owner_test_allocator(a)), .None)
+	n, _, e := engine_server_handshake_feed(o, .Initial, wire)
 	testing.expect_value(t, n, len(wire))
 	testing.expect_value(t, e, .None)
-	event, _ := server_handshake_peek(o)
+	event, _ := engine_server_handshake_peek(o)
 	testing.expect_value(t, event.kind, .Peer_Parameters)
 	return event.id
 }
@@ -100,10 +100,10 @@ server_parameters_policy_and_opaque_preference :: proc(t: ^testing.T) {
 			config.quic_transport_parameters = []u8{1}
 			want = .Invalid_Config
 		}
-		testing.expect_value(t, server_handshake_select_parameters(&o, id + 1, config), .Invalid_Event)
-		testing.expect_value(t, server_handshake_select_parameters(&o, id, config), want)
+		testing.expect_value(t, engine_server_handshake_select_parameters(&o, id + 1, config), .Invalid_Event)
+		testing.expect_value(t, engine_server_handshake_select_parameters(&o, id, config), want)
 		if want == .None {
-			p, e := server_handshake_parameters(&o)
+			p, e := engine_server_handshake_parameters(&o)
 			testing.expect_value(t, e, .None)
 			expected := "\x00\xff"
 			if mode == 1 {
@@ -114,15 +114,15 @@ server_parameters_policy_and_opaque_preference :: proc(t: ^testing.T) {
 			}
 			testing.expect_value(t, string(p.alpn), expected)
 			testing.expect(t, !p.authenticated)
-			testing.expect_value(t, server_handshake_select_parameters(&o, id, config), .Invalid_State)
+			testing.expect_value(t, engine_server_handshake_select_parameters(&o, id, config), .Invalid_State)
 		} else {
-			event, _ := server_handshake_peek(&o)
+			event, _ := engine_server_handshake_peek(&o)
 			testing.expect_value(t, event.kind, .Peer_Parameters if want == .Invalid_Config else .Fatal)
-			_, e := server_handshake_parameters(&o)
+			_, e := engine_server_handshake_parameters(&o)
 			testing.expect_value(t, e, .Invalid_State)
 		}
-		server_handshake_abort(&o)
-		server_handshake_destroy(&o)
+		engine_server_handshake_abort(&o)
+		engine_server_handshake_destroy(&o)
 		owner_test_clean(t, &a)
 	}
 }
@@ -176,13 +176,13 @@ server_parameters_offer_validation_and_config_bounds :: proc(t: ^testing.T) {
 		config := Server_Handshake_Parameters_Config {
 			alpn_protocols = list[:count],
 		}
-		e := server_handshake_select_parameters(&o, id, config)
+		e := engine_server_handshake_select_parameters(&o, id, config)
 		testing.expect_value(
 			t,
 			e,
 			.Invalid_Config if mode == 1 || mode == 2 || mode == 5 else .No_Application_Protocol,
 		)
-		server_handshake_destroy(&o)
+		engine_server_handshake_destroy(&o)
 		owner_test_clean(t, &a)
 	}
 }
@@ -253,9 +253,9 @@ server_parameters_quic_mode_limits_and_owned_storage :: proc(t: ^testing.T) {
 		if mode == 9 {
 			want = .Allocation_Failed
 		}
-		testing.expect_value(t, server_handshake_select_parameters(&o, id, config), want)
+		testing.expect_value(t, engine_server_handshake_select_parameters(&o, id, config), want)
 		if want == .None {
-			p, e := server_handshake_parameters(&o)
+			p, e := engine_server_handshake_parameters(&o)
 			testing.expect_value(t, e, .None)
 			testing.expect_value(t, len(p.alpn), 255)
 			testing.expect_value(t, len(p.peer_quic), n)
@@ -271,7 +271,7 @@ server_parameters_quic_mode_limits_and_owned_storage :: proc(t: ^testing.T) {
 			// Encoder output is exact and hashed only when accepted.
 			before := transcript_snapshot(&o._transcript)
 			testing.expect_value(t, server_parameters_extensions(&o), .None)
-			event, _ := server_handshake_peek(&o)
+			event, _ := engine_server_handshake_peek(&o)
 			testing.expect_value(t, event.kind, .Handshake_Bytes)
 			testing.expect_value(t, len(event.bytes), 1296 if n == 1024 else 272)
 			testing.expect_value(t, hello_u16(event.bytes, 6), u16(16))
@@ -281,7 +281,7 @@ server_parameters_quic_mode_limits_and_owned_storage :: proc(t: ^testing.T) {
 			testing.expect_value(t, transcript_snapshot(&o._transcript), before)
 			expected := o._transcript
 			transcript_update(&expected, event.bytes)
-			testing.expect_value(t, server_handshake_accept(&o, event.id), .None)
+			testing.expect_value(t, engine_server_handshake_accept(&o, event.id), .None)
 			testing.expect_value(t, transcript_snapshot(&o._transcript), transcript_snapshot(&expected))
 			fmt.printf(
 				"parameters: owner=%d parameter bytes=%d peak=%d allocations=%d\n",
@@ -291,8 +291,8 @@ server_parameters_quic_mode_limits_and_owned_storage :: proc(t: ^testing.T) {
 				a.calls,
 			)
 		}
-		server_handshake_abort(&o)
-		server_handshake_destroy(&o)
+		engine_server_handshake_abort(&o)
+		engine_server_handshake_destroy(&o)
 		owner_test_clean(t, &a)
 	}
 }
@@ -311,7 +311,7 @@ server_parameters_finished_authentication_and_cleanup :: proc(t: ^testing.T) {
 		id := parameters_test_ready(t, &o, &a, hello)
 		testing.expect_value(
 			t,
-			server_handshake_select_parameters(
+			engine_server_handshake_select_parameters(
 				&o,
 				id,
 				{mode = .QUIC, alpn_protocols = []string{"opaque"}, quic_transport_parameters = []u8{9, 8}},
@@ -326,7 +326,7 @@ server_parameters_finished_authentication_and_cleanup :: proc(t: ^testing.T) {
 		}
 		testing.expect_value(
 			t,
-			server_handshake_start_flight(&o, store, time.from_nanoseconds(1790000000 * 1000000000)),
+			engine_server_handshake_start_flight(&o, store, time.from_nanoseconds(1790000000 * 1000000000)),
 			.None,
 		)
 		transcript: Handshake_Transcript
@@ -334,7 +334,7 @@ server_parameters_finished_authentication_and_cleanup :: proc(t: ^testing.T) {
 		transcript_update(&transcript, hello)
 		secret: [32]u8
 		for _ in 0 ..< 100 {
-			event, _ := server_handshake_peek(&o)
+			event, _ := engine_server_handshake_peek(&o)
 			if event.kind == .None {
 				break
 			}
@@ -349,16 +349,16 @@ server_parameters_finished_authentication_and_cleanup :: proc(t: ^testing.T) {
 			if event.kind == .Traffic_Secret && event.level == .Handshake && event.direction == .Read {
 				copy(secret[:], event.secret)
 			}
-			server_handshake_accept(&o, event.id)
+			engine_server_handshake_accept(&o, event.id)
 		}
 		if mode != 4 && mode != 5 {
-			p, e := server_handshake_parameters(&o)
+			p, e := engine_server_handshake_parameters(&o)
 			testing.expect_value(t, e, .None)
 			testing.expect(t, !p.authenticated)
 			if mode == 2 {
-				server_handshake_abort(&o)
+				engine_server_handshake_abort(&o)
 			} else if mode == 3 {
-				server_handshake_destroy(&o)
+				engine_server_handshake_destroy(&o)
 			} else {
 				finished: [36]u8
 				_, fe := finished_encode(finished[:], secret, transcript_snapshot(&transcript))
@@ -366,30 +366,30 @@ server_parameters_finished_authentication_and_cleanup :: proc(t: ^testing.T) {
 				if mode == 1 {
 					finished[35] ~= 1
 				}
-				_, _, he := server_handshake_feed(&o, .Handshake, finished[:])
+				_, _, he := engine_server_handshake_feed(&o, .Handshake, finished[:])
 				testing.expect_value(t, he, .Finished_Failed if mode == 1 else .None)
 				if mode != 1 {
-					p, e = server_handshake_parameters(&o)
+					p, e = engine_server_handshake_parameters(&o)
 					testing.expect_value(t, e, .None)
 					testing.expect(t, p.authenticated)
 					testing.expect_value(t, string(p.alpn), "opaque")
 					testing.expect_value(t, a.live, 11)
 					testing.expect(t, mem.check_zero_ptr(&o._transcript, size_of(o._transcript)))
-					event, _ := server_handshake_peek(&o)
+					event, _ := engine_server_handshake_peek(&o)
 					testing.expect_value(t, event.kind, .Complete)
 					if mode == 6 {
-						server_handshake_abort(&o)
+						engine_server_handshake_abort(&o)
 					} else if mode == 7 {
-						server_handshake_destroy(&o)
+						engine_server_handshake_destroy(&o)
 					} else {
-						server_handshake_accept(&o, event.id)
+						engine_server_handshake_accept(&o, event.id)
 					}
 				}
 			}
 		}
-		_, e := server_handshake_parameters(&o)
+		_, e := engine_server_handshake_parameters(&o)
 		testing.expect_value(t, e, .Invalid_State)
-		server_handshake_destroy(&o)
+		engine_server_handshake_destroy(&o)
 		owner_test_clean(t, &a)
 		ss, _ := credential_store.stats(store)
 		testing.expect_value(t, ss.active_leases, 0)
@@ -409,32 +409,32 @@ server_parameters_allocation_faults_and_pending_event_cancel :: proc(t: ^testing
 		id := parameters_test_ready(t, &o, &a, parameters_test_hello(storage[:], []string{"h3"}, true, []u8{1}))
 		testing.expect_value(
 			t,
-			server_handshake_select_parameters(
+			engine_server_handshake_select_parameters(
 				&o,
 				id,
 				{mode = .QUIC, alpn_protocols = []string{"h3"}, quic_transport_parameters = []u8{2}},
 			),
 			.None,
 		)
-		server_handshake_start_flight(&o, store, time.from_nanoseconds(1790000000 * 1000000000))
+		engine_server_handshake_start_flight(&o, store, time.from_nanoseconds(1790000000 * 1000000000))
 		for _ in 0 ..< stop {
-			event, _ := server_handshake_peek(&o)
+			event, _ := engine_server_handshake_peek(&o)
 			if event.kind == .None {
 				break
 			}
 			assert(event.kind != .Fatal)
-			server_handshake_accept(&o, event.id)
+			engine_server_handshake_accept(&o, event.id)
 		}
-		event, _ := server_handshake_peek(&o)
+		event, _ := engine_server_handshake_peek(&o)
 		if stop % 2 == 0 {
-			server_handshake_abort(&o)
+			engine_server_handshake_abort(&o)
 		} else {
-			server_handshake_destroy(&o)
+			engine_server_handshake_destroy(&o)
 		}
-		testing.expect_value(t, server_handshake_accept(&o, event.id), .Invalid_Event)
-		_, e := server_handshake_parameters(&o)
+		testing.expect_value(t, engine_server_handshake_accept(&o, event.id), .Invalid_Event)
+		_, e := engine_server_handshake_parameters(&o)
 		testing.expect_value(t, e, .Invalid_State)
-		server_handshake_destroy(&o)
+		engine_server_handshake_destroy(&o)
 		owner_test_clean(t, &a)
 		ss, _ := credential_store.stats(store)
 		testing.expect_value(t, ss.active_leases, 0)
@@ -461,17 +461,17 @@ server_parameters_allocation_faults_and_pending_event_cancel :: proc(t: ^testing
 		if mode == 4 {
 			o._next_id = max(u64)
 		}
-		e := server_handshake_select_parameters(&o, id, {alpn_protocols = []string{"h3"}})
+		e := engine_server_handshake_select_parameters(&o, id, {alpn_protocols = []string{"h3"}})
 		// Selecting parameters accepts an existing event, without allocating a
 		// new identity. Exhaustion is detected at the next producer event.
 		testing.expect_value(t, e, .None if mode == 4 else .Allocation_Failed)
 		if mode == 4 {
-			server_handshake_start_flight(&o, store, time.from_nanoseconds(1790000000 * 1000000000))
-			event, _ := server_handshake_peek(&o)
+			engine_server_handshake_start_flight(&o, store, time.from_nanoseconds(1790000000 * 1000000000))
+			event, _ := engine_server_handshake_peek(&o)
 			testing.expect_value(t, event.kind, .None)
 			testing.expect_value(t, o._error, .Identity_Exhausted)
 		}
-		server_handshake_destroy(&o)
+		engine_server_handshake_destroy(&o)
 		owner_test_clean(t, &a)
 	}
 }
@@ -497,7 +497,7 @@ server_parameters_maximum_simultaneous_grants :: proc(t: ^testing.T) {
 	id := parameters_test_ready(t, &o, &a, storage[:])
 	testing.expect_value(
 		t,
-		server_handshake_select_parameters(
+		engine_server_handshake_select_parameters(
 			&o,
 			id,
 			{mode = .QUIC, alpn_protocols = []string{string(name[:])}, quic_transport_parameters = local[:]},
@@ -508,6 +508,6 @@ server_parameters_maximum_simultaneous_grants :: proc(t: ^testing.T) {
 	testing.expect_value(t, a.peak, 69887)
 	testing.expect_value(t, a.calls, 3)
 	fmt.printf("parameters maximum CH+owned selections+scratch: %d bytes, %d allocations\n", a.peak, a.calls)
-	server_handshake_destroy(&o)
+	engine_server_handshake_destroy(&o)
 	owner_test_clean(t, &a)
 }
