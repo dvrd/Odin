@@ -11,7 +11,7 @@ import "core:testing"
 // from an independent HKDF-Expand-Label implementation (Python hmac/hashlib)
 // over this fixed transcript: CH = 01000004 11111111, SH = 02000004 22222222,
 // EE = 080000020000, shared secret = 01..20. RFC 8448's own trace is covered
-// for TLS_AES_128_GCM_SHA256 in transcript_test.odin.
+// for TLS_AES_128_GCM_SHA256 in tls_transcript_test.odin.
 Schedule_Suite_Vector :: struct {
 	suite:                    Cipher_Suite,
 	client_handshake:         string,
