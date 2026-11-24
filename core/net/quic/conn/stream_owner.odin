@@ -312,9 +312,11 @@ send_owned_stream :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, b
 			continue
 		}
 		if b.credit_dirty {
+			// A probe after a PTO is not held back by the congestion window.
 			req := harness.Emit {
 				space = .Application,
 				ping  = true,
+				probe = c.force_probe,
 			}; attach_ack(c, &req, .Application)
 			frame: [MAX_DATAGRAM]u8; at, ok := encode_ack_if(c,frame[:], 0, req)
 			if ok {
@@ -330,7 +332,7 @@ send_owned_stream :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, b
 			if !record_tx(c, {pn = pn, id = b.id, credit = true, credit_value = b.recv_credit}) {
 				fail(c, "retention journal full"); return 0, .Failed, true
 			}
-			b.credit_dirty = false
+			b.credit_dirty = false; c.force_probe = false
 			return amount, .None, true
 		}
 		off, n := 0, 0; fin, reset := false, false
@@ -360,6 +362,7 @@ send_owned_stream :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, b
 			space     = .Application,
 			ping      = true,
 			more_data = true,
+			probe     = c.force_probe,
 		}; attach_ack(c, &req, .Application)
 		frame: [MAX_DATAGRAM]u8; at, ok := encode_ack_if(c,frame[:], 0, req)
 		if !ok {
@@ -396,6 +399,7 @@ send_owned_stream :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, b
 		}; if reset {
 			b.reset_sent = true; b.reset_retry = false
 		}
+		c.force_probe = false
 		return amount, .None, true
 	}
 	return 0, .None, false

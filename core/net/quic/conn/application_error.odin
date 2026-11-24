@@ -51,13 +51,14 @@ send_stop_progress :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, 
 			c,
 			now,
 			dst,
-			harness.Emit{space = .Application, ping = true},
+			harness.Emit{space = .Application, ping = true, probe = c.force_probe},
 			frame[:at],
 			0,
 		)
 		if e != .None {
 			return n, e, true
 		}
+		c.force_probe = false
 		if !record_tx(c, {pn = pn, id = b.id, stop = true}) {
 			fail(c, "stop retention"); return 0, .Failed, true
 		}
