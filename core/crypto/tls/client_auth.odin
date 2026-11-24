@@ -118,10 +118,14 @@ client_authentication_flight :: proc(
 	transcript: ^Handshake_Transcript,
 	allocator: mem.Allocator,
 	identity_lease: ^credential_store.Lease = nil,
+	request_context: []u8 = nil,
 ) -> (
 	[]u8,
 	Handshake_Error,
 ) {
+	if len(request_context) > 255 {
+		return nil, {kind = .Malformed_Message}
+	}
 	lease: credential_store.Lease
 	leased := false
 	defer if leased {
@@ -168,7 +172,8 @@ client_authentication_flight :: proc(
 			}
 		}
 	}
-	size := 8 + total
+	head := 8 + len(request_context)
+	size := head + total
 	if count > 0 {
 		size += 520
 	}
@@ -182,9 +187,11 @@ client_authentication_flight :: proc(
 		delete(flight, allocator)
 	}
 	flight[0] = 11
-	server_flight_put24(flight[1:4], 4 + total)
-	server_flight_put24(flight[5:8], total)
-	at := 8
+	server_flight_put24(flight[1:4], head - 4 + total)
+	flight[4] = u8(len(request_context))
+	copy(flight[5:], request_context)
+	server_flight_put24(flight[head - 3:head], total)
+	at := head
 	for i in 0 ..< count {
 		der, e := credential_store.certificate_der(store, lease, i)
 		if e.kind != .None {
@@ -238,14 +245,16 @@ client_auth_prepare :: proc(conn: ^Conn, allocator: mem.Allocator) -> Handshake_
 		&conn.server_finished_transcript,
 		allocator,
 		conn.config.client_credential_lease,
+		conn.client_auth_context[:conn.client_auth_context_size],
 	)
 	if e.kind != .None {
 		return e
 	}
-	if len(flight) > 13 && flight[0] == 11 {
-		n := authentication_u24(flight, 8)
-		if n > 0 && n <= len(flight) - 11 {
-			conn.session_identity = ticket_hash(flight[11:11 + n])
+	first := 8 + conn.client_auth_context_size
+	if len(flight) > first + 5 && flight[0] == 11 {
+		n := authentication_u24(flight, first)
+		if n > 0 && n <= len(flight) - first - 3 {
+			conn.session_identity = ticket_hash(flight[first + 3:first + 3 + n])
 			conn.session_identity_present = true
 			conn.session_identity_valid = true
 		}

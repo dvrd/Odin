@@ -529,10 +529,7 @@ socket_certificate_request_check :: proc(message: []u8) -> Handshake_Error {
 		return {kind = .Malformed_Message}
 	}
 
-	// Upstream echoes a context; the engine's Certificate carries none.
-	if body[0] != 0 {
-		return {kind = .Malformed_Message}
-	}
+	// A context is echoed in the client's Certificate, as upstream does.
 	return {}
 }
 

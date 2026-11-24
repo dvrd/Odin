@@ -183,6 +183,10 @@ Conn :: struct {
 	client_auth_used: bool,
 	client_auth_schemes: [32]u16,
 	client_auth_scheme_count: int,
+	// The certificate_request_context to echo. Only a Socket accepts one in
+	// the handshake, as upstream's client does.
+	client_auth_context: [255]u8,
+	client_auth_context_size: int,
 	client_auth_flight: []u8,
 	client_auth_offset: int,
 	client_auth_allocator: mem.Allocator,

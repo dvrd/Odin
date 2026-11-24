@@ -912,6 +912,23 @@ socket_refuses_what_upstream_refuses :: proc(t: ^testing.T) {
 		testing.expectf(t, got.kind == entry.kind, "%v: %v", entry.extensions, got)
 		testing.expectf(t, socket_handshake_error(got) == entry.expected, "%v: %v", entry.extensions, socket_handshake_error(got))
 	}
+
+	// A request context is accepted and comes back in the client's Certificate,
+	// as upstream's client sends it.
+	size := socket_test_message(message[:], .Certificate_Request, {3, 7, 8, 9}, {0, 13, 0, 4, 0, 2, 8, 7})
+	testing.expect_value(t, socket_certificate_request_check(message[:size]).kind, Handshake_Error_Kind.None)
+	transcript: Handshake_Transcript
+	transcript_init(&transcript)
+	flight, flight_error := client_authentication_flight(nil, nil, &transcript, context.allocator, nil, {7, 8, 9})
+	defer delete(flight)
+	testing.expect_value(t, flight_error.kind, Handshake_Error_Kind.None)
+	expected := [?]u8{11, 0, 0, 7, 3, 7, 8, 9, 0, 0, 0}
+	testing.expectf(t, len(flight) == len(expected) && flight[4] == 3 && flight[7] == 9 && flight[3] == 7, "%v", flight)
+	for b, i in expected {
+		if i < len(flight) {
+			testing.expect_value(t, flight[i], b)
+		}
+	}
 }
 
 // A handshake message of prefix and a vector of extensions.

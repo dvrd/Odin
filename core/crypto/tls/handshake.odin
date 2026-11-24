@@ -296,6 +296,7 @@ engine_handshake_server_flight_verify :: proc(conn: ^Conn, flight: []u8) -> Hand
 				return handshake_fail(conn, e)
 			}
 			conn.client_auth_requested = true
+			conn.client_auth_context_size = copy(conn.client_auth_context[:], request[5:][:request[4]])
 		} else if e = client_auth_request_decode(conn, request); e.kind != .None {
 			return handshake_fail(conn, e)
 		}
