@@ -114,7 +114,7 @@ Encoder :: struct {
 	level:         Level,
 	ring:          Ring,
 	commands:      [dynamic]Command,
-	huffman:       ^compress.Huffman_Scratch,
+	huffman:       ^Huffman_Scratch,
 	allocator:     runtime.Allocator,
 	finder:        Finder,
 }
@@ -126,7 +126,7 @@ Encoder :: struct {
 Brotli :: struct #align(64) {
 	table:   [PLAIN_TABLE_SLOTS_MAX]u32,
 	records: [PLAIN_BLOCK / LAZY_MATCH_MIN + 1]Fast_Record,
-	huffman: compress.Huffman_Scratch,
+	huffman: Huffman_Scratch,
 }
 
 // Slots of the largest table of the levels 0..4: level 4 on a large input.
@@ -269,8 +269,8 @@ compress_meta_blocks :: proc(output: ^[dynamic]u8, input: []u8, level: Level, me
 	defer delete(e.commands)
 
 	// The scratch is written before it is read: skip clearing its half megabyte.
-	scratch := runtime.mem_alloc_non_zeroed(size_of(compress.Huffman_Scratch), align_of(compress.Huffman_Scratch), allocator) or_return
-	e.huffman = (^compress.Huffman_Scratch)(raw_data(scratch))
+	scratch := runtime.mem_alloc_non_zeroed(size_of(Huffman_Scratch), align_of(Huffman_Scratch), allocator) or_return
+	e.huffman = (^Huffman_Scratch)(raw_data(scratch))
 	defer free(e.huffman, allocator)
 
 	block := block_make(allocator) or_return
@@ -1122,7 +1122,7 @@ build_and_write_code :: proc(e: ^Encoder, histogram: []u32, lengths: []u8, codes
 	if quick {
 		quick_code(histogram, symbols[:used_count], CODE_LENGTH_MAX, lengths, codes)
 	} else {
-		compress.huffman_lengths(e.huffman, histogram, CODE_LENGTH_MAX, lengths)
+		huffman_lengths(e.huffman, histogram, CODE_LENGTH_MAX, lengths)
 		canonical_codes(lengths, codes)
 	}
 
@@ -1262,7 +1262,7 @@ write_complex_code :: proc(e: ^Encoder, lengths: []u8) {
 			}
 		}
 	} else {
-		compress.huffman_lengths(e.huffman, histogram[:], 5, meta_lengths[:])
+		huffman_lengths(e.huffman, histogram[:], 5, meta_lengths[:])
 		canonical_codes(meta_lengths[:], meta_codes[:])
 	}
 

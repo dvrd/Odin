@@ -1,4 +1,4 @@
-package compress
+package compress_brotli
 
 import "core:math/bits"
 

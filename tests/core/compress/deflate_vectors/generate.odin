@@ -6,6 +6,7 @@
 package deflate_vectors
 
 import "core:compress/deflate"
+import "core:compress/step"
 import "core:fmt"
 import "core:os"
 
@@ -24,53 +25,57 @@ write_vector :: proc(name: string, packed: []u8) {
 	fmt.printfln("%s: %d bytes", name, len(packed))
 }
 
-// One gzip member from the streaming compressor, flushed every `flush_every` input bytes when not zero.
-stream_vector :: proc(s: ^deflate.Deflate_Stream, level: deflate.Deflate_Level, flush_every: int) -> []u8 {
+// One gzip member from the pull-style encoder, flushed every `flush_every` input bytes when not zero.
+stream_vector :: proc(e: ^step.Deflate_Encoder, level: deflate.Deflate_Level, flush_every: int) -> []u8 {
 	packed: [dynamic]u8
 	buffer: [4096]u8
 	rest := PAYLOAD
 
-	deflate.deflate_stream_reset(s, .Gzip, level)
+	if err := step.deflate_encoder_reset(e, .Gzip, level); err != nil {
+		fmt.eprintfln("reset: %v", err)
+		os.exit(1)
+	}
 
 	for len(rest) > 0 {
 		piece := rest[:min(len(rest), flush_every)] if flush_every > 0 else rest
 		rest = rest[len(piece):]
 
 		for len(piece) > 0 {
-			piece = piece[deflate.deflate_stream_write(s, piece):]
-			append(&packed, ..buffer[:deflate.deflate_stream_pull(s, buffer[:])])
+			piece = piece[step.deflate_encoder_write(e, piece):]
+			append(&packed, ..buffer[:step.deflate_encoder_pull(e, buffer[:])])
 		}
 
-		for flush_every > 0 && !deflate.deflate_stream_flush(s) {
-			append(&packed, ..buffer[:deflate.deflate_stream_pull(s, buffer[:])])
+		for flush_every > 0 && !step.deflate_encoder_flush(e) {
+			append(&packed, ..buffer[:step.deflate_encoder_pull(e, buffer[:])])
 		}
 	}
 
-	for !deflate.deflate_stream_finish(s) {
-		append(&packed, ..buffer[:deflate.deflate_stream_pull(s, buffer[:])])
+	for !step.deflate_encoder_finish(e) {
+		append(&packed, ..buffer[:step.deflate_encoder_pull(e, buffer[:])])
 	}
 
-	for deflate.deflate_stream_pending(s) > 0 {
-		append(&packed, ..buffer[:deflate.deflate_stream_pull(s, buffer[:])])
+	for step.deflate_encoder_pending(e) > 0 {
+		append(&packed, ..buffer[:step.deflate_encoder_pull(e, buffer[:])])
 	}
 
 	return packed[:]
 }
 
 main :: proc() {
-	s := new(deflate.Deflate_Stream)
+	e: step.Deflate_Encoder
 
-	write_vector("stream-level-1.gz", stream_vector(s, .Level_1, 0))
-	write_vector("stream-level-6.gz", stream_vector(s, .Level_6, 0))
-	write_vector("stream-level-10.gz", stream_vector(s, .Level_10, 0))
-	write_vector("stream-flushed.gz", stream_vector(s, .Level_6, FLUSH_EVERY))
-
-	optimal: [dynamic]u8
-
-	if err := deflate.deflate_optimal_gzip(&optimal, PAYLOAD); err != nil {
-		fmt.eprintfln("optimal: %v", err)
+	if err := step.deflate_encoder_init(&e, .Gzip); err != nil {
+		fmt.eprintfln("init: %v", err)
 		os.exit(1)
 	}
 
-	write_vector("optimal.gz", optimal[:])
+	defer step.deflate_encoder_destroy(&e)
+
+	write_vector("stream-level-1.gz", stream_vector(&e, .Level_1, 0))
+	write_vector("stream-level-6.gz", stream_vector(&e, .Level_6, 0))
+	write_vector("stream-level-10.gz", stream_vector(&e, .Level_10, 0))
+	write_vector("stream-flushed.gz", stream_vector(&e, .Level_6, FLUSH_EVERY))
+
+	// `optimal.gz` came from an encoder this tree no longer has. It stays as a
+	// vector for the decoders and is not regenerated.
 }

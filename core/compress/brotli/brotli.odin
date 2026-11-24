@@ -5,15 +5,40 @@ package compress_brotli
 	as specified in RFC 7932.
 
 	Decoding reads from a `compress.Context`, writes to its `[dynamic]u8`
-	output and reports `compress.Error`.
+	output and reports `Error`.
 */
 
+import "base:runtime"
+import "core:io"
 import "core:compress"
 import "core:math/bits"
 
-Error     :: compress.Error
+// What this package returns: the general errors every codec of `core:compress`
+// shares, the ways a Brotli stream can be wrong, and failures of its reader or
+// allocator. `core:compress` keeps its own `Error` for its own codecs.
+Error :: union #shared_nil {
+	compress.General_Error,
+	Brotli_Error,
+	io.Error,
+	runtime.Allocator_Error,
+}
+
+Brotli_Error :: enum {
+	None = 0,
+	Invalid_Window_Size,
+	Invalid_Meta_Block,
+	Invalid_Prefix_Code,
+	Invalid_Context_Map,
+	Invalid_Block_Switch,
+	Invalid_Command,
+	Invalid_Distance,
+	Invalid_Dictionary_Reference,
+	Invalid_Padding,
+	Trailing_Data,
+}
+
 E_General :: compress.General_Error
-E_Brotli  :: compress.Brotli_Error
+E_Brotli  :: Brotli_Error
 
 @(rodata)
 DICTIONARY := #load("dictionary.bin")

@@ -1,7 +1,6 @@
 package compress_brotli
 
 import "base:runtime"
-import "core:compress"
 
 // Bounded streaming encoder: fixed memory, no allocation, any partition of
 // the input. Each STREAM_BLOCK of input becomes one meta-block with its own
@@ -23,7 +22,7 @@ Stream_Encoder :: struct {
 	head:        [1 << STREAM_HASH_BITS]u32,
 	commands:    [STREAM_COMMANDS_MAX]Command,
 	out:         [STREAM_OUTPUT_MAX]u8,
-	scratch:     compress.Huffman_Scratch,
+	scratch:     Huffman_Scratch,
 	accumulator: u64,
 	count:       uint,
 	out_len:     int,
