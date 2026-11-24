@@ -454,13 +454,14 @@ send_path_response :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) 
 	req := harness.Emit {
 		space = .Application,
 		ping  = true,
+		probe = c.force_probe,
 	}; attach_ack(c, &req, .Application)
 	frame: [64]u8; at, ok := encode_ack_if(c,frame[:], 0, req); if !ok || len(frame) - at < 9 {
 		return 0, .Capacity
 	}
 	frame[at] = 0x1b; at += 1; copy(frame[at:at + 8], c.path_response_token[:]); at += 8
 	n, e := seal_and_emit(c, now, dst, req, frame[:at], 0); if e == .None {
-		c.path_response_pending = false
+		c.path_response_pending = false; c.force_probe = false
 	}; return n, e
 }
 

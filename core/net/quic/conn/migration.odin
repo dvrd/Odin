@@ -351,12 +351,12 @@ migration_control :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, b
 			c,
 			now,
 			dst,
-			harness.Emit{space = .Application, ping = true},
+			harness.Emit{space = .Application, ping = true, probe = c.force_probe},
 			frame[:at],
 			0,
 		)
 		if e == .None && n > 0 {
-			entry.in_flight = true; entry.pn = pn; entry.sent_once=true
+			entry.in_flight = true; entry.pn = pn; entry.sent_once=true; c.force_probe = false
 		}; return n, e, true
 	}
 	for &entry in c.migration.retire {
@@ -371,12 +371,12 @@ migration_control :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, b
 			c,
 			now,
 			dst,
-			harness.Emit{space = .Application, ping = true},
+			harness.Emit{space = .Application, ping = true, probe = c.force_probe},
 			frame[:at],
 			0,
 		)
 		if e == .None && n > 0 {
-			entry.in_flight = true; entry.pn = pn
+			entry.in_flight = true; entry.pn = pn; c.force_probe = false
 		}; return n, e, true
 	}
 	return 0, .None, false
@@ -658,10 +658,13 @@ pump_to :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, net.Endpoint, Erro
 			c,
 			now,
 			dst,
-			harness.Emit{space = .Application, ping = true},
+			harness.Emit{space = .Application, ping = true, probe = c.force_probe},
 			frame[:9],
 			0,
 		)
+		if e == .None && n > 0 {
+			c.force_probe = false
+		}
         m.peer_override=saved_override
         c.peer_cid=saved_cid;c.peer_cid_len=saved_n;c.model.peer_cid=saved_model_cid;c.model.peer_cid_len=saved_model_n
 		c.max_datagram = size; c.full_size = full; path.sent = c.model.path_sent
