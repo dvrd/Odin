@@ -74,6 +74,15 @@ nothing. A new stream that only waits for flow-control credit counts as opened.
 A stream the peer opens also opens every lower stream of its kind, each with a
 record, so its frames may arrive in any order.
 
+`limits.recv_max_streams` is the number of streams of each kind the peer may
+open. By default that is for the connection's life and MAX_STREAMS is never
+sent. With `raise_stream_limits` set (`Adopt_Config` or `Config`), each peer
+stream whose record is released raises the limit of its kind by one, so the
+limit bounds the peer's streams open at once. The new limit goes out in a
+MAX_STREAMS frame that is retained and sent again if its packet is lost. A peer
+that opens a stream beyond the advertised limit gets `Flow_Control`. Received
+MAX_STREAMS frames raise the local limit for `write` and `stream_admission`.
+
 After authenticated transport parameters, `migration_enable` installs an endpoint
 and bounded CID ownership. Advertise an active CID limit of four and pass the
 peer's authenticated limit (at least two). Four local and four peer IDs, sixteen

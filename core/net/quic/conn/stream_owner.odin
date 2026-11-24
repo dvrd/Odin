@@ -18,6 +18,12 @@ Adopt_Config :: struct {
 	// Zero keeps the embedded STREAM_BYTES windows and allocates nothing.
 	// limits.recv_max_stream_data must fit in the receive window.
 	windows:                                                          Stream_Windows,
+	// Send MAX_STREAMS as the peer's streams close, so limits.recv_max_streams
+	// bounds the streams of each kind the peer has open at once and not the
+	// streams it opens in the connection's life. Off, MAX_STREAMS is never
+	// sent. Turn it on only if the caller copes with any number of peer
+	// streams over time.
+	raise_stream_limits:                                              bool,
 }
 adopt_established :: proc(c: ^Connection, owner: ^quic.Handshake, cfg: Adopt_Config) -> Error {
 	if c == nil ||
@@ -69,6 +75,8 @@ adopt_established :: proc(c: ^Connection, owner: ^quic.Handshake, cfg: Adopt_Con
 	}
 	_ = harness.discard_space(&c.model, .Initial); _ = harness.confirm_handshake(&c.model)
 	c.model.address_validated = true; c.model.has_path = true
+	c.raise_stream_limits = cfg.raise_stream_limits
+	c.recv_streams = cfg.limits.recv_max_streams
 	c.directional_limits = cfg.directional_limits
 	c.peer_bidi_local = cfg.peer_bidi_local; c.peer_bidi_remote = cfg.peer_bidi_remote
 	c.peer_uni = cfg.peer_uni
@@ -121,8 +129,10 @@ Tx_Packet :: struct {
 	pn, id, offset:           u64,
 	n:                        int,
 	fin, reset, credit, done,stop: bool,
-	// A lone MAX_DATA for credit that no stream record carries.
+	// Connection limits sent on their own: MAX_DATA for credit that no stream
+	// record carries, and MAX_STREAMS for bidirectional and unidirectional.
 	max_data:                 bool,
+	max_streams:              [2]bool,
 	credit_value:             u64,
 }
 
@@ -137,7 +147,9 @@ send_direction :: proc(c: ^Connection, id: u64) -> bool {
 @(private)
 send_limits :: proc(c: ^Connection, id: u64) -> (u64, u64) {
 	if !c.directional_limits {
-		return c.model.max_stream_data_send, c.model.max_streams_send
+		// One configured limit for every kind; MAX_STREAMS raises a kind's own.
+		raised := c.peer_uni_streams if id & 2 != 0 else c.peer_bidi_streams
+		return c.model.max_stream_data_send, max(c.model.max_streams_send, raised)
 	}
 	if id & 2 != 0 {
 		return c.peer_uni, c.peer_uni_streams
@@ -250,8 +262,12 @@ mark_retry :: proc(c: ^Connection, t: Tx_Packet) {
 		c.done_sent = false; return
 	}
 	// A lost credit frame also carried MAX_DATA; its stream may be gone.
-	if t.max_data || t.credit && find_buf(c, t.id) == nil {
-		c.max_data_dirty = true; return
+	if t.max_data || t.max_streams != {} || t.credit && find_buf(c, t.id) == nil {
+		c.max_data_dirty ||= t.max_data || t.credit
+		for lost, kind in t.max_streams {
+			c.max_streams_dirty[kind] ||= lost
+		}
+		return
 	}
 	if b := find_buf(c, t.id); b != nil {
 		if t.stop {b.stop_retry=true;return}
@@ -304,7 +320,7 @@ acknowledge_tx :: proc(c: ^Connection, p: Parsed) {
 			}
 		}; if acked {
 			if b:=find_buf(c,t.id);b!=nil&&t.stop {b.stop_acked=true;b.stop_retry=false}
-if b := find_buf(c, t.id); b != nil && !t.credit && !t.stop && !t.max_data {
+if b := find_buf(c, t.id); b != nil && !t.credit && !t.stop && !t.max_data && t.max_streams == {} {
 				n := win_ack(c, b, retained_range(b, t.offset, t.n))
 				if t.fin {
 					b.fin_acked = true; b.fin_retry = false
@@ -472,9 +488,12 @@ stream_frame_room :: proc(c: ^Connection, dst, used: int, id, offset: u64) -> in
 	return min(room, 16383)
 }
 
+// MAX_DATA and MAX_STREAMS that are due, in one packet. Each is retained in the
+// journal and due again if the packet is lost; a resend carries the current
+// limit, which is never lower.
 @(private)
-send_max_data :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, bool) {
-	if !c.max_data_dirty || !journal_room(c) {
+send_connection_limits :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, bool) {
+	if !c.max_data_dirty && c.max_streams_dirty == {} || !journal_room(c) {
 		return 0, .None, false
 	}
 	req := harness.Emit {
@@ -482,9 +501,14 @@ send_max_data :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, bool)
 		ping  = true,
 		probe = c.force_probe,
 	}; attach_ack(c, &req, .Application)
-	frame: [64]u8; at, ok := encode_ack_if(c, frame[:], 0, req)
-	if ok && at < len(frame) {
-		frame[at] = 0x10; at, ok = put_varint(frame[:], at + 1, c.model.recv_max_data)
+	frame: [96]u8; at, ok := encode_ack_if(c, frame[:], 0, req)
+	if ok && c.max_data_dirty {
+		at, ok = encode_limit(frame[:], at, 0x10, c.model.recv_max_data)
+	}
+	for due, kind in c.max_streams_dirty {
+		if ok && due {
+			at, ok = encode_limit(frame[:], at, 0x12 + u8(kind), c.recv_streams[kind])
+		}
 	}
 	if !ok {
 		return 0, .Capacity, true
@@ -493,9 +517,19 @@ send_max_data :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, bool)
 	n, e := seal_and_emit(c, now, dst, req, frame[:at], 0); if e != .None {
 		return n, e, true
 	}
-	if !record_tx(c, {pn = pn, max_data = true}) {
+	if !record_tx(c, {pn = pn, max_data = c.max_data_dirty, max_streams = c.max_streams_dirty}) {
 		fail(c, "retention journal full"); return 0, .Failed, true
 	}
-	c.max_data_dirty = false; c.force_probe = false
+	c.max_data_dirty = false; c.max_streams_dirty = {}; c.force_probe = false
 	return n, .None, true
+}
+
+// MAX_DATA (0x10) or MAX_STREAMS (0x12 bidirectional, 0x13 unidirectional).
+@(private)
+encode_limit :: proc(dst: []u8, at: int, kind: u8, value: u64) -> (int, bool) {
+	if at >= len(dst) {
+		return at, false
+	}
+	dst[at] = kind
+	return put_varint(dst, at + 1, value)
 }

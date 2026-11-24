@@ -86,6 +86,8 @@ Config :: struct {
 	material:            Material,
 	limits:              harness.Limits,
 	windows:             Stream_Windows,
+	// See Adopt_Config.
+	raise_stream_limits: bool,
 	max_datagram:        int,
 	// Pad 1-RTT packets to max_datagram. Handshake packets stay natural size,
 	// except Initial datagrams, which stay at the 1200-byte floor.
@@ -203,6 +205,11 @@ Connection :: struct {
 	opened:                                      [4]u64,
 	// MAX_DATA must be sent although no stream record carries the credit.
 	max_data_dirty:                              bool,
+	// Streams the peer may open, bidirectional then unidirectional, as last
+	// advertised; and whether MAX_STREAMS for each must be sent.
+	raise_stream_limits:                         bool,
+	recv_streams:                                [2]u64,
+	max_streams_dirty:                           [2]bool,
 }
 
 init :: proc(c: ^Connection, cfg: Config) -> Error {
@@ -290,6 +297,8 @@ init :: proc(c: ^Connection, cfg: Config) -> Error {
 		c.reason = "stream windows"
 		return err
 	}
+	c.raise_stream_limits = cfg.raise_stream_limits
+	c.recv_streams = cfg.limits.recv_max_streams
 	c.initialized = true
 	return .None
 }
@@ -871,7 +880,7 @@ pump :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 			return send_done(c, now, dst)
 		}
         if n,e,sent:=post_handshake_pump(c,now,dst);sent{return n,e}
-        if n,e,sent:=send_max_data(c,now,dst);sent{return n,e}
+        if n,e,sent:=send_connection_limits(c,now,dst);sent{return n,e}
         if n,e,sent:=send_stop_progress(c,now,dst);sent{return n,e}
 		if n, err, sent := send_stream_progress(c, now, dst); sent {
 			return n, err
@@ -1013,7 +1022,7 @@ peer_record :: proc(c: ^Connection, id: u64) -> (buf: ^Buf, closed: bool, err: E
 	if id % 2 == u64(c.role) {
 		c.reason = "frame for an unopened local stream"; return nil, false, .Protocol
 	}
-	if index >= c.model.max_streams_recv {
+	if index >= c.recv_streams[id >> 1 & 1] {
 		c.reason = "stream limit"; return nil, false, .Flow_Control
 	}
 	if index - next >= u64(free_records(c)) {
@@ -1054,6 +1063,12 @@ reap :: proc(c: ^Connection) {
 		// Bytes the application never read still return their connection credit.
 		if credit, _ := harness.stream_release(&c.model, b.id); credit > 0 {
 			c.max_data_dirty = true
+		}
+		// A closed peer stream makes room for one more of its kind, so the
+		// peer always has the configured number available at once.
+		if kind := b.id >> 1 & 1; c.raise_stream_limits && !local && c.recv_streams[kind] < u64(1) << 60 {
+			c.recv_streams[kind] += 1; c.max_streams_dirty[kind] = true
+			c.model.max_streams_recv = max(c.recv_streams[0], c.recv_streams[1])
 		}
 		win_clear(c, &b, .Send); win_clear(c, &b, .Recv)
 		b = {}

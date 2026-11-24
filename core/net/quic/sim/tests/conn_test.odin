@@ -267,6 +267,7 @@ open_pair :: proc(
 	limits: harness.Limits,
 	full_size: bool,
 	windows: conn.Stream_Windows = {},
+	raise_stream_limits := false,
 ) -> ^Pair {
 	p := new(Pair)
 	p.flight = build_flight(t)
@@ -285,6 +286,7 @@ open_pair :: proc(
 				material = material_of(p.flight),
 				limits = limits,
 				windows = windows,
+				raise_stream_limits = raise_stream_limits,
 				max_datagram = 1200,
 				full_size = full_size,
 			},
@@ -302,6 +304,7 @@ open_pair :: proc(
 				material = material_of(p.flight),
 				limits = limits,
 				windows = windows,
+				raise_stream_limits = raise_stream_limits,
 				max_datagram = 1200,
 				full_size = full_size,
 			},
