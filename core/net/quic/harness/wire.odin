@@ -509,6 +509,17 @@ receive :: proc(m: ^Model, now: i64, path: u32, datagram: []u8) -> Error {
 	case .Retry, .Version_Negotiation:
 		return .Discarded
 	}
+	if !m.has_path {
+		// What was sent before the first datagram arrived went out on this path.
+		// Left on path zero, those packets would never leave bytes_in_flight.
+		for &packets in m.packets {
+			for &p in packets {
+				if p.active && p.path_epoch == m.path_epoch {
+					p.path = path
+				}
+			}
+		}
+	}
 	if !m.has_path || path != m.path {
 		m.has_path = true
 		m.path = path
