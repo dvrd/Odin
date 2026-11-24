@@ -908,14 +908,14 @@ gb_internal void lb_lower_large_aggregate_copies(lbModule *m) {
 	for (LLVMValueRef fn = LLVMGetFirstFunction(m->mod); fn != nullptr; fn = LLVMGetNextFunction(fn)) {
 		for (LLVMBasicBlockRef bb = LLVMGetFirstBasicBlock(fn); bb != nullptr; bb = LLVMGetNextBasicBlock(bb)) {
 			for (LLVMValueRef i = LLVMGetFirstInstruction(bb); i != nullptr; i = LLVMGetNextInstruction(i)) {
-				if (!LLVMIsAStoreInst(i) || !lb_is_plain_access(i)) {
+				if (!LLVMIsAStoreInst(i) || !lb_is_plain_access(m, i)) {
 					continue;
 				}
 				LLVMValueRef value = LLVMGetOperand(i, 0);
 				LLVMTypeRef type = LLVMTypeOf(value);
 				if (!lb_is_aggregate_type(type) ||
 				    LLVMStoreSizeOfType(layout, type) <= MAX_DIRECT_AGGREGATE_BYTES ||
-				    !LLVMIsALoadInst(value) || !lb_is_plain_access(value)) {
+				    !LLVMIsALoadInst(value) || !lb_is_plain_access(m, value)) {
 					continue;
 				}
 				LLVMUseRef use = LLVMGetFirstUse(value);
