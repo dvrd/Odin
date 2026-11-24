@@ -77,6 +77,52 @@ conn_wide_windows_carry_bulk_both_ways_through_loss_and_reordering :: proc(t: ^t
 	limits := wide_limits()
 	limits.max_stream_data = BULK_WINDOW; limits.recv_max_stream_data = BULK_WINDOW
 	p := open_pair(t, limits, false, bulk_windows()); defer close_pair(p); settle(t, p)
+	bulk_transfer(t, p)
+}
+
+// The connections a real TLS driver would hand over: both ends adopted, with
+// heap windows drawn from pools smaller than every stream's full window.
+@(test)
+conn_adopted_wide_windows_carry_bulk_both_ways_through_loss_and_reordering :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 60 * time.Second)
+	limits := wide_limits(); limits.recv_max_stream_data = BULK_WINDOW; limits.max_stream_data = BULK_WINDOW
+	p := open_pair(t, wide_limits(), false); defer close_pair(p); settle(t, p)
+	windows := bulk_windows(); windows.send_pool = 2 * BULK_WINDOW; windows.recv_pool = 2 * BULK_WINDOW
+	for old in ([2]^^conn.Connection{&p.client, &p.server}) {
+		space := old^.model.spaces[2]
+		adopted := new(conn.Connection)
+		e := conn.adopt_established(
+			adopted,
+			&old^.hs,
+			{
+				role = old^.role,
+				local_cid = old^.local_cid[:old^.local_cid_len],
+				peer_cid = old^.peer_cid[:old^.peer_cid_len],
+				limits = limits,
+				next_send_pn = space.next_send,
+				have_largest_recv = space.has_largest_recv,
+				largest_recv_pn = space.largest_recv,
+				recv_bits = 1,
+				windows = windows,
+				raise_stream_limits = true,
+			},
+		)
+		if !testing.expect_value(t, e, conn.Error.None) {
+			free(adopted)
+			return
+		}
+		// The sim addresses each end by the path its first connection learned.
+		adopted.model.path = old^.model.path
+		conn.destroy(old^); free(old^); old^ = adopted
+	}
+	settle(t, p)
+	testing.expect(t, p.client.streams.heap && p.server.streams.heap)
+	testing.expect(t, p.client.streams.quota[.Send] < conn.STREAMS * p.client.streams.slots[.Send])
+	bulk_transfer(t, p)
+}
+
+@(private)
+bulk_transfer :: proc(t: ^testing.T, p: ^Pair) {
 	send, recv := conn.stream_windows(p.client)
 	testing.expect(t, send == BULK_WINDOW && recv == BULK_WINDOW)
 
