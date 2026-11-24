@@ -10,7 +10,7 @@ package compress_brotli
 	stream. Bytes after the stream are `Trailing_Data`.
 */
 
-import "core:compress"
+import "core:compress/step"
 import "core:math/bits"
 
 // Smallest history a valid stream can declare: WBITS 10 keeps (1 << 10) - 16 bytes.
@@ -108,7 +108,7 @@ Decoder :: struct {
 	encoded_bytes:             u64,
 	decoded_bytes:             u64,
 	phase:                     Decoder_Phase,
-	error:                     compress.Decode_Error,
+	error:                     step.Decode_Error,
 	final_declared:            bool,
 	bits:                      u64,
 	bit_count:                 u8,
@@ -207,7 +207,7 @@ decoder_init :: proc(
 	window: []u8,
 	max_encoded_bytes, max_decoded_bytes: u64,
 	allocator := context.allocator,
-) -> compress.Decode_Error {
+) -> step.Decode_Error {
 	if d == nil {
 		return .Invalid_State
 	}
@@ -245,7 +245,7 @@ decoder_destroy :: proc(d: ^Decoder) {
 	d^ = {}
 }
 
-pull_byte :: proc(d: ^Decoder, input: []u8, r: ^compress.Decode_Result) -> bool {
+pull_byte :: proc(d: ^Decoder, input: []u8, r: ^step.Decode_Result) -> bool {
 	if r.consumed == len(input) {
 		return false
 	}
@@ -263,7 +263,7 @@ pull_byte :: proc(d: ^Decoder, input: []u8, r: ^compress.Decode_Result) -> bool 
 	return true
 }
 
-take_bits :: proc(d: ^Decoder, input: []u8, r: ^compress.Decode_Result, width: u8) -> (u32, bool) {
+take_bits :: proc(d: ^Decoder, input: []u8, r: ^step.Decode_Result, width: u8) -> (u32, bool) {
 	for d.bit_count < width {
 		if !pull_byte(d, input, r) {
 			return 0, false
@@ -279,7 +279,7 @@ take_bits :: proc(d: ^Decoder, input: []u8, r: ^compress.Decode_Result, width: u
 
 // A code is decoded from the bits already held; one more byte is pulled only
 // when the entry found with zero-extended bits is longer than what is held.
-take_symbol :: proc(d: ^Decoder, input: []u8, r: ^compress.Decode_Result, table: []Entry) -> (u32, bool) {
+take_symbol :: proc(d: ^Decoder, input: []u8, r: ^step.Decode_Result, table: []Entry) -> (u32, bool) {
 	for {
 		entry := table[d.bits & (1 << ROOT_BITS - 1)]
 		used := entry.bits
@@ -323,7 +323,7 @@ window_back :: proc(d: ^Decoder, back: int) -> u8 {
 	return d.window[at]
 }
 
-emit :: proc(d: ^Decoder, output: []u8, r: ^compress.Decode_Result, value: u8) {
+emit :: proc(d: ^Decoder, output: []u8, r: ^step.Decode_Result, value: u8) {
 	output[r.produced] = value
 	r.produced += 1
 	d.decoded_bytes += 1
@@ -332,7 +332,7 @@ emit :: proc(d: ^Decoder, output: []u8, r: ^compress.Decode_Result, value: u8) {
 
 // Bytes that may be emitted now; 0 with r.err set at the decoded limit, or
 // with Need_Output when only the destination is full.
-output_room :: proc(d: ^Decoder, output: []u8, r: ^compress.Decode_Result) -> int {
+output_room :: proc(d: ^Decoder, output: []u8, r: ^step.Decode_Result) -> int {
 	if d.decoded_bytes == d.max_decoded_bytes {
 		r.err = .Decoded_Limit
 		return 0
@@ -508,7 +508,7 @@ begin_dictionary :: proc(d: ^Decoder, reach: int) -> bool {
 	return d.word_length <= d.mb_remaining
 }
 
-finish_stream :: proc(d: ^Decoder, input: []u8, final_input: bool, r: ^compress.Decode_Result) {
+finish_stream :: proc(d: ^Decoder, input: []u8, final_input: bool, r: ^step.Decode_Result) {
 	if r.consumed < len(input) {
 		r.err = .Trailing_Data
 		d.error = r.err
@@ -532,9 +532,9 @@ decoder_step :: proc(
 	d: ^Decoder,
 	input, output: []u8,
 	final_input: bool,
-	max_work := compress.DECODE_MAX_WORK,
+	max_work := step.DECODE_MAX_WORK,
 ) -> (
-	r: compress.Decode_Result,
+	r: step.Decode_Result,
 ) {
 	r.status = .Progress
 
@@ -543,14 +543,14 @@ decoder_step :: proc(
 		return
 	}
 
-	if max_work <= 0 || max_work > compress.DECODE_MAX_WORK {
+	if max_work <= 0 || max_work > step.DECODE_MAX_WORK {
 		r.err = .Invalid_Config
 		return
 	}
 
-	if compress.decode_buffers_overlap(input, output) ||
-	   compress.decode_buffers_overlap(d.window, input) ||
-	   compress.decode_buffers_overlap(d.window, output) {
+	if step.decode_buffers_overlap(input, output) ||
+	   step.decode_buffers_overlap(d.window, input) ||
+	   step.decode_buffers_overlap(d.window, output) {
 		r.err = .Overlapping_Buffers
 		return
 	}

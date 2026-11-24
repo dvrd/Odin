@@ -1,4 +1,14 @@
-package compress
+/*
+Step-driven decoding for callers that cannot block or allocate: an event loop
+task that gets its input a packet at a time.
+
+A decoder here is a fixed-size value. Each step is given an input slice and an
+output slice, uses what it can of both within a work budget, and returns; it
+keeps neither slice. `core:compress/deflate` and the other codecs of
+`core:compress` pull their input through a blocking reader and are the simpler
+choice when the whole input is already in memory.
+*/
+package compress_step
 
 // A step retains no input or output slices. Bytes produced before Done are
 // provisional: a later trailer or framing error can invalidate the stream.

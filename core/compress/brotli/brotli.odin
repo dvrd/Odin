@@ -148,10 +148,6 @@ decompress_from_context :: proc(z: ^compress.Context, expected_output_size := -1
 
 	expected := expected_output_size
 
-	if expected <= 0 && z.size_unpacked > 0 && z.size_unpacked <= i64(max(int)) {
-		expected = int(z.size_unpacked)
-	}
-
 	limit := max_output_size
 
 	if expected > 0 {

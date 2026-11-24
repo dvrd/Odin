@@ -1,6 +1,7 @@
 package test_core_compress
 
 import "core:bytes"
+import "core:compress/step"
 import "core:compress"
 import "core:compress/deflate"
 import "core:testing"
@@ -60,11 +61,11 @@ DEFLATE_STREAM_LEVELS :: [?]deflate.Deflate_Level{.Stored, .Level_1, .Level_2, .
 deflate_stream_one_shot :: proc(framing: deflate.Deflate_Stream_Framing, output: ^[dynamic]u8, input: []u8, level: deflate.Deflate_Level) -> compress.Error {
 	switch framing {
 	case .Raw:
-		return deflate.deflate_raw(output, input, level)
+		return deflate.compress_raw(output, input, level)
 	case .Zlib:
-		return deflate.deflate_zlib(output, input, level)
+		return deflate.compress_zlib(output, input, level)
 	case .Gzip:
-		return deflate.deflate_gzip(output, input, level)
+		return deflate.compress_gzip(output, input, level)
 	}
 
 	return nil
@@ -73,11 +74,11 @@ deflate_stream_one_shot :: proc(framing: deflate.Deflate_Stream_Framing, output:
 deflate_stream_inflate :: proc(framing: deflate.Deflate_Stream_Framing, output: ^[dynamic]u8, input: []u8) -> compress.Error {
 	switch framing {
 	case .Raw:
-		return deflate.inflate_raw(output, input)
+		return deflate.decompress_raw(output, input)
 	case .Zlib:
-		return deflate.inflate_zlib(output, input)
+		return deflate.decompress_zlib(output, input)
 	case .Gzip:
-		return deflate.inflate_gzip(output, input)
+		return deflate.decompress_gzip(output, input)
 	}
 
 	return nil
@@ -201,7 +202,7 @@ deflate_stream_flush_makes_the_written_input_decodable :: proc(t: ^testing.T) {
 	s := new(deflate.Deflate_Stream)
 	defer free(s)
 
-	decoder := new(deflate.Inflate_Decoder)
+	decoder := new(step.Inflate_Decoder)
 	defer free(decoder)
 
 	plain := deflate_sample(4, 200000)
@@ -215,7 +216,7 @@ deflate_stream_flush_makes_the_written_input_decodable :: proc(t: ^testing.T) {
 		defer delete(unpacked)
 
 		deflate.deflate_stream_reset(s, .Raw, level)
-		testing.expect_value(t, deflate.inflate_decoder_init(decoder, 1 << 30, 1 << 30), compress.Decode_Error.None)
+		testing.expect_value(t, step.inflate_decoder_init(decoder, 1 << 30, 1 << 30), step.Decode_Error.None)
 
 		buffer: [1024]u8
 		window: [1024]u8
@@ -240,8 +241,8 @@ deflate_stream_flush_makes_the_written_input_decodable :: proc(t: ^testing.T) {
 			}
 
 			for {
-				r := deflate.inflate_decoder_step(decoder, packed[fed:], window[:], false, compress.DECODE_MAX_WORK)
-				testing.expect_value(t, r.err, compress.Decode_Error.None)
+				r := step.inflate_decoder_step(decoder, packed[fed:], window[:], false, step.DECODE_MAX_WORK)
+				testing.expect_value(t, r.err, step.Decode_Error.None)
 				fed += r.consumed
 				append(&unpacked, ..window[:r.produced])
 
@@ -268,7 +269,7 @@ deflate_stream_flush_makes_the_written_input_decodable :: proc(t: ^testing.T) {
 		whole: [dynamic]u8
 		defer delete(whole)
 
-		inflate_error := deflate.inflate_raw(&whole, packed[:])
+		inflate_error := deflate.decompress_raw(&whole, packed[:])
 		testing.expectf(t, inflate_error == nil, "%v: inflate failed: %v", level, inflate_error)
 		testing.expectf(t, bytes.equal(whole[:], plain), "%v: flushed stream round trip differs", level)
 	}
@@ -293,7 +294,7 @@ deflate_stream_to_slice_compresses_in_one_call :: proc(t: ^testing.T) {
 	unpacked: [dynamic]u8
 	defer delete(unpacked)
 
-	testing.expect_value(t, deflate.inflate_gzip(&unpacked, packed[:written]), nil)
+	testing.expect_value(t, deflate.decompress_gzip(&unpacked, packed[:written]), nil)
 	testing.expect(t, bytes.equal(unpacked[:], plain))
 
 	deflate.deflate_stream_reset(s, .Gzip, .Level_6)

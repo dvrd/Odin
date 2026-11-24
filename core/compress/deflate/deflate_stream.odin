@@ -72,10 +72,10 @@ Deflate_Stream :: struct {
 // Each `deflate_stream_flush` can add up to `DEFLATE_STREAM_BLOCK_SLACK` bytes.
 deflate_stream_bound :: proc(len: int, framing := Deflate_Stream_Framing.Gzip) -> int {
 	if framing == .Gzip {
-		return deflate_gzip_bound(len)
+		return compress_gzip_bound(len)
 	}
 
-	return deflate_bound(len)
+	return compress_raw_bound(len)
 }
 
 // Starts a new stream. Only the tables the parser reads before writing them are cleared,

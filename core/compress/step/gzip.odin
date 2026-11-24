@@ -1,6 +1,6 @@
-package compress_deflate
+package compress_step
 
-import "core:compress"
+import "core:compress/deflate"
 import "core:hash"
 
 /*
@@ -23,7 +23,7 @@ ceiling fails `Member_Limit`, any other trailing byte `Trailing_Data` (zero padd
 included), and a next member cut off inside its header `Truncated`.
 */
 
-GZIP_DECODER_HEADER_BYTES_MIN :: size_of(Gzip_Header)
+GZIP_DECODER_HEADER_BYTES_MIN :: size_of(deflate.Gzip_Header)
 GZIP_DECODER_HEADER_BYTES_MAX :: 1 << 20
 GZIP_DECODER_MEMBERS_MAX      :: 1024
 
@@ -65,16 +65,16 @@ Gzip_Decoder_Phase :: enum {
 Gzip_Decoder :: struct {
 	config:          Gzip_Decoder_Config,
 	phase:           Gzip_Decoder_Phase,
-	error:           compress.Decode_Error,
+	error:           Decode_Error,
 	encoded_bytes:   u64,
 	decoded_bytes:   u64,
 	members:         u32,
 	final_declared:  bool,
 	inflate:         Inflate_Decoder,
-	header:          [size_of(Gzip_Header)]u8,
-	trailer:         [size_of(Gzip_Trailer)]u8,
+	header:          [size_of(deflate.Gzip_Header)]u8,
+	trailer:         [size_of(deflate.Gzip_Trailer)]u8,
 	index:           int,
-	flags:           Gzip_Header_Flags,
+	flags:           deflate.Gzip_Header_Flags,
 	header_bytes:    u32,
 	header_crc:      u32,
 	payload_crc:     u32,
@@ -83,7 +83,7 @@ Gzip_Decoder :: struct {
 	field:           u32,
 }
 
-inflate_gzip_decoder_init :: proc(d: ^Gzip_Decoder, config := GZIP_DECODER_DEFAULT_CONFIG) -> compress.Decode_Error {
+inflate_gzip_decoder_init :: proc(d: ^Gzip_Decoder, config := GZIP_DECODER_DEFAULT_CONFIG) -> Decode_Error {
 	if d == nil {
 		return .Invalid_State
 	}
@@ -106,7 +106,7 @@ inflate_gzip_decoder_init :: proc(d: ^Gzip_Decoder, config := GZIP_DECODER_DEFAU
 // Need_Output/Progress. Once declared it cannot be withdrawn. All decoding errors
 // are sticky until init; invalid arguments and overlapping buffers do not mutate
 // state/output. On an error, discard this call's provisional output.
-inflate_gzip_decoder_step :: proc(d: ^Gzip_Decoder, input, output: []u8, final_input: bool, work_limit := 4096) -> (r: compress.Decode_Result) {
+inflate_gzip_decoder_step :: proc(d: ^Gzip_Decoder, input, output: []u8, final_input: bool, work_limit := 4096) -> (r: Decode_Result) {
 	r.status = .Progress
 
 	if d == nil || d.phase == .Uninitialized {
@@ -114,12 +114,12 @@ inflate_gzip_decoder_step :: proc(d: ^Gzip_Decoder, input, output: []u8, final_i
 		return
 	}
 
-	if work_limit <= 0 || work_limit > compress.DECODE_MAX_WORK {
+	if work_limit <= 0 || work_limit > DECODE_MAX_WORK {
 		r.err = .Invalid_Config
 		return
 	}
 
-	if compress.decode_buffers_overlap(input, output) {
+	if decode_buffers_overlap(input, output) {
 		r.err = .Overlapping_Buffers
 		return
 	}
@@ -269,7 +269,7 @@ inflate_gzip_decoder_step :: proc(d: ^Gzip_Decoder, input, output: []u8, final_i
 // Runs the raw decoder on the member's payload. Returns true when the payload
 // ended and the step goes on with the trailer.
 @(private)
-inflate_gzip_decoder_payload :: proc(d: ^Gzip_Decoder, input, output: []u8, final_input: bool, work_limit: int, r: ^compress.Decode_Result) -> (ended: bool) {
+inflate_gzip_decoder_payload :: proc(d: ^Gzip_Decoder, input, output: []u8, final_input: bool, work_limit: int, r: ^Decode_Result) -> (ended: bool) {
 	p := inflate_decoder_step(&d.inflate, input[r.consumed:], output[r.produced:], final_input, work_limit - r.work)
 
 	if p.produced > 0 {
@@ -303,7 +303,7 @@ inflate_gzip_decoder_payload :: proc(d: ^Gzip_Decoder, input, output: []u8, fina
 
 // Reads one byte of the fixed header. Returns true when it needs more input.
 @(private)
-inflate_gzip_decoder_header :: proc(d: ^Gzip_Decoder, input: []u8, r: ^compress.Decode_Result) -> (need_input: bool) {
+inflate_gzip_decoder_header :: proc(d: ^Gzip_Decoder, input: []u8, r: ^Decode_Result) -> (need_input: bool) {
 	value, ok := inflate_gzip_decoder_byte(d, input, r, true, true)
 
 	if !ok {
@@ -314,7 +314,7 @@ inflate_gzip_decoder_header :: proc(d: ^Gzip_Decoder, input: []u8, r: ^compress.
 	d.index += 1
 
 	// Anything but a gzip magic after a complete member is trailing data.
-	not_gzip := compress.Decode_Error.Trailing_Data if d.members != 0 else compress.Decode_Error.Malformed
+	not_gzip := Decode_Error.Trailing_Data if d.members != 0 else Decode_Error.Malformed
 
 	if d.index == 1 && value != 0x1f {
 		r.err = not_gzip
@@ -337,7 +337,7 @@ inflate_gzip_decoder_header :: proc(d: ^Gzip_Decoder, input: []u8, r: ^compress.
 		return false
 	}
 
-	header := (^Gzip_Header)(&d.header)^
+	header := (^deflate.Gzip_Header)(&d.header)^
 
 	if header.compression_method != .DEFLATE || header.flags & {.reserved_1, .reserved_2, .reserved_3} != {} {
 		r.err = .Malformed
@@ -353,7 +353,7 @@ inflate_gzip_decoder_header :: proc(d: ^Gzip_Decoder, input: []u8, r: ^compress.
 // Reads one byte of the trailer and validates it once complete. Returns true when
 // it needs more input.
 @(private)
-inflate_gzip_decoder_trailer :: proc(d: ^Gzip_Decoder, input: []u8, r: ^compress.Decode_Result) -> (need_input: bool) {
+inflate_gzip_decoder_trailer :: proc(d: ^Gzip_Decoder, input: []u8, r: ^Decode_Result) -> (need_input: bool) {
 	value, ok := inflate_gzip_decoder_byte(d, input, r, false, false)
 
 	if !ok {
@@ -367,7 +367,7 @@ inflate_gzip_decoder_trailer :: proc(d: ^Gzip_Decoder, input: []u8, r: ^compress
 		return false
 	}
 
-	trailer := (^Gzip_Trailer)(&d.trailer)^
+	trailer := (^deflate.Gzip_Trailer)(&d.trailer)^
 
 	if u32(trailer.crc32) != d.payload_crc {
 		r.err = .Checksum_Mismatch
@@ -413,7 +413,7 @@ inflate_gzip_decoder_next_field :: proc(d: ^Gzip_Decoder) {
 }
 
 @(private)
-inflate_gzip_decoder_byte :: proc(d: ^Gzip_Decoder, input: []u8, r: ^compress.Decode_Result, header, crc: bool) -> (value: u8, ok: bool) {
+inflate_gzip_decoder_byte :: proc(d: ^Gzip_Decoder, input: []u8, r: ^Decode_Result, header, crc: bool) -> (value: u8, ok: bool) {
 	if r.consumed == len(input) {
 		return 0, false
 	}

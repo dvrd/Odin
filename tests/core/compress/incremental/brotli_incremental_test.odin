@@ -1,6 +1,7 @@
 package incremental_test
 
 import "core:bytes"
+import "core:compress/step"
 import "core:compress"
 import "core:compress/brotli"
 import "core:strings"
@@ -11,7 +12,7 @@ import "core:testing"
 BROTLI_VECTORS := #load_directory("testdata/brotli")
 
 Brotli_Run :: struct {
-	err:        compress.Decode_Error,
+	err:        step.Decode_Error,
 	output:     [dynamic]u8,
 	violations: int,
 	steps:      int,
@@ -160,7 +161,7 @@ brotli_reference_vectors_across_input_and_output_partitions :: proc(t: ^testing.
 
 		for input_size in ([5]int{1, 2, 7, 4096, 1 << 30}) {
 			for output_size in ([4]int{1, 3, 4096, 1 << 20}) {
-				run := run_brotli(vector.wire, input_size, output_size, compress.DECODE_MAX_WORK, window, enc, dec)
+				run := run_brotli(vector.wire, input_size, output_size, step.DECODE_MAX_WORK, window, enc, dec)
 				defer delete(run.output)
 
 				testing.expectf(t, run.err == .None && run.violations == 0, "%s in=%d out=%d: %v violations %d", vector.name, input_size, output_size, run.err, run.violations)
@@ -185,10 +186,10 @@ brotli_incremental_equals_one_shot_load :: proc(t: ^testing.T) {
 		testing.expect_value(t, brotli.decompress(&buffer, vector.wire), nil)
 
 		enc, dec := brotli_limits(vector.wire, vector.plain)
-		run := run_brotli(vector.wire, 4096, 4096, compress.DECODE_MAX_WORK, window, enc, dec)
+		run := run_brotli(vector.wire, 4096, 4096, step.DECODE_MAX_WORK, window, enc, dec)
 		defer delete(run.output)
 
-		testing.expect_value(t, run.err, compress.Decode_Error.None)
+		testing.expect_value(t, run.err, step.Decode_Error.None)
 		testing.expectf(t, bytes.equal(run.output[:], buffer[:]), "%s: incremental differs from brotli.decompress", vector.name)
 	}
 }
@@ -232,14 +233,14 @@ brotli_every_truncation_is_truncated :: proc(t: ^testing.T) {
 		stride := max(1, len(vector.wire) / 100)
 
 		for cut := 0; cut < len(vector.wire); cut += stride {
-			run := run_brotli(vector.wire[:cut], 4096, 4096, compress.DECODE_MAX_WORK, window, 1 << 30, 1 << 30)
+			run := run_brotli(vector.wire[:cut], 4096, 4096, step.DECODE_MAX_WORK, window, 1 << 30, 1 << 30)
 			defer delete(run.output)
 
 			testing.expectf(t, run.err == .Truncated && run.violations == 0, "%s cut %d: %v", vector.name, cut, run.err)
 			testing.expectf(t, bytes.equal(run.output[:], vector.plain[:len(run.output)]), "%s cut %d: provisional output differs", vector.name, cut)
 		}
 
-		run := run_brotli(vector.wire[:len(vector.wire) - 1], 1, 4096, compress.DECODE_MAX_WORK, window, 1 << 30, 1 << 30)
+		run := run_brotli(vector.wire[:len(vector.wire) - 1], 1, 4096, step.DECODE_MAX_WORK, window, 1 << 30, 1 << 30)
 		defer delete(run.output)
 
 		testing.expectf(t, run.err == .Truncated, "%s without last byte: %v", vector.name, run.err)
@@ -267,7 +268,7 @@ brotli_trailing_bytes_and_bad_padding_are_rejected :: proc(t: ^testing.T) {
 			copy(wire[len(vector.wire):], extra)
 
 			for input_size in ([3]int{1, 5, 1 << 30}) {
-				run := run_brotli(wire, input_size, 4096, compress.DECODE_MAX_WORK, window, 1 << 30, 1 << 30)
+				run := run_brotli(wire, input_size, 4096, step.DECODE_MAX_WORK, window, 1 << 30, 1 << 30)
 				defer delete(run.output)
 
 				testing.expectf(t, run.err == .Trailing_Data, "%s extra %v in=%d: %v", vector.name, extra, input_size, run.err)
@@ -277,16 +278,16 @@ brotli_trailing_bytes_and_bad_padding_are_rejected :: proc(t: ^testing.T) {
 
 	// 0x06 is the empty stream: WBITS 16, ISLAST, ISLASTEMPTY, five zero padding bits.
 	for pad in ([5]u8{0x86, 0x46, 0x26, 0x16, 0x0e}) {
-		run := run_brotli([]u8{pad}, 1, 8, compress.DECODE_MAX_WORK, window, 8, 8)
+		run := run_brotli([]u8{pad}, 1, 8, step.DECODE_MAX_WORK, window, 8, 8)
 		defer delete(run.output)
 
-		testing.expect_value(t, run.err, compress.Decode_Error.Malformed)
+		testing.expect_value(t, run.err, step.Decode_Error.Malformed)
 	}
 
-	run := run_brotli([]u8{0x06}, 1, 8, compress.DECODE_MAX_WORK, window, 8, 8)
+	run := run_brotli([]u8{0x06}, 1, 8, step.DECODE_MAX_WORK, window, 8, 8)
 	defer delete(run.output)
 
-	testing.expect_value(t, run.err, compress.Decode_Error.None)
+	testing.expect_value(t, run.err, step.Decode_Error.None)
 	testing.expect_value(t, len(run.output), 0)
 }
 
@@ -306,18 +307,18 @@ brotli_encoded_and_decoded_limits_are_exact :: proc(t: ^testing.T) {
 		enc, dec := brotli_limits(vector.wire, vector.plain)
 
 		for input_size in ([2]int{1, 1 << 30}) {
-			exact := run_brotli(vector.wire, input_size, 64, compress.DECODE_MAX_WORK, window, enc, dec)
+			exact := run_brotli(vector.wire, input_size, 64, step.DECODE_MAX_WORK, window, enc, dec)
 			defer delete(exact.output)
 
-			testing.expect_value(t, exact.err, compress.Decode_Error.None)
+			testing.expect_value(t, exact.err, step.Decode_Error.None)
 
-			short_wire := run_brotli(vector.wire, input_size, 64, compress.DECODE_MAX_WORK, window, enc - 1, dec)
+			short_wire := run_brotli(vector.wire, input_size, 64, step.DECODE_MAX_WORK, window, enc - 1, dec)
 			defer delete(short_wire.output)
 
 			testing.expectf(t, short_wire.err == .Encoded_Limit, "%s encoded limit: %v", vector.name, short_wire.err)
 
 			if len(vector.plain) > 0 {
-				short_plain := run_brotli(vector.wire, input_size, 64, compress.DECODE_MAX_WORK, window, enc, dec - 1)
+				short_plain := run_brotli(vector.wire, input_size, 64, step.DECODE_MAX_WORK, window, enc, dec - 1)
 				defer delete(short_plain.output)
 
 				testing.expectf(t, short_plain.err == .Decoded_Limit, "%s decoded limit: %v", vector.name, short_plain.err)
@@ -344,17 +345,17 @@ brotli_encoded_and_decoded_limits_are_exact :: proc(t: ^testing.T) {
 	}
 
 	testing.expect(t, len(text) > 0 && len(wire) > 0)
-	testing.expect_value(t, brotli.decoder_init(&d, window, u64(len(wire)), 0), compress.Decode_Error.None)
+	testing.expect_value(t, brotli.decoder_init(&d, window, u64(len(wire)), 0), step.Decode_Error.None)
 
 	r := brotli.decoder_step(&d, wire, nil, true)
-	testing.expect_value(t, r.err, compress.Decode_Error.Decoded_Limit)
+	testing.expect_value(t, r.err, step.Decode_Error.Decoded_Limit)
 	testing.expect_value(t, r.produced, 0)
 
-	testing.expect_value(t, brotli.decoder_init(&d, window, 1, 0), compress.Decode_Error.None)
+	testing.expect_value(t, brotli.decoder_init(&d, window, 1, 0), step.Decode_Error.None)
 
 	r = brotli.decoder_step(&d, []u8{0x06}, nil, true)
-	testing.expect_value(t, r.err, compress.Decode_Error.None)
-	testing.expect_value(t, r.status, compress.Decode_Status.Done)
+	testing.expect_value(t, r.err, step.Decode_Error.None)
+	testing.expect_value(t, r.status, step.Decode_Status.Done)
 }
 
 @(test)
@@ -370,32 +371,32 @@ brotli_window_that_does_not_fit_is_invalid_config :: proc(t: ^testing.T) {
 		small := make([]u8, brotli.DECODER_WINDOW_MIN)
 		defer delete(small)
 
-		run := run_brotli(vector.wire, 1, 64, compress.DECODE_MAX_WORK, small, 1 << 20, 1 << 20)
+		run := run_brotli(vector.wire, 1, 64, step.DECODE_MAX_WORK, small, 1 << 20, 1 << 20)
 		defer delete(run.output)
 
-		testing.expect_value(t, run.err, compress.Decode_Error.Invalid_Config)
+		testing.expect_value(t, run.err, step.Decode_Error.Invalid_Config)
 		testing.expect_value(t, len(run.output), 0)
 
 		exact := make([]u8, brotli_window_size(vector.lgwin))
 		defer delete(exact)
 
-		run2 := run_brotli(vector.wire, 1, 64, compress.DECODE_MAX_WORK, exact, 1 << 20, 1 << 20)
+		run2 := run_brotli(vector.wire, 1, 64, step.DECODE_MAX_WORK, exact, 1 << 20, 1 << 20)
 		defer delete(run2.output)
 
-		testing.expect_value(t, run2.err, compress.Decode_Error.None)
+		testing.expect_value(t, run2.err, step.Decode_Error.None)
 
 		// One byte short of the history the declared WBITS needs.
 		short := exact[:len(exact) - 1]
-		run3 := run_brotli(vector.wire, 1, 64, compress.DECODE_MAX_WORK, short, 1 << 20, 1 << 20)
+		run3 := run_brotli(vector.wire, 1, 64, step.DECODE_MAX_WORK, short, 1 << 20, 1 << 20)
 		defer delete(run3.output)
 
-		testing.expect_value(t, run3.err, compress.Decode_Error.Invalid_Config)
+		testing.expect_value(t, run3.err, step.Decode_Error.Invalid_Config)
 	}
 
 	d: brotli.Decoder
 	tiny: [brotli.DECODER_WINDOW_MIN - 1]u8
-	testing.expect_value(t, brotli.decoder_init(&d, tiny[:], 1, 1), compress.Decode_Error.Invalid_Config)
-	testing.expect_value(t, brotli.decoder_init(nil, tiny[:], 1, 1), compress.Decode_Error.Invalid_State)
+	testing.expect_value(t, brotli.decoder_init(&d, tiny[:], 1, 1), step.Decode_Error.Invalid_Config)
+	testing.expect_value(t, brotli.decoder_init(nil, tiny[:], 1, 1), step.Decode_Error.Invalid_State)
 }
 
 // Hand-assembled meta-blocks the reference encoder never emits.
@@ -498,11 +499,11 @@ brotli_metadata_and_uncompressed_meta_blocks :: proc(t: ^testing.T) {
 
 	for input_size in ([4]int{1, 3, 100, 1 << 30}) {
 		for output_size in ([3]int{1, 5, 4096}) {
-			for work in ([2]int{1, compress.DECODE_MAX_WORK}) {
+			for work in ([2]int{1, step.DECODE_MAX_WORK}) {
 				run := run_brotli(w.bytes[:], input_size, output_size, work, window, u64(len(w.bytes)), u64(len(expected)))
 				defer delete(run.output)
 
-				testing.expect_value(t, run.err, compress.Decode_Error.None)
+				testing.expect_value(t, run.err, step.Decode_Error.None)
 				testing.expect_value(t, run.violations, 0)
 				testing.expect(t, bytes.equal(run.output[:], expected[:]))
 			}
@@ -551,7 +552,7 @@ brotli_metadata_and_uncompressed_meta_blocks :: proc(t: ^testing.T) {
 		put_last_empty(&bad)
 
 		for input_size in ([2]int{1, 1 << 30}) {
-			run := run_brotli(bad.bytes[:], input_size, 16, compress.DECODE_MAX_WORK, window, 1 << 20, 1 << 20)
+			run := run_brotli(bad.bytes[:], input_size, 16, step.DECODE_MAX_WORK, window, 1 << 20, 1 << 20)
 			defer delete(run.output)
 
 			testing.expectf(t, run.err == .Malformed, "variant %d: %v", variant, run.err)
@@ -591,10 +592,10 @@ brotli_claimed_lengths_do_not_amplify_work :: proc(t: ^testing.T) {
 			put_bits(&w, 0, 8)
 		}
 
-		run := run_brotli(w.bytes[:], 1 << 20, 1 << 20, compress.DECODE_MAX_WORK, window, 1 << 30, 1 << 30)
+		run := run_brotli(w.bytes[:], 1 << 20, 1 << 20, step.DECODE_MAX_WORK, window, 1 << 30, 1 << 30)
 		defer delete(run.output)
 
-		testing.expect_value(t, run.err, compress.Decode_Error.Truncated)
+		testing.expect_value(t, run.err, step.Decode_Error.Truncated)
 		testing.expect(t, run.work < 64)
 		testing.expect(t, run.steps < 8)
 	}
@@ -610,7 +611,7 @@ brotli_check_bit_flips :: proc(t: ^testing.T, wire: []u8, window: []u8, name: st
 		copy(flipped, wire)
 		flipped[bit / 8] ~= 1 << uint(bit % 8)
 
-		whole := run_brotli(flipped, 1 << 30, 8192, compress.DECODE_MAX_WORK, window, 1 << 30, 1 << 26)
+		whole := run_brotli(flipped, 1 << 30, 8192, step.DECODE_MAX_WORK, window, 1 << 30, 1 << 26)
 		defer delete(whole.output)
 
 		bytewise := run_brotli(flipped, 1, 7, 5, window, 1 << 30, 1 << 26)
@@ -673,7 +674,7 @@ brotli_arguments_are_atomic_and_errors_are_sticky :: proc(t: ^testing.T) {
 	d: brotli.Decoder
 	defer brotli.decoder_destroy(&d)
 
-	testing.expect_value(t, brotli.decoder_init(&d, window, 1 << 20, 1 << 20), compress.Decode_Error.None)
+	testing.expect_value(t, brotli.decoder_init(&d, window, 1 << 20, 1 << 20), step.Decode_Error.None)
 
 	buffer: [64]u8
 	copy(buffer[:], wire)
@@ -681,15 +682,15 @@ brotli_arguments_are_atomic_and_errors_are_sticky :: proc(t: ^testing.T) {
 	before := d
 
 	r := brotli.decoder_step(&d, buffer[:20], buffer[4:24], false)
-	testing.expect_value(t, r.err, compress.Decode_Error.Overlapping_Buffers)
+	testing.expect_value(t, r.err, step.Decode_Error.Overlapping_Buffers)
 	r = brotli.decoder_step(&d, window[:20], window[4:24], false)
-	testing.expect_value(t, r.err, compress.Decode_Error.Overlapping_Buffers)
+	testing.expect_value(t, r.err, step.Decode_Error.Overlapping_Buffers)
 	r = brotli.decoder_step(&d, wire, window[100:200], false)
-	testing.expect_value(t, r.err, compress.Decode_Error.Overlapping_Buffers)
+	testing.expect_value(t, r.err, step.Decode_Error.Overlapping_Buffers)
 
-	for budget in ([3]int{-1, 0, compress.DECODE_MAX_WORK + 1}) {
+	for budget in ([3]int{-1, 0, step.DECODE_MAX_WORK + 1}) {
 		r = brotli.decoder_step(&d, wire, buffer[:], true, budget)
-		testing.expect_value(t, r.err, compress.Decode_Error.Invalid_Config)
+		testing.expect_value(t, r.err, step.Decode_Error.Invalid_Config)
 	}
 
 	testing.expect(t, bytes.equal(buffer[:], before_buffer[:]))
@@ -697,28 +698,28 @@ brotli_arguments_are_atomic_and_errors_are_sticky :: proc(t: ^testing.T) {
 
 	// final_input cannot be withdrawn; a failed stream stays failed.
 	r = brotli.decoder_step(&d, wire[:1], buffer[:], true)
-	testing.expect_value(t, r.err, compress.Decode_Error.Truncated)
+	testing.expect_value(t, r.err, step.Decode_Error.Truncated)
 	r = brotli.decoder_step(&d, wire, buffer[:], true)
-	testing.expect_value(t, r.err, compress.Decode_Error.Truncated)
+	testing.expect_value(t, r.err, step.Decode_Error.Truncated)
 
-	testing.expect_value(t, brotli.decoder_init(&d, window, 1 << 20, 1 << 20), compress.Decode_Error.None)
+	testing.expect_value(t, brotli.decoder_init(&d, window, 1 << 20, 1 << 20), step.Decode_Error.None)
 
 	out: [8192]u8
 	r = brotli.decoder_step(&d, wire, out[:1], true)
 	testing.expect(t, r.err == .None)
 	r = brotli.decoder_step(&d, wire[r.consumed:], out[:], false)
-	testing.expect_value(t, r.err, compress.Decode_Error.Invalid_State)
+	testing.expect_value(t, r.err, step.Decode_Error.Invalid_State)
 
 	// Reinitialization keeps working after a failure and after completion.
 	for _ in 0 ..< 2 {
-		testing.expect_value(t, brotli.decoder_init(&d, window, 1 << 20, 1 << 20), compress.Decode_Error.None)
+		testing.expect_value(t, brotli.decoder_init(&d, window, 1 << 20, 1 << 20), step.Decode_Error.None)
 
 		total := 0
-		status := compress.Decode_Status.Progress
+		status := step.Decode_Status.Progress
 
 		for status != .Done {
 			r = brotli.decoder_step(&d, wire[total:], out[:], true)
-			testing.expect_value(t, r.err, compress.Decode_Error.None)
+			testing.expect_value(t, r.err, step.Decode_Error.None)
 			total += r.consumed
 			status = r.status
 
@@ -731,17 +732,17 @@ brotli_arguments_are_atomic_and_errors_are_sticky :: proc(t: ^testing.T) {
 
 		garbage := [1]u8{0}
 		r = brotli.decoder_step(&d, nil, out[:], true)
-		testing.expect_value(t, r.status, compress.Decode_Status.Done)
+		testing.expect_value(t, r.status, step.Decode_Status.Done)
 		r = brotli.decoder_step(&d, garbage[:], out[:], true)
-		testing.expect_value(t, r.err, compress.Decode_Error.Trailing_Data)
+		testing.expect_value(t, r.err, step.Decode_Error.Trailing_Data)
 	}
 
 	// Without final_input a finished stream waits for the end of the entity.
-	testing.expect_value(t, brotli.decoder_init(&d, window, 1 << 20, 1 << 20), compress.Decode_Error.None)
+	testing.expect_value(t, brotli.decoder_init(&d, window, 1 << 20, 1 << 20), step.Decode_Error.None)
 
 	r = brotli.decoder_step(&d, []u8{0x06}, out[:], false)
-	testing.expect_value(t, r.err, compress.Decode_Error.None)
-	testing.expect_value(t, r.status, compress.Decode_Status.Need_Input)
+	testing.expect_value(t, r.err, step.Decode_Error.None)
+	testing.expect_value(t, r.status, step.Decode_Status.Need_Input)
 	r = brotli.decoder_step(&d, nil, out[:], true)
-	testing.expect_value(t, r.status, compress.Decode_Status.Done)
+	testing.expect_value(t, r.status, step.Decode_Status.Done)
 }
