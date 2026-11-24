@@ -23,7 +23,7 @@ conn_udp_facade_configures_each_borrowed_socket_generation :: proc(t:^testing.T)
   testing.expect(t,cause==.None&&sent==0&&received==0)
   after,ae:=async.udp_fragmentation_policy(socket,family)
   testing.expect(t,ae.kind==.None&&after.status==.Configured)
-  assert(async.close_udp(socket).kind==.None)
+  assert(async.close(socket).kind==.None)
   _,_,closed:=conn.exchange_udp(p.client,socket,endpoint,nil,nil,0)
   testing.expect(t,closed==.Closed)
  }
