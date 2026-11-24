@@ -6,7 +6,7 @@ import "core:mem"
 import "core:testing"
 
 tls12_test_bytes :: proc(text: string) -> []u8 {
- data,ok:=hex.decode(transmute([]u8)text);assert(ok);return data
+ data,err:=hex.decode(transmute([]u8)text);assert(err==nil);return data
 }
 tls12_test_array :: proc($N:int,text:string) -> (out:[N]u8) {
  data:=tls12_test_bytes(text);defer delete(data);assert(len(data)==N);copy(out[:],data);return

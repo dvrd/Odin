@@ -70,11 +70,11 @@ schedule_suite_expect :: proc(t: ^testing.T, actual: []u8, expected: string, loc
 
 // A protection keyed directly from an expected key and IV: the peer's view.
 schedule_suite_peer :: proc(peer: ^Record_Protection, suite: Cipher_Suite, key_hex, iv_hex: string) {
-	key, key_ok := hex.decode(transmute([]u8)key_hex)
+	key, key_err := hex.decode(transmute([]u8)key_hex)
 	defer delete(key)
-	iv, iv_ok := hex.decode(transmute([]u8)iv_hex)
+	iv, iv_err := hex.decode(transmute([]u8)iv_hex)
 	defer delete(iv)
-	assert(key_ok && iv_ok)
+	assert(key_err == nil && iv_err == nil)
 
 	aead.init(&peer.ctx, CIPHER_SUITE_AEAD[suite], key)
 	copy(peer.iv[:], iv)
