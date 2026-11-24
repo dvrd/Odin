@@ -214,6 +214,7 @@ engine_quic_application_secrets :: proc(
 	roots: []^x509.Certificate,
 	now: time.Time,
 	local_parameters, peer_parameters: []u8,
+	allocator := context.allocator,
 ) -> (
 	keys: Quic_Application_Keys,
 	client_finished: [FINISHED_MESSAGE_SIZE]u8,
@@ -247,12 +248,12 @@ engine_quic_application_secrets :: proc(
 	if e := quic_encrypted_extensions_policy(messages[0], peer_parameters); e.kind != .None {
 		return {}, {}, e
 	}
-	certs, auth := engine_server_certificates_parse(messages[1])
-	defer server_certificates_destroy(&certs)
+	certs, auth := engine_server_certificates_parse(messages[1], allocator)
+	defer server_certificates_destroy(&certs, allocator)
 	if auth.kind != .None {
 		return {}, {}, {kind = .Authentication_Failed, authentication = auth}
 	}
-	auth = engine_verify_server_certificates(&certs, server_name, roots, now)
+	auth = engine_verify_server_certificates(&certs, server_name, roots, now, allocator)
 	if auth.kind != .None {
 		return {}, {}, {kind = .Authentication_Failed, authentication = auth}
 	}
@@ -616,15 +617,12 @@ engine_quic_application_secrets_mutual :: proc(
 		if messages[cert_at][0] != 11 || messages[cert_at + 1][0] != 15 || messages[cert_at + 2][0] != 20 {
 			return {}, nil, {kind = .Unsupported}
 		}
-		previous := context.allocator
-		context.allocator = allocator
-		defer context.allocator = previous
-		certs, ae := engine_server_certificates_parse(messages[cert_at])
-		defer server_certificates_destroy(&certs)
+		certs, ae := engine_server_certificates_parse(messages[cert_at], allocator)
+		defer server_certificates_destroy(&certs, allocator)
 		if ae.kind != .None {
 			return {}, nil, {kind = .Authentication_Failed, authentication = ae}
 		}
-		if ae = engine_verify_server_certificates(&certs, server_name, roots, now); ae.kind != .None {
+		if ae = engine_verify_server_certificates(&certs, server_name, roots, now, allocator); ae.kind != .None {
 			return {}, nil, {kind = .Authentication_Failed, authentication = ae}
 		}
 		transcript_update(&transcript, messages[cert_at])

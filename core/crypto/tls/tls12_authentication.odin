@@ -50,15 +50,16 @@ TLS12_Server_Key_Exchange :: struct {
 
 // RFC5246 section7.4.2: TLS1.2 has no certificate_request_context or per-entry
 // extension vectors. Returned certificates borrow message DER and own parsed
-// tables through the current allocator; destroy with server_certificates_destroy
-// under that same allocator. Every failed parse destroys all admitted entries.
+// tables through allocator; destroy with server_certificates_destroy and that
+// same allocator. Every failed parse destroys all admitted entries.
 @(private)
 tls12_server_certificates_parse :: proc(
 	message: []u8,
+	allocator := context.allocator,
 ) -> (Server_Certificates, Authentication_Error) {
 	certs: Server_Certificates;
 	success := false
-	defer if !success {server_certificates_destroy(&certs)}
+	defer if !success {server_certificates_destroy(&certs, allocator)}
 	if len(message) > MAX_CERTIFICATE_MESSAGE_SIZE {return {}, {kind = .Message_Oversized}}
 	if len(message) < 7 {return {}, {kind = .Truncated}}
 	if message[0] != u8(Handshake_Type.Certificate) {return {}, {kind = .Unexpected_Handshake_Type}}
@@ -73,7 +74,7 @@ tls12_server_certificates_parse :: proc(
 		size := authentication_u24(message, at); at += 3
 		if size == 0 {return {}, {kind = .Invalid_Certificate}}
 		if size > len(message)-at {return {}, {kind = .Truncated}}
-		cert, parsed := x509.parse(message[at:at+size])
+		cert, parsed := x509.parse(message[at:at+size], allocator)
 		if parsed != .None {return {}, {kind = .Invalid_Certificate, x509 = parsed}}
 		certs.chain[certs.count] = cert; certs.count += 1; at += size
 	}
@@ -205,8 +206,9 @@ tls12_authenticate_server_key_exchange :: proc(
 	offered_groups: []Named_Group,
 	offered_schemes: []Signature_Scheme,
 	now: time.Time,
+	allocator := context.allocator,
 ) -> (TLS12_Server_Key_Exchange, TLS12_Authentication_Error) {
-	if cause := engine_verify_server_certificates(certs, config.server_name, config.root_cas, now); cause.kind != .None {
+	if cause := engine_verify_server_certificates(certs, config.server_name, config.root_cas, now, allocator); cause.kind != .None {
 		return {}, {kind = .Invalid_Certificates, authentication = cause}
 	}
 	return tls12_verify_server_key_exchange(certs, message, client_random, server_random, cipher_suite, offered_groups, offered_schemes)

@@ -119,11 +119,11 @@ handshake_until_internal :: proc(conn: ^Conn, deadline: time.Time) -> Handshake_
 	}
 	// A stable bounded allocation keeps borrowed DER valid while parsing and
 	// verifying the entire certificate chain. It is released before returning.
-	flight_storage, allocation_error := make([]u8, MAX_SERVER_FLIGHT_SIZE)
+	flight_storage, allocation_error := make([]u8, MAX_SERVER_FLIGHT_SIZE, conn.allocator)
 	if allocation_error != nil {
 		return handshake_fail(conn, {kind = .Allocation_Failed, allocation = allocation_error})
 	}
-	defer delete(flight_storage)
+	defer delete(flight_storage, conn.allocator)
 	if error := handshake_until_check(conn, deadline); error.kind != .None {return error}
 	flight, flight_error := handshake_server_flight_read(conn, flight_storage)
 	if flight_error.kind != .None do return flight_error
@@ -361,19 +361,25 @@ handshake_flight_certificates_verify :: proc(
 		return handshake_fail(conn, certificate_message_err)
 	}
 
-	certs, auth_err := engine_server_certificates_parse(certificate)
+	certs, auth_err := engine_server_certificates_parse(certificate, conn.allocator)
 	if auth_err.kind != .None {
 		return handshake_fail(conn, {kind = .Authentication_Failed, authentication = auth_err})
 	}
 
-	defer server_certificates_destroy(&certs)
+	defer server_certificates_destroy(&certs, conn.allocator)
 	if !conn.config.unsafe_skip_verify {
 		// Upstream's client verifies the chain for the name exactly as given.
 		err: Authentication_Error
 		if conn.upstream_client {
-			err = verify_server_chain(&certs, conn.config.server_name, conn.config.root_cas, time.now())
+			err = verify_server_chain(&certs, conn.config.server_name, conn.config.root_cas, time.now(), conn.allocator)
 		} else {
-			err = engine_verify_server_certificates(&certs, conn.config.server_name, conn.config.root_cas, time.now())
+			err = engine_verify_server_certificates(
+				&certs,
+				conn.config.server_name,
+				conn.config.root_cas,
+				time.now(),
+				conn.allocator,
+			)
 		}
 		if err.kind != .None {
 			return handshake_fail(conn, {kind = .Authentication_Failed, authentication = err})
@@ -494,7 +500,7 @@ handshake_client_finished_encode :: proc(
 
 @(private)
 handshake_client_finished_send :: proc(conn: ^Conn) -> Handshake_Error {
-	if e := client_auth_prepare(conn, context.allocator); e.kind != .None {
+	if e := client_auth_prepare(conn); e.kind != .None {
 		return handshake_fail(conn, e)
 	}
 
@@ -1187,13 +1193,12 @@ server_hello_message_read :: proc(conn: ^Conn, message: []u8) -> (int, Server_He
 					return 0, {kind = .Record_Boundary_Violation}
 				}
 				tail := body[consumed:]
-				copied, allocation_error := make([]u8, len(tail))
+				copied, allocation_error := make([]u8, len(tail), conn.allocator)
 				if allocation_error != nil {
 					return 0, {kind = .Message_Oversized}
 				}
 				copy(copied, tail)
 				conn.tls12.prefix = copied
-				conn.tls12.prefix_allocator = context.allocator
 			}
 		}
 		break
@@ -1415,7 +1420,7 @@ client_handshake_secrets_install :: proc(conn: ^Conn) {
 	if logger != nil {
 		client_random = conn.client_hello[CLIENT_HELLO_RANDOM_OFFSET:][:RANDOM_SIZE]
 	}
-	init_connection_secrets(&conn.secrets, &conn.keys, &transcript, CIPHER_SUITE_AEAD[suite], true, context.allocator, client_random, logger)
+	init_connection_secrets(&conn.secrets, &conn.keys, &transcript, CIPHER_SUITE_AEAD[suite], true, conn.allocator, client_random, logger)
 
 	record_protection_init(&conn.handshake_send, &conn.secrets.client_aead)
 	record_protection_init(&conn.handshake_receive, &conn.secrets.server_aead)
@@ -2060,7 +2065,7 @@ async_handshake_drive :: proc(conn: ^Async_Conn) {
 				return
 			}
 
-			if e := client_auth_prepare(p, conn.allocator); e.kind != .None {
+			if e := client_auth_prepare(p); e.kind != .None {
 				async_handshake_fail(conn, e)
 				return
 			}

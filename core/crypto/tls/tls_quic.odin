@@ -150,8 +150,8 @@ client_hello_prepare :: proc(conn: ^Conn) -> Error {
 
 // server_certificates_parse parses a Certificate message.
 @(require_results)
-server_certificates_parse :: proc(message: []u8) -> (Server_Certificates, Error) {
-	r0, failure := engine_server_certificates_parse(message)
+server_certificates_parse :: proc(message: []u8, allocator := context.allocator) -> (Server_Certificates, Error) {
+	r0, failure := engine_server_certificates_parse(message, allocator)
 	return r0, authentication_error(failure)
 }
 
@@ -162,8 +162,9 @@ verify_server_certificates :: proc(
 	server_name: string,
 	roots: []^x509.Certificate,
 	now: time.Time,
+	allocator := context.allocator,
 ) -> Error {
-	return authentication_error(engine_verify_server_certificates(certs, server_name, roots, now))
+	return authentication_error(engine_verify_server_certificates(certs, server_name, roots, now, allocator))
 }
 
 // verify_server_certificate_signature checks a CertificateVerify message against the transcript.

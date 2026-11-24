@@ -90,9 +90,6 @@ socket_engine_handshake :: proc(
 	sync.atomic_store(&state.rx_dead, false)
 	sync.atomic_store(&state.tx_dead, false)
 
-	// The engine's handshake allocations follow the caller's allocator.
-	context.allocator = allocator
-
 	names := make([]string, len(alpn_protocols), allocator) or_return
 	defer delete(names, allocator)
 	for protocol, i in alpn_protocols {
@@ -118,6 +115,7 @@ socket_engine_handshake :: proc(
 		no_system_roots      = true,
 	}
 	conn.phase = .Handshake_Pending
+	conn.allocator = allocator
 	conn.upstream_client = true
 	// A KeyUpdate request read by recv is left for the sender to answer.
 	conn.defer_key_updates = true

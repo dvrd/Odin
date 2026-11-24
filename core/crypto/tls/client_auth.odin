@@ -231,7 +231,7 @@ client_authentication_flight :: proc(
 }
 
 @(private)
-client_auth_prepare :: proc(conn: ^Conn, allocator: mem.Allocator) -> Handshake_Error {
+client_auth_prepare :: proc(conn: ^Conn) -> Handshake_Error {
 	if !conn.client_auth_requested {
 		return {}
 	}
@@ -243,7 +243,7 @@ client_auth_prepare :: proc(conn: ^Conn, allocator: mem.Allocator) -> Handshake_
 		conn.config.client_credentials,
 		conn.client_auth_schemes[:conn.client_auth_scheme_count],
 		&conn.server_finished_transcript,
-		allocator,
+		conn.allocator,
 		conn.config.client_credential_lease,
 		conn.client_auth_context[:conn.client_auth_context_size],
 	)
@@ -260,7 +260,6 @@ client_auth_prepare :: proc(conn: ^Conn, allocator: mem.Allocator) -> Handshake_
 		}
 	}
 	conn.client_auth_flight = flight
-	conn.client_auth_allocator = allocator
 	return {}
 }
 
@@ -268,11 +267,10 @@ client_auth_prepare :: proc(conn: ^Conn, allocator: mem.Allocator) -> Handshake_
 client_auth_clear :: proc(conn: ^Conn) {
 	if raw_data(conn.client_auth_flight) != nil {
 		crypto.zero_explicit(raw_data(conn.client_auth_flight), len(conn.client_auth_flight))
-		delete(conn.client_auth_flight, conn.client_auth_allocator)
+		delete(conn.client_auth_flight, conn.allocator)
 	}
 	conn.client_auth_flight = nil
 	conn.client_auth_offset = 0
-	conn.client_auth_allocator = {}
 	conn.client_auth_requested = false
 	conn.client_auth_scheme_count = 0
 	crypto.zero_explicit(&conn.client_auth_schemes, size_of(conn.client_auth_schemes))

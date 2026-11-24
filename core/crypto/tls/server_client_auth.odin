@@ -30,10 +30,7 @@ server_client_auth_clear :: proc(owner: ^Server_Handshake) {
 		return
 	}
 	state := owner._client_auth
-	previous := context.allocator
-	context.allocator = owner._allocator
-	server_certificates_destroy(&state.certs)
-	context.allocator = previous
+	server_certificates_destroy(&state.certs, owner._allocator)
 	if raw_data(state.certificate) != nil {
 		owner._stats.live_bytes -= len(state.certificate)
 		server_handshake_wipe_free(owner, state.certificate)
@@ -46,10 +43,7 @@ server_client_auth_clear :: proc(owner: ^Server_Handshake) {
 @(private)
 server_client_auth_verify_chain :: proc(owner: ^Server_Handshake, message: []u8) -> bool {
 	auth := owner._client_auth
-	previous := context.allocator
-	context.allocator = owner._allocator
-	defer context.allocator = previous
-	certs, e := engine_server_certificates_parse(message)
+	certs, e := engine_server_certificates_parse(message, owner._allocator)
 	if e.kind != .None {
 		return false
 	}
@@ -74,11 +68,12 @@ server_client_auth_verify_chain :: proc(owner: ^Server_Handshake, message: []u8)
 			current_time = now,
 			required_eku = x509.EKU_Bit.Client_Auth,
 		},
+		owner._allocator,
 	)
 	if ce != .None {
 		return false
 	}
-	delete(chain)
+	delete(chain, owner._allocator)
 	return true
 }
 

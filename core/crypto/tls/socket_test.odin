@@ -3,6 +3,7 @@ package tls
 import "base:runtime"
 import "core:crypto/x509"
 import "core:io"
+import "core:mem"
 import "core:net"
 import "core:os"
 import "core:strings"
@@ -976,4 +977,88 @@ socket_asks_a_slow_peer_to_rekey_once_for_each_key :: proc(t: ^testing.T) {
 
 	unused: Record_Protection
 	testing.expect(t, !socket_peer_rekey_due(&state, &unused))
+}
+
+// The client engine allocates from the allocator it was given and from no
+// other: the context's allocator panics for as long as the engine runs.
+@(test)
+client_allocates_only_from_the_allocator_it_was_given :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 20 * time.Second)
+
+	roots: Root_Pool
+	matrix_roots(&roots, false)
+	defer root_pool_destroy(&roots)
+
+	tracker: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&tracker, context.allocator)
+	defer mem.tracking_allocator_destroy(&tracker)
+	given := mem.tracking_allocator(&tracker)
+
+	// A Socket.
+	{
+		server: Socket_Test_Server
+		if !socket_test_start(t, &server, .Echo) {
+			return
+		}
+		fd := socket_test_dial(t, &server)
+
+		socket: Socket
+		established, sent, received: Error
+		reply: [8]u8
+		{
+			context.allocator = mem.panic_allocator()
+			established = client_handshake(&socket, fd, "localhost", roots.roots[:roots.count], allocator = given)
+			if established == nil {
+				_, sent = send(&socket, transmute([]u8)string("ping"))
+				_, received = recv(&socket, reply[:])
+			}
+			close(&socket)
+		}
+		socket_test_join(&server)
+		testing.expect_value(t, established, nil)
+		testing.expect_value(t, sent, nil)
+		testing.expect_value(t, received, nil)
+	}
+	testing.expect(t, tracker.total_allocation_count > 0)
+	testing.expect_value(t, tracker.current_memory_allocated, 0)
+	testing.expect_value(t, len(tracker.bad_free_array), 0)
+
+	// A Conn.
+	{
+		server: Socket_Test_Server
+		if !socket_test_start(t, &server, .Echo) {
+			return
+		}
+		tcp := net.TCP_Connection {
+			socket = socket_test_dial(t, &server),
+		}
+
+		conn := new(Conn)
+		defer free(conn)
+		before := tracker.total_allocation_count
+		wrapped, established, received, closed: Error
+		reply: [8]u8
+		{
+			context.allocator = mem.panic_allocator()
+			wrapped = client(conn, net.tcp_connection(&tcp), {server_name = "localhost", root_cas = roots.roots[:roots.count]}, given)
+			if wrapped == nil {
+				established = handshake(conn)
+			}
+			if wrapped == nil && established == nil {
+				_, received = write(conn, transmute([]u8)string("ping"))
+				if received == nil {
+					_, received = read(conn, reply[:])
+				}
+			}
+			closed = conn_close(conn)
+		}
+		socket_test_join(&server)
+		testing.expect_value(t, wrapped, nil)
+		testing.expect_value(t, established, nil)
+		testing.expect_value(t, received, nil)
+		testing.expect_value(t, closed, nil)
+		testing.expect(t, tracker.total_allocation_count > before)
+	}
+	testing.expect_value(t, tracker.current_memory_allocated, 0)
+	testing.expect_value(t, len(tracker.bad_free_array), 0)
 }

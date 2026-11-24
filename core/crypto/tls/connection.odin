@@ -156,7 +156,8 @@ Conn :: struct {
 	// Owned only when the caller supplied no roots. Explicit roots are the
 	// sole trust set for that connection.
 	system_roots:                 ^Root_Pool,
-	system_roots_allocator:       mem.Allocator,
+	// Everything the connection allocates comes from here: given to `client`.
+	allocator:                    mem.Allocator,
 	tls12:                        TLS12_Client,
 	psk_offered:                  bool,
 	psk_selected:                 bool,
@@ -189,7 +190,6 @@ Conn :: struct {
 	client_auth_context_size: int,
 	client_auth_flight: []u8,
 	client_auth_offset: int,
-	client_auth_allocator: mem.Allocator,
 }
 
 @(private)
@@ -229,7 +229,12 @@ engine_config_validate :: proc(config: Config) -> Client_Error {
 // Ownership of the transport transfers only on success. On failure the caller
 // retains it. A closed Conn cannot be reinitialized accidentally.
 @(private)
-engine_client :: proc(conn: ^Conn, underlying: trans.Connection, config: Config) -> Client_Error {
+engine_client :: proc(
+	conn: ^Conn,
+	underlying: trans.Connection,
+	config: Config,
+	allocator := context.allocator,
+) -> Client_Error {
 	if conn == nil do return .Nil_Connection
 
 	if conn.phase != .Uninitialized {
@@ -238,13 +243,13 @@ engine_client :: proc(conn: ^Conn, underlying: trans.Connection, config: Config)
 
 	if !trans.connection_valid(underlying) do return .Invalid_Transport
 
-	settings, roots, roots_allocator, trust_error := client_trust(config)
+	settings, roots, trust_error := client_trust(config, allocator)
 	if trust_error != .None {
 		return trust_error
 	}
 	// h3 is not a TCP record offer. Reject before any handshake write.
 	if err := alpn_tcp_rejects_h3(settings.alpn_protocols); err != .None {
-		system_roots_release_pool(roots, roots_allocator)
+		system_roots_release_pool(roots, allocator)
 		return err
 	}
 
@@ -252,9 +257,9 @@ engine_client :: proc(conn: ^Conn, underlying: trans.Connection, config: Config)
 		transport = underlying,
 		config    = settings,
 		phase     = .Handshake_Pending,
+		allocator = allocator,
 	}
 	conn.system_roots = roots
-	conn.system_roots_allocator = roots_allocator
 	return .None
 }
 
@@ -269,36 +274,35 @@ config_roots_optional :: proc(config: Config) -> bool {
 @(private)
 client_trust :: proc(
 	config: Config,
+	allocator: mem.Allocator,
 ) -> (
 	settings: Config,
 	roots: ^Root_Pool,
-	roots_allocator: mem.Allocator,
 	err: Client_Error,
 ) {
 	settings = config
 	if len(settings.root_cas) == 0 && !config_roots_optional(config) {
 		if raw_data(settings.root_cas) == nil {
-			return {}, nil, {}, .Missing_Trust_Roots
+			return {}, nil, .Missing_Trust_Roots
 		}
-		roots_allocator = context.allocator
-		allocated, allocation_error := new(Root_Pool, roots_allocator)
+		allocated, allocation_error := new(Root_Pool, allocator)
 		if allocation_error != nil || allocated == nil {
-			return {}, nil, {}, .Missing_Trust_Roots
+			return {}, nil, .Missing_Trust_Roots
 		}
 		loaded := engine_root_pool_load_system(allocated)
 		if loaded.kind != .None || allocated.count == 0 {
 			root_pool_destroy(allocated)
-			free(allocated, roots_allocator)
-			return {}, nil, {}, .Missing_Trust_Roots
+			free(allocated, allocator)
+			return {}, nil, .Missing_Trust_Roots
 		}
 		settings.root_cas = allocated.roots[:allocated.count]
 		roots = allocated
 	}
 	if validate_error := engine_config_validate(settings); validate_error != .None {
-		system_roots_release_pool(roots, roots_allocator)
-		return {}, nil, {}, validate_error
+		system_roots_release_pool(roots, allocator)
+		return {}, nil, validate_error
 	}
-	return settings, roots, roots_allocator, .None
+	return settings, roots, .None
 }
 
 @(private)
@@ -314,10 +318,8 @@ system_roots_release :: proc(conn: ^Conn) {
 	// root_cas borrows the pool. Drop that view before the bytes are freed.
 	conn.config.root_cas = nil
 	pool := conn.system_roots
-	allocator := conn.system_roots_allocator
 	conn.system_roots = nil
-	conn.system_roots_allocator = {}
-	system_roots_release_pool(pool, allocator)
+	system_roots_release_pool(pool, conn.allocator)
 }
 
 // Connection establishment and inspection
@@ -344,7 +346,13 @@ Dial_Error :: struct {
 // uses core:net's dial behavior; handshake_timeout bounds the TLS phase only.
 // conn must stay at the same address until closed and must not be copied.
 @(private)
-engine_dial :: proc(conn: ^Conn, host: string, port: int, config: Config) -> Dial_Error {
+engine_dial :: proc(
+	conn: ^Conn,
+	host: string,
+	port: int,
+	config: Config,
+	allocator := context.allocator,
+) -> Dial_Error {
 	if conn == nil || conn.phase != .Uninitialized {
 		return {kind = .Invalid_State}
 	}
@@ -370,7 +378,7 @@ engine_dial :: proc(conn: ^Conn, host: string, port: int, config: Config) -> Dia
 	// client overwrites Conn, so install the socket after wrapping its stable
 	// embedded adapter address. No transport I/O happens inside client.
 	underlying := trans.tcp_connection(&conn.tcp)
-	if err := engine_client(conn, underlying, settings); err != .None {
+	if err := engine_client(conn, underlying, settings, allocator); err != .None {
 		net.close(socket)
 		return {kind = .Invalid_Config, config = err}
 	}
@@ -556,10 +564,10 @@ engine_async_client :: proc(
 	if conn == nil do return .Nil_Connection
 	if conn.initialized do return .Already_Initialized
 	if underlying.submit == nil || underlying.cancel == nil || executor.schedule == nil do return .Invalid_Transport
-	settings, roots, _, trust_error := client_trust(config)
+	settings, roots, trust_error := client_trust(config, allocator)
 	if trust_error != .None do return trust_error
 	if err := alpn_tcp_rejects_h3(settings.alpn_protocols); err != .None {
-		system_roots_release_pool(roots, context.allocator)
+		system_roots_release_pool(roots, allocator)
 		return err
 	}
 	conn^ = {
@@ -572,7 +580,7 @@ engine_async_client :: proc(
 			phase = .Handshake_Pending,
 			defer_key_updates = true,
 			system_roots = roots,
-			system_roots_allocator = context.allocator,
+			allocator = allocator,
 		},
 	}
 	conn.rx = {
@@ -703,9 +711,6 @@ async_queue :: proc(conn: ^Async_Conn) {
 async_pump :: proc(data: rawptr) {
 	conn := cast(^Async_Conn)data
 	conn.queued = false
-	allocator := context.allocator
-	context.allocator = conn.allocator
-	defer context.allocator = allocator
 	if conn.tx_done {
 		conn.tx_done = false
 		async_send_process(conn)

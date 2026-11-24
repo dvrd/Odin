@@ -2,7 +2,6 @@ package tls
 
 import "core:crypto"
 import "core:crypto/ecdh"
-import "core:mem"
 import transport "core:net"
 import "core:time"
 
@@ -20,7 +19,6 @@ TLS12_Client :: struct {
 	// Handshake bytes that shared the ServerHello record. Owned until the
 	// flight is consumed or the handshake is abandoned.
 	prefix:            []u8,
-	prefix_allocator:  mem.Allocator,
 }
 
 // Certificate chains in the compatibility probes fit well under this. A larger
@@ -38,9 +36,8 @@ tls12_client_clear :: proc(conn: ^Conn) {
 @(private)
 tls12_prefix_release :: proc(conn: ^Conn) {
 	if conn == nil || conn.tls12.prefix == nil do return
-	delete(conn.tls12.prefix, conn.tls12.prefix_allocator)
+	delete(conn.tls12.prefix, conn.allocator)
 	conn.tls12.prefix = nil
-	conn.tls12.prefix_allocator = {}
 }
 
 @(private)
@@ -121,11 +118,11 @@ tls12_client_establish :: proc(conn: ^Conn) -> Handshake_Error {
 	if conn == nil || !conn.tls12.negotiated || conn.phase != .Server_Hello_Received {
 		return handshake_fail(conn, {kind = .Invalid_State})
 	}
-	storage, allocation_error := make([]u8, TLS12_FLIGHT_STORAGE)
+	storage, allocation_error := make([]u8, TLS12_FLIGHT_STORAGE, conn.allocator)
 	if allocation_error != nil {
 		return handshake_fail(conn, {kind = .Allocation_Failed, allocation = allocation_error})
 	}
-	defer delete(storage)
+	defer delete(storage, conn.allocator)
 	framer, framer_error := tls12_framing_init(storage)
 	if framer_error != .None {
 		return handshake_fail(conn, {kind = .Invalid_State})
@@ -140,17 +137,17 @@ tls12_client_establish :: proc(conn: ^Conn) -> Handshake_Error {
 	scratch: [MAX_PLAINTEXT_SIZE]u8
 	certificate, certificate_error := tls12_take_handshake(conn, &framer, &pending, scratch[:], u8(Handshake_Type.Certificate))
 	if certificate_error.kind != .None do return certificate_error
-	defer delete(certificate)
+	defer delete(certificate, conn.allocator)
 	transcript_update(&transcript, certificate)
 
 	exchange, exchange_error := tls12_take_handshake(conn, &framer, &pending, scratch[:], TLS12_SERVER_KEY_EXCHANGE_TYPE)
 	if exchange_error.kind != .None do return exchange_error
-	defer delete(exchange)
+	defer delete(exchange, conn.allocator)
 	transcript_update(&transcript, exchange)
 
 	done, done_error := tls12_take_handshake(conn, &framer, &pending, scratch[:], 14)
 	if done_error.kind != .None do return done_error
-	defer delete(done)
+	defer delete(done, conn.allocator)
 	if len(done) != 4 || handshake_body_size(done) != 0 {
 		return handshake_fail(conn, {kind = .Malformed_Message, message_type = 14})
 	}
@@ -159,11 +156,11 @@ tls12_client_establish :: proc(conn: ^Conn) -> Handshake_Error {
 		return handshake_fail(conn, {kind = .Unexpected_Handshake_Message})
 	}
 
-	certs, parse_error := tls12_server_certificates_parse(certificate)
+	certs, parse_error := tls12_server_certificates_parse(certificate, conn.allocator)
 	if parse_error.kind != .None {
 		return handshake_fail(conn, {kind = .Authentication_Failed, authentication = parse_error})
 	}
-	defer server_certificates_destroy(&certs)
+	defer server_certificates_destroy(&certs, conn.allocator)
 	groups := [?]Named_Group{.X25519, .Secp256r1}
 	schemes := [?]Signature_Scheme{.Rsa_Pss_Rsae_Sha256, .Ecdsa_Secp256r1_Sha256, .Rsa_Pkcs1_Sha256}
 	view, authenticated := tls12_authenticate_server_key_exchange(
@@ -176,6 +173,7 @@ tls12_client_establish :: proc(conn: ^Conn) -> Handshake_Error {
 		groups[:],
 		schemes[:],
 		time.now(),
+		conn.allocator,
 	)
 	if authenticated.kind != .None {
 		return handshake_fail(conn, {kind = .Authentication_Failed, authentication = authenticated.authentication, message_type = TLS12_SERVER_KEY_EXCHANGE_TYPE})
@@ -293,13 +291,13 @@ tls12_take_handshake :: proc(
 	if kind != expected {
 		return nil, handshake_fail(conn, {kind = .Unexpected_Handshake_Message, message_type = kind})
 	}
-	copied, allocation_error := make([]u8, len(message))
+	copied, allocation_error := make([]u8, len(message), conn.allocator)
 	if allocation_error != nil {
 		return nil, handshake_fail(conn, {kind = .Allocation_Failed, allocation = allocation_error})
 	}
 	copy(copied, message)
 	if tls12_framing_next(framer) != .None {
-		delete(copied)
+		delete(copied, conn.allocator)
 		return nil, handshake_fail(conn, {kind = .Invalid_State})
 	}
 	return copied, {}

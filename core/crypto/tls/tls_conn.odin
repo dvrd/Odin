@@ -23,14 +23,14 @@ config_validate :: proc(config: Config) -> Error {
 // client prepares `conn` to speak TLS over `underlying`. No bytes are
 // exchanged until `handshake`.
 @(require_results)
-client :: proc(conn: ^Conn, underlying: net.Connection, config: Config) -> Error {
-	return client_error(engine_client(conn, underlying, config))
+client :: proc(conn: ^Conn, underlying: net.Connection, config: Config, allocator := context.allocator) -> Error {
+	return client_error(engine_client(conn, underlying, config, allocator))
 }
 
 // dial connects to `host`:`port` over TCP and completes the handshake.
 @(require_results)
-dial :: proc(conn: ^Conn, host: string, port: int, config: Config) -> Error {
-	failure := engine_dial(conn, host, port, config)
+dial :: proc(conn: ^Conn, host: string, port: int, config: Config, allocator := context.allocator) -> Error {
+	failure := engine_dial(conn, host, port, config, allocator)
 	switch failure.kind {
 	case .None:
 		return nil

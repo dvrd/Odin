@@ -1,5 +1,6 @@
 package tls
 
+import "base:runtime"
 import "core:crypto/ecdsa"
 import "core:crypto/ed25519"
 import "core:crypto/hash"
@@ -52,20 +53,26 @@ Server_Certificates :: struct {
 // no CertificateEntry extensions, so any nonempty entry extensions are an
 // unsolicited extension. Failure releases all partially parsed certificates.
 @(private)
-engine_server_certificates_parse :: proc(message: []u8) -> (Server_Certificates, Authentication_Error) {
+engine_server_certificates_parse :: proc(
+	message: []u8,
+	allocator := context.allocator,
+) -> (
+	Server_Certificates,
+	Authentication_Error,
+) {
 	certs: Server_Certificates
-	err := authentication_certificates_parse_into(&certs, message)
+	err := authentication_certificates_parse_into(&certs, message, allocator)
 	if err.kind != .None {
-		server_certificates_destroy(&certs)
+		server_certificates_destroy(&certs, allocator)
 	}
 
 	return certs, err
 }
 
-server_certificates_destroy :: proc(certs: ^Server_Certificates) {
+server_certificates_destroy :: proc(certs: ^Server_Certificates, allocator := context.allocator) {
 	if certs == nil do return
 
-	for i in 0 ..< certs.count do x509.destroy(&certs.chain[i])
+	for i in 0 ..< certs.count do x509.destroy(&certs.chain[i], allocator)
 	certs^ = {}
 }
 
@@ -75,6 +82,7 @@ engine_verify_server_certificates :: proc(
 	server_name: string,
 	roots: []^x509.Certificate,
 	now: time.Time,
+	allocator := context.allocator,
 ) -> Authentication_Error {
 	if certs == nil || certs.count < 1 || certs.count > MAX_SERVER_CERTIFICATES {
 		return {kind = .Empty_Certificate_List}
@@ -98,7 +106,7 @@ engine_verify_server_certificates :: proc(
 		return {kind = .Invalid_Certificate_Usage, x509 = .Incompatible_Usage}
 	}
 
-	return verify_server_chain(certs, server_name, roots, now)
+	return verify_server_chain(certs, server_name, roots, now, allocator)
 }
 
 // Path validation alone: the leaf chains to one of roots through the other
@@ -111,6 +119,7 @@ verify_server_chain :: proc(
 	server_name: string,
 	roots: []^x509.Certificate,
 	now: time.Time,
+	allocator := context.allocator,
 ) -> Authentication_Error {
 	leaf := &certs.chain[0]
 
@@ -125,12 +134,13 @@ verify_server_chain :: proc(
 			dns_name = server_name,
 			required_eku = x509.EKU_Bit.Server_Auth,
 		},
+		allocator,
 	)
 	if err != .None {
 		return {kind = .Certificate_Chain_Invalid, x509 = err}
 	}
 
-	delete(chain)
+	delete(chain, allocator)
 	return {}
 }
 
@@ -276,6 +286,7 @@ signature_scheme_is_pkcs1 :: proc(scheme: Signature_Scheme) -> bool {
 authentication_certificates_parse_into :: proc(
 	certs: ^Server_Certificates,
 	message: []u8,
+	allocator: runtime.Allocator,
 ) -> Authentication_Error {
 	if len(message) > MAX_CERTIFICATE_MESSAGE_SIZE {
 		return {kind = .Message_Oversized}
@@ -304,13 +315,14 @@ authentication_certificates_parse_into :: proc(
 		return {kind = .Empty_Certificate_List}
 	}
 
-	return authentication_certificate_entries_parse(certs, message)
+	return authentication_certificate_entries_parse(certs, message, allocator)
 }
 
 @(private)
 authentication_certificate_entries_parse :: proc(
 	certs: ^Server_Certificates,
 	message: []u8,
+	allocator: runtime.Allocator,
 ) -> Authentication_Error {
 	at := 8
 	for at < len(message) {
@@ -344,7 +356,7 @@ authentication_certificate_entries_parse :: proc(
 			return {kind = .Unsupported_Certificate_Extension}
 		}
 
-		cert, err := x509.parse(der)
+		cert, err := x509.parse(der, allocator)
 		if err != .None {
 			return {kind = .Invalid_Certificate, x509 = err}
 		}
