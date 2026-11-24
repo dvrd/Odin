@@ -18,19 +18,23 @@ Client_Offer :: enum u8 {
 }
 
 @(rodata)
+@(private)
 COMPATIBLE_CIPHER_SUITES := []Cipher_Suite{.TLS_AES_128_GCM_SHA256}
 
 @(rodata)
+@(private)
 COMPATIBLE_GROUPS := []Named_Group{.X25519}
 
 // PKCS#1 is offered for certificate signatures only, never CertificateVerify.
 @(rodata)
+@(private)
 COMPATIBLE_SIGNATURE_SCHEMES := []Signature_Scheme{.Ecdsa_Secp256r1_Sha256, .Rsa_Pss_Rsae_Sha256, .Ed25519}
 
 // The largest key_share a server returns: the X25519MLKEM768 ciphertext and
 // X25519 public key.
 MAX_KEY_SHARE_SIZE :: 1088 + 32
 
+@(private)
 client_offer_cipher_suites :: proc(offer: Client_Offer) -> []Cipher_Suite {
 	if offer == .Compatible {
 		return COMPATIBLE_CIPHER_SUITES
@@ -43,6 +47,7 @@ client_offer_cipher_suites :: proc(offer: Client_Offer) -> []Cipher_Suite {
 }
 
 // The groups offered, each with a key share.
+@(private)
 client_offer_groups :: proc(offer: Client_Offer) -> []Named_Group {
 	if offer == .Compatible {
 		return COMPATIBLE_GROUPS
@@ -51,6 +56,7 @@ client_offer_groups :: proc(offer: Client_Offer) -> []Named_Group {
 }
 
 // The schemes accepted in the server's CertificateVerify.
+@(private)
 client_offer_signature_schemes :: proc(offer: Client_Offer) -> []Signature_Scheme {
 	if offer == .Compatible {
 		return COMPATIBLE_SIGNATURE_SCHEMES
@@ -58,6 +64,7 @@ client_offer_signature_schemes :: proc(offer: Client_Offer) -> []Signature_Schem
 	return SIGNATURE_SCHEMES
 }
 
+@(private)
 cipher_suite_offered :: proc(suites: []Cipher_Suite, suite: Cipher_Suite) -> bool {
 	for offered in suites {
 		if offered == suite {
@@ -67,6 +74,7 @@ cipher_suite_offered :: proc(suites: []Cipher_Suite, suite: Cipher_Suite) -> boo
 	return false
 }
 
+@(private)
 named_group_offered :: proc(groups: []Named_Group, group: Named_Group) -> bool {
 	for offered in groups {
 		if offered == group {
@@ -76,6 +84,7 @@ named_group_offered :: proc(groups: []Named_Group, group: Named_Group) -> bool {
 	return false
 }
 
+@(private)
 signature_scheme_offered :: proc(schemes: []Signature_Scheme, scheme: Signature_Scheme) -> bool {
 	for offered in schemes {
 		if offered == scheme {
@@ -87,6 +96,7 @@ signature_scheme_offered :: proc(schemes: []Signature_Scheme, scheme: Signature_
 
 // Size of a group's key_share: the client's share, or the server's answer.
 // Zero for a group this package does not implement.
+@(private)
 named_group_share_size :: proc(group: Named_Group, server: bool) -> int {
 	#partial switch group {
 	case .X25519:
@@ -108,6 +118,7 @@ named_group_share_size :: proc(group: Named_Group, server: bool) -> int {
 
 // Writes the client's key_share for group from its ephemeral keys; the
 // result borrows dst, which must hold named_group_share_size(group, false).
+@(private)
 client_key_share_bytes :: proc(keys: ^Ephemeral_Keys, group: Named_Group, dst: []u8) -> []u8 {
 	size := named_group_share_size(group, false)
 	share := dst[:size]
@@ -139,8 +150,10 @@ Server_Offer :: enum u8 {
 }
 
 @(rodata)
+@(private)
 COMPATIBLE_SERVER_GROUPS := []Named_Group{.X25519, .Secp256r1}
 
+@(private)
 server_offer_groups :: proc(offer: Server_Offer) -> []Named_Group {
 	if offer == .Compatible {
 		return COMPATIBLE_SERVER_GROUPS
@@ -148,6 +161,7 @@ server_offer_groups :: proc(offer: Server_Offer) -> []Named_Group {
 	return SUPPORTED_GROUPS
 }
 
+@(private)
 server_offer_cipher_suites :: proc(offer: Server_Offer) -> []Cipher_Suite {
 	if offer == .Compatible {
 		return COMPATIBLE_CIPHER_SUITES
@@ -156,6 +170,7 @@ server_offer_cipher_suites :: proc(offer: Server_Offer) -> []Cipher_Suite {
 }
 
 // The suites conn offers: the offer's list, or the configured restriction.
+@(private)
 config_cipher_suites :: proc(config: ^Config) -> []Cipher_Suite {
 	if config.offer == .Upstream && len(config._cipher_suites) > 0 {
 		return config._cipher_suites
@@ -163,6 +178,7 @@ config_cipher_suites :: proc(config: ^Config) -> []Cipher_Suite {
 	return client_offer_cipher_suites(config.offer)
 }
 
+@(private)
 config_groups :: proc(config: ^Config) -> []Named_Group {
 	if config.offer == .Upstream && len(config._groups) > 0 {
 		return config._groups
@@ -172,6 +188,7 @@ config_groups :: proc(config: ^Config) -> []Named_Group {
 
 // A restriction is a duplicate-free subset of upstream's lists, and belongs
 // to the Upstream offer: the Compatible first flight is fixed.
+@(private)
 config_offer_valid :: proc(config: Config) -> bool {
 	if config.offer != .Upstream {
 		return len(config._cipher_suites) == 0 && len(config._groups) == 0

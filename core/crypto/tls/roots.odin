@@ -9,6 +9,7 @@ import "core:os"
 import "core:slice"
 
 MAX_ROOT_CERTIFICATES :: 512
+@(private)
 MAX_ROOT_BUNDLE_SIZE :: 4 << 20
 
 Root_Error_Kind :: enum {
@@ -59,6 +60,7 @@ root_pool_destroy :: proc(pool: ^Root_Pool) {
 
 // Copies one DER certificate into the pool. Unparseable inputs are refused
 // without disturbing certificates already admitted.
+@(private)
 root_pool_add_der :: proc(
 	pool: ^Root_Pool,
 	der: []u8,
@@ -204,6 +206,7 @@ root_pool_load_system :: proc(pool: ^Root_Pool) -> Root_Error {
 	return root_pool_load_system_files(pool)
 }
 
+@(private)
 root_pool_load_system_files :: proc(pool: ^Root_Pool) -> Root_Error {
 	paths := [?]string {
 		"/etc/ssl/certs/ca-certificates.crt",

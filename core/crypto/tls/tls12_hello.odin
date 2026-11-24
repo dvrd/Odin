@@ -5,27 +5,34 @@ import "core:strings"
 
 // TLS 1.2 hello codec. The live client offers these suites on the same
 // connection as TLS 1.3; this encoder itself stays TLS 1.2-only for tests.
+@(private)
 TLS12_VERSION :: u16(0x0303)
 
 // The TLS 1.2 suites of the fallback profile. Cipher_Suite holds the TLS 1.3
 // suites only, and its tables are indexed by every member, so these stay in
 // their own enumeration.
+@(private)
 Tls12_Cipher_Suite :: enum u16 {
 	TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 = 0xc02b,
 	TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256   = 0xc02f,
 }
 
+@(private)
 TLS12_ECDHE_RSA_AES128_GCM_SHA256 :: u16(Tls12_Cipher_Suite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256)
+@(private)
 TLS12_ECDHE_ECDSA_AES128_GCM_SHA256 :: u16(Tls12_Cipher_Suite.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256)
+@(private)
 TLS12_MAX_CLIENT_HELLO_SIZE :: 512 + MAX_ALPN_OFFER_BYTES
 TLS12_MAX_SERVER_HELLO_SIZE :: 1024
 
+@(private)
 TLS12_Client_Hello :: struct {
 	server_name:    string,
 	random:         [32]u8,
 	alpn_protocols: []string,
 }
 
+@(private)
 TLS12_Server_Hello :: struct {
 	random:                 [32]u8,
 	cipher_suite:           u16,
@@ -36,6 +43,7 @@ TLS12_Server_Hello :: struct {
 	secure_renegotiation:   bool,
 }
 
+@(private)
 TLS12_Hello_Error :: enum {
 	None,
 	Invalid_Server_Name,
@@ -58,6 +66,7 @@ TLS12_Hello_Error :: enum {
 
 // RFC5246/5289/7627: fresh ECDHE, AES128-GCM, SHA256 and EMS. No session
 // tickets, resumption, renegotiation or fallback reconnect is offered.
+@(private)
 tls12_client_hello_encode :: proc(dst: []u8, hello: TLS12_Client_Hello) -> (int, TLS12_Hello_Error) {
 	if !server_name_valid(hello.server_name) {
 		return 0, .Invalid_Server_Name
@@ -131,6 +140,7 @@ tls12_client_hello_encode :: proc(dst: []u8, hello: TLS12_Client_Hello) -> (int,
 	return at, .None
 }
 
+@(private)
 tls12_hello_extension :: proc(dst: []u8, at: ^int, kind: u16, size: int) {
 	hello_put_u16(dst, at, kind)
 	hello_put_u16(dst, at, u16(size))
@@ -139,6 +149,7 @@ tls12_hello_extension :: proc(dst: []u8, at: ^int, kind: u16, size: int) {
 // Validates complete handshake framing and exactly the offered extensions.
 // tls13_offered enables RFC8446 downgrade-sentinel enforcement for a future
 // dual-version offer; do not retry a failed TLS1.3 connection as TLS1.2.
+@(private)
 tls12_server_hello_decode :: proc(
 	wire: []u8,
 	offer: TLS12_Client_Hello,

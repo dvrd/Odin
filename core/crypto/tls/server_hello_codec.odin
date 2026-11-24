@@ -44,6 +44,7 @@ Server_Client_Hello_Selection :: struct {
 
 // Inspect a complete or partial four-byte header without retaining it. A
 // coalesced suffix is allowed here; decode requires exactly one full message.
+@(private)
 server_client_hello_size :: proc(prefix: []u8, limits := Server_Client_Hello_Limits{SERVER_CLIENT_HELLO_MAX_WIRE, SERVER_CLIENT_HELLO_MAX_ENTRIES}) -> (int, Server_Hello_Codec_Status) {
 	if limits.max_wire_bytes < 4 || limits.max_wire_bytes > SERVER_CLIENT_HELLO_MAX_WIRE ||
 	   limits.max_extensions < 1 || limits.max_extensions > SERVER_CLIENT_HELLO_MAX_ENTRIES {return 0, .Limit}
@@ -54,6 +55,7 @@ server_client_hello_size :: proc(prefix: []u8, limits := Server_Client_Hello_Lim
 	return size, .None
 }
 
+@(private)
 server_hello_vector :: proc(data: []u8, prefix: int, minimum: int, multiple: int) -> ([]u8, bool) {
 	if len(data) < prefix {return nil, false}
 	size := int(data[0])
@@ -62,6 +64,7 @@ server_hello_vector :: proc(data: []u8, prefix: int, minimum: int, multiple: int
 	return data[prefix:], true
 }
 
+@(private)
 server_hello_offer_contains :: proc(offers: []u8, value: u16) -> bool {
 	if len(offers)%2 != 0 {return false}
 	for at := 0; at < len(offers); at += 2 {
@@ -215,6 +218,7 @@ server_client_hello_decode :: proc(wire: []u8, limits := Server_Client_Hello_Lim
 	return hello, .None
 }
 
+@(private)
 server_hello_dns_name_valid :: proc(name: []u8) -> bool {
 	if len(name) == 0 || len(name) > MAX_SERVER_NAME_SIZE || name[len(name)-1] == '.' {return false}
 	_, ip := net.parse_ip4_address(string(name))
@@ -234,6 +238,7 @@ server_hello_dns_name_valid :: proc(name: []u8) -> bool {
 	return label > 0 && name[len(name)-1] != '-'
 }
 
+@(private)
 server_hello_psk_valid :: proc(identities, binders: []u8) -> bool {
 	identity_count, binder_count := 0, 0
 	for n := 0; n < len(identities); {
@@ -327,6 +332,7 @@ server_client_hello_negotiate :: proc(
 
 // The first suite of the client's list this offer selects. sha256_only keeps
 // the suites whose PSKs the ticket format can carry.
+@(private)
 server_negotiate_cipher :: proc(
 	hello: Server_Client_Hello_View,
 	offer: Server_Offer,
@@ -352,6 +358,7 @@ server_negotiate_cipher :: proc(
 
 // The client's share for group. Retry_Required when it sent none; Malformed
 // when the list is damaged or the share has the wrong shape for its group.
+@(private)
 server_key_share_find :: proc(key_shares: []u8, group: Named_Group) -> ([]u8, Server_Hello_Codec_Status) {
 	for n := 0; n < len(key_shares); {
 		if len(key_shares) - n < 4 {

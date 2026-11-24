@@ -14,9 +14,12 @@ RECORD_HEADER_SIZE :: 5
 MAX_PLAINTEXT_SIZE :: 1 << 14
 MAX_CIPHERTEXT_SIZE :: MAX_PLAINTEXT_SIZE + 256
 
+@(private)
 TLS_Legacy_Record_Version :: distinct u16
 
+@(private)
 LEGACY_TLS_1_0 :: cast(TLS_Legacy_Record_Version)0x0301
+@(private)
 LEGACY_TLS_1_2 :: cast(TLS_Legacy_Record_Version)0x0303
 
 TLS_Content_Type :: enum u8 {
@@ -27,6 +30,7 @@ TLS_Content_Type :: enum u8 {
 }
 
 
+@(private)
 Record_Header :: struct {
 	content_type:   TLS_Content_Type,
 	legacy_version: TLS_Legacy_Record_Version,
@@ -43,6 +47,7 @@ Record_Error :: enum {
 	Invalid_Change_Cipher_Spec_Length,
 }
 
+@(private)
 record_header_encode :: proc(header: Record_Header) -> [5]u8 {
 	version := cast(u16)header.legacy_version
 	return {
@@ -54,6 +59,7 @@ record_header_encode :: proc(header: Record_Header) -> [5]u8 {
 	}
 }
 
+@(private)
 record_header_decode :: proc(data: [5]u8) -> (header: Record_Header, error: Record_Error) {
 	content_type := cast(TLS_Content_Type)data[0]
 
@@ -72,6 +78,7 @@ record_header_decode :: proc(data: [5]u8) -> (header: Record_Header, error: Reco
 	return header, .None
 }
 
+@(private)
 is_plaintext :: proc(content_type: TLS_Content_Type) -> bool {
 	#partial switch content_type {
 	case .Change_Cipher_Spec, .Alert, .Handshake:
@@ -80,6 +87,7 @@ is_plaintext :: proc(content_type: TLS_Content_Type) -> bool {
 	return false
 }
 
+@(private)
 record_header_validate_plaintext :: proc(header: Record_Header) -> Record_Error {
 	if !is_plaintext(header.content_type) {
 		return .Unexpected_Content_Type
@@ -134,12 +142,14 @@ Record_Read_Error :: struct {
 // Destination_Undersized consumes no bytes and can be retried.
 // Every other error requires abandoning this connection;
 // this reader does not retain state for resuming failed reads.
+@(private)
 record_read_plaintext :: proc {
 	record_read_plaintext_tcp,
 	record_read_plaintext_conn,
 }
 
 // Compatibility entry point; the socket remains owned by the caller.
+@(private)
 record_read_plaintext_tcp :: proc(
 	socket: net.TCP_Socket,
 	dst: []u8,
@@ -154,6 +164,7 @@ record_read_plaintext_tcp :: proc(
 	return record_read_plaintext_conn(transport.tcp_connection(&tcp), dst)
 }
 
+@(private)
 record_read_plaintext_conn :: proc(
 	conn: transport.Connection,
 	dst: []u8,
@@ -213,6 +224,7 @@ MAX_INNER_PLAINTEXT_SIZE :: MAX_PLAINTEXT_SIZE + 1
 // section 5.5: upstream's AEAD_REKEY_SEQ for both AES-GCM suites. A direction
 // is rekeyed before this many records; record_protection_limit is the
 // per-suite value (ChaCha20-Poly1305 has no practical limit).
+@(private)
 MAX_RECORDS_PER_KEY :: cast(u64)(1 << 24)
 
 Record_Protection_Error :: enum {
@@ -254,6 +266,7 @@ record_protection_init :: proc {
 
 // Derives the key and IV of one traffic secret of suite with upstream's
 // update_connection_aead and installs them at sequence zero.
+@(private)
 record_protection_init_secret :: proc(state: ^Record_Protection, suite: Cipher_Suite, traffic_secret: []u8) {
 	if state == nil {
 		return
@@ -268,6 +281,7 @@ record_protection_init_secret :: proc(state: ^Record_Protection, suite: Cipher_S
 }
 
 // AES-128-GCM with an explicit key and IV, for peers that hold raw keys.
+@(private)
 record_protection_init_key :: proc(state: ^Record_Protection, key: [16]u8, iv: [12]u8) {
 	if state == nil {
 		return
@@ -285,6 +299,7 @@ record_protection_init_key :: proc(state: ^Record_Protection, key: [16]u8, iv: [
 // Takes over an AEAD state the schedule just derived. The source keeps its
 // generation counter and loses its key, so one direction's keys live in
 // exactly one place.
+@(private)
 record_protection_install :: proc(state: ^Record_Protection, derived: ^Aead_State) {
 	if state == nil || derived == nil {
 		return
@@ -306,6 +321,7 @@ record_protection_clear :: proc(state: ^Record_Protection) {
 }
 
 // Records one direction may protect under one key before it must be rekeyed.
+@(private)
 record_protection_limit :: proc(state: ^Record_Protection) -> u64 {
 	return AEAD_REKEY_SEQ[aead.algorithm(&state.ctx)]
 }
@@ -432,6 +448,7 @@ record_open :: proc(
 	return content_type, inner[:at], .None
 }
 
+@(private)
 record_open_inner_size :: proc(
 	state: ^Record_Protection,
 	wire: []u8,
@@ -473,6 +490,7 @@ record_open_inner_size :: proc(
 	return inner_size, .None
 }
 
+@(private)
 protection_content_validate :: proc(
 	content_type: TLS_Content_Type,
 	size: int,
@@ -499,6 +517,7 @@ protection_content_validate :: proc(
 	return .None
 }
 
+@(private)
 protection_state_validate :: proc(state: ^Record_Protection) -> Record_Protection_Error {
 	if state == nil {
 		return .Invalid_State
@@ -519,6 +538,7 @@ protection_state_validate :: proc(state: ^Record_Protection) -> Record_Protectio
 	return .None
 }
 
+@(private)
 protection_nonce :: proc(state: ^Record_Protection) -> [AEAD_IV_SIZE]u8 {
 	nonce := state.iv
 	for i in 0 ..< 8 {
@@ -527,6 +547,7 @@ protection_nonce :: proc(state: ^Record_Protection) -> [AEAD_IV_SIZE]u8 {
 	return nonce
 }
 
+@(private)
 protection_fail :: proc(
 	state: ^Record_Protection,
 	err: Record_Protection_Error,

@@ -95,6 +95,7 @@ server_handshake_finished_feed :: proc(
 // Constant-time check of the client's verify_data against the MAC of the
 // client handshake traffic secret over the transcript through server Finished
 // and any client authentication flight.
+@(private)
 server_finished_matches :: proc(owner: ^Server_Handshake, verify_data: []u8) -> bool {
 	algorithm := CIPHER_SUITE_HASH[owner._flight.cipher]
 	digest_size := hash.DIGEST_SIZES[algorithm]

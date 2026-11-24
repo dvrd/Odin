@@ -6,10 +6,14 @@ import "core:crypto/rsa"
 import "core:crypto/x509"
 import "core:time"
 
+@(private)
 TLS12_MAX_SIGNATURE_SIZE :: rsa.MODULUS_MAX_SIZE / 8
+@(private)
 TLS12_MAX_SERVER_KEY_EXCHANGE_SIZE :: 4 + 4 + 65 + 4 + TLS12_MAX_SIGNATURE_SIZE
+@(private)
 TLS12_SERVER_KEY_EXCHANGE_TYPE :: u8(12)
 
+@(private)
 TLS12_Authentication_Error_Kind :: enum {
 	None,
 	Truncated,
@@ -25,6 +29,7 @@ TLS12_Authentication_Error_Kind :: enum {
 	Cipher_Key_Mismatch,
 	Invalid_Signature,
 }
+@(private)
 TLS12_Authentication_Error :: struct {
 	kind: TLS12_Authentication_Error_Kind,
 	authentication: Authentication_Error,
@@ -34,6 +39,7 @@ TLS12_Authentication_Error :: struct {
 // parse alone establishes NO authentication. Never mutate any backing until
 // verification/use finishes. The verifying entrypoints reparse the exact message,
 // not a caller-modifiable view. No shared secret is computed or returned here.
+@(private)
 TLS12_Server_Key_Exchange :: struct {
 	group: Named_Group,
 	public_key: []u8,
@@ -46,6 +52,7 @@ TLS12_Server_Key_Exchange :: struct {
 // extension vectors. Returned certificates borrow message DER and own parsed
 // tables through the current allocator; destroy with server_certificates_destroy
 // under that same allocator. Every failed parse destroys all admitted entries.
+@(private)
 tls12_server_certificates_parse :: proc(
 	message: []u8,
 ) -> (Server_Certificates, Authentication_Error) {
@@ -79,6 +86,7 @@ tls12_server_certificates_parse :: proc(
 // operation MUST reject an all-zero shared secret (core:crypto/ecdh does so).
 // Signatures are bounded to the existing native RSA4096/P256 profile. This pure
 // syntax/offers decoder returns an UNAUTHENTICATED view and performs no ECDH.
+@(private)
 tls12_server_key_exchange_parse :: proc(
 	message: []u8,
 	offered_groups: []Named_Group,
@@ -129,6 +137,7 @@ tls12_server_key_exchange_parse :: proc(
 // establish certificate trust/name/time/usage, e.g. through its platform policy.
 // Use authenticate below for the existing native certificate policy. Only success
 // returns a view; no ECDH/shared secret occurs before certificate+SKE validation.
+@(private)
 tls12_verify_server_key_exchange :: proc(
 	certs: ^Server_Certificates,
 	message: []u8,
@@ -186,6 +195,7 @@ tls12_verify_server_key_exchange :: proc(
 // chain/name/time/usage, then bind the exact SKE to the selected key/cipher.
 // Roots, certificates, message and offer slices must remain stable/immutable
 // throughout. Caller retains certificate/message ownership on every path.
+@(private)
 tls12_authenticate_server_key_exchange :: proc(
 	certs: ^Server_Certificates,
 	message: []u8,
@@ -202,10 +212,12 @@ tls12_authenticate_server_key_exchange :: proc(
 	return tls12_verify_server_key_exchange(certs, message, client_random, server_random, cipher_suite, offered_groups, offered_schemes)
 }
 
+@(private)
 tls12_group_offered :: proc(groups: []Named_Group, group: Named_Group) -> bool {
 	for offered in groups {if offered == group {return true}}
 	return false
 }
+@(private)
 tls12_scheme_offered :: proc(schemes: []Signature_Scheme, scheme: Signature_Scheme) -> bool {
 	for offered in schemes {if offered == scheme {return true}}
 	return false

@@ -7,9 +7,12 @@ import "core:time"
 
 // Bounds memory and processing for peers that never produce application data.
 MAX_NEW_SESSION_TICKET_BODY_SIZE :: 4 + 4 + 1 + 255 + 2 + 65535 + 2 + 65534
+@(private)
 MAX_NON_APPLICATION_RECORDS :: 1024
 // Upstream's client gives up a recv after this many records without data.
+@(private)
 UPSTREAM_MAX_USELESS_RECORDS :: 16
+@(private)
 NEW_SESSION_TICKET_TYPE :: cast(u8)4
 
 IO_Error_Kind :: enum {
@@ -72,6 +75,7 @@ application_init :: proc {
 
 // Takes over the client's application traffic secrets and AEAD state from
 // the schedule. A nonempty resumption_master allows tickets to be remembered.
+@(private)
 application_init_schedule :: proc(
 	state: ^Application_State,
 	secrets: ^Connection_Secrets,
@@ -101,6 +105,7 @@ application_init_schedule :: proc(
 // TLS_AES_128_GCM_SHA256 application secrets by value, for peers that drive
 // the pure codecs. The protections use the keys and IVs exactly as given; a
 // later KeyUpdate derives from the traffic secrets.
+@(private)
 application_init_secrets :: proc(
 	state: ^Application_State,
 	secrets: Application_Secrets,
@@ -128,6 +133,7 @@ application_init_secrets :: proc(
 	state.initialized = true
 }
 
+@(private)
 application_clear :: proc(state: ^Application_State) {
 	if state != nil {
 		clear_connection_secrets(&state.secrets)
@@ -158,6 +164,7 @@ read :: proc(conn: ^Conn, dst: []u8) -> (received: int, error: IO_Error) {
 // application_write_records. A failure is returned, not recorded: the caller
 // owns the connection's terminal state. A KeyUpdate request is answered here
 // unless conn.defer_key_updates leaves key_update_pending for the caller.
+@(private)
 application_read_records :: proc(conn: ^Conn, dst: []u8) -> (received: int, error: IO_Error) {
 	if len(dst) == 0 {
 		return 0, {}
@@ -218,6 +225,7 @@ application_read_records :: proc(conn: ^Conn, dst: []u8) -> (received: int, erro
 	return 0, {kind = .No_Progress}
 }
 
+@(private)
 application_alert_read :: proc(conn: ^Conn, content: []u8) -> IO_Error {
 	err := application_alert_apply(&conn.application, content)
 	if err.kind == .Peer_Alert {
@@ -228,6 +236,7 @@ application_alert_read :: proc(conn: ^Conn, content: []u8) -> IO_Error {
 
 // close_notify ends the receive direction (EOF) and user_canceled is
 // ignored; any other alert is the peer's fatal error, returned unrecorded.
+@(private)
 application_alert_apply :: proc(state: ^Application_State, content: []u8) -> IO_Error {
 	switch content[1] {
 	case 0:
@@ -260,6 +269,7 @@ write :: proc(conn: ^Conn, src: []u8) -> (written: int, error: IO_Error) {
 // The send direction of an established TLS 1.3 connection: it touches only
 // the send protection and the client's traffic secret. A failure is
 // returned, not recorded.
+@(private)
 application_write_records :: proc(conn: ^Conn, src: []u8) -> (written: int, error: IO_Error) {
 	for written < len(src) {
 		// Reserve the final allowed old-key record for KeyUpdate itself.
@@ -315,6 +325,7 @@ conn_close :: proc(conn: ^Conn) -> IO_Error {
 	return err
 }
 
+@(private)
 application_ensure :: proc(conn: ^Conn) -> IO_Error {
 	if conn == nil do return {kind = .Invalid_State}
 
@@ -341,6 +352,7 @@ application_ensure :: proc(conn: ^Conn) -> IO_Error {
 	return {}
 }
 
+@(private)
 application_record_write :: proc(
 	conn: ^Conn,
 	content_type: TLS_Content_Type,
@@ -360,6 +372,7 @@ application_record_write :: proc(
 	return {}
 }
 
+@(private)
 application_record_read :: proc(conn: ^Conn) -> (TLS_Content_Type, []u8, IO_Error) {
 	wire: [RECORD_HEADER_SIZE + MAX_CIPHERTEXT_SIZE]u8
 	wire_size, wire_error := application_record_wire_read(conn, wire[:])
@@ -376,6 +389,7 @@ application_record_read :: proc(conn: ^Conn) -> (TLS_Content_Type, []u8, IO_Erro
 	return content_type, content, {}
 }
 
+@(private)
 application_record_wire_read :: proc(conn: ^Conn, wire: []u8) -> (int, IO_Error) {
 	header_count, header_err := transport.read_exact(conn.transport, wire[:RECORD_HEADER_SIZE])
 	if header_err.kind != .None {
@@ -418,6 +432,7 @@ application_record_wire_read :: proc(conn: ^Conn, wire: []u8) -> (int, IO_Error)
 	return RECORD_HEADER_SIZE + cast(int)header.length, {}
 }
 
+@(private)
 application_post_handshake :: proc(conn: ^Conn, content: []u8) -> IO_Error {
 	state := &conn.application
 
@@ -464,6 +479,7 @@ application_post_handshake :: proc(conn: ^Conn, content: []u8) -> IO_Error {
 	return {}
 }
 
+@(private)
 application_post_message :: proc(conn: ^Conn, message: []u8, record_ended: bool) -> IO_Error {
 	state := &conn.application
 	if message[0] == cast(u8)Handshake_Type.Key_Update {
@@ -498,6 +514,7 @@ application_post_message :: proc(conn: ^Conn, message: []u8, record_ended: bool)
 	return {}
 }
 
+@(private)
 application_post_header_validate :: proc(state: ^Application_State) -> IO_Error {
 	size := handshake_body_size(state.post_handshake[:4])
 	message_type := state.post_handshake[0]
@@ -522,6 +539,7 @@ application_post_header_validate :: proc(state: ^Application_State) -> IO_Error 
 	return {}
 }
 
+@(private)
 application_send_key_update :: proc(conn: ^Conn) -> IO_Error {
 	response := [?]u8{cast(u8)Handshake_Type.Key_Update, 0, 0, 1, 0}
 	if err := application_record_write(conn, .Handshake, response[:]); err.kind != .None {
@@ -534,6 +552,7 @@ application_send_key_update :: proc(conn: ^Conn) -> IO_Error {
 
 // Advances the client's send secret one generation (upstream's
 // update_connection_secret) and installs its keys at sequence zero.
+@(private)
 application_rotate_send_key :: proc(conn: ^Conn) {
 	state := &conn.application
 	update_connection_secret(&state.secrets, true)
@@ -542,12 +561,14 @@ application_rotate_send_key :: proc(conn: ^Conn) {
 
 // True when the next record must be a KeyUpdate: the final record allowed
 // under the current send key is reserved for it.
+@(private)
 application_send_key_exhausted :: proc(state: ^Application_State) -> bool {
 	return state.send.seq >= record_protection_limit(&state.send) - 1
 }
 
 // Validate every nested vector. Tickets are stored only by session_remember.
 // early_data is checked for shape here and never becomes a key.
+@(private)
 application_ticket_valid :: proc(body: []u8) -> bool {
 	if len(body) < 13 do return false
 
@@ -595,6 +616,7 @@ application_ticket_valid :: proc(body: []u8) -> bool {
 	return true
 }
 
+@(private)
 application_fail :: proc(conn: ^Conn, err: IO_Error) -> IO_Error {
 	conn.phase = .Failed
 	alpn_clear(conn)
@@ -607,6 +629,7 @@ application_fail :: proc(conn: ^Conn, err: IO_Error) -> IO_Error {
 
 // Asynchronous application operations
 
+@(private)
 async_application_drive :: proc(conn: ^Async_Conn) {
 	p := &conn.protocol
 	state := &p.application

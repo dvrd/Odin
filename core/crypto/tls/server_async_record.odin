@@ -280,6 +280,7 @@ server_async_send_process :: proc(s: ^Server_Async_Conn) {
 }
 
 // Installs a handshake traffic secret of suite for one direction.
+@(private)
 server_async_install :: proc(
 	s: ^Server_Async_Conn,
 	direction: Server_Handshake_Direction,
@@ -298,6 +299,7 @@ server_async_install :: proc(
 
 // Keeps an application traffic secret for KeyUpdate. The client's secret
 // protects what this server reads.
+@(private)
 server_async_application_secret :: proc(
 	s: ^Server_Async_Conn,
 	direction: Server_Handshake_Direction,
@@ -311,6 +313,7 @@ server_async_application_secret :: proc(
 
 // Derives the keys of the current application secret of one direction
 // (upstream's update_connection_aead) and moves them into its protection.
+@(private)
 server_async_application_install :: proc(s: ^Server_Async_Conn, direction: Server_Handshake_Direction) {
 	keys := server_async_keys(s)
 	if direction == .Read {
@@ -326,6 +329,7 @@ server_async_application_install :: proc(s: ^Server_Async_Conn, direction: Serve
 
 // KeyUpdate: the next generation of one direction (upstream's
 // update_connection_secret), installed at sequence zero.
+@(private)
 server_async_rotate :: proc(s: ^Server_Async_Conn, direction: Server_Handshake_Direction) {
 	keys := server_async_keys(s)
 	update_connection_secret(&keys.application, direction == .Write)

@@ -6,6 +6,7 @@ import "core:crypto/sha2"
 import "core:sync"
 import "core:time"
 
+@(private)
 SERVER_TICKET_MAX_LIFETIME :: 7 * 24 * time.Hour
 
 Server_Ticket_Error :: enum {

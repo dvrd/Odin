@@ -252,12 +252,14 @@ client :: proc(conn: ^Conn, underlying: trans.Connection, config: Config) -> Cli
 }
 
 // Whether the configuration may leave root_cas empty.
+@(private)
 config_roots_optional :: proc(config: Config) -> bool {
 	return config.unsafe_skip_verify || config.no_system_roots
 }
 
 // Loads Darwin/Unix system anchors for a non-nil empty root list.
 // A nil list is omitted trust. An explicit slice is not combined with the system store.
+@(private)
 client_trust :: proc(
 	config: Config,
 ) -> (
@@ -292,12 +294,14 @@ client_trust :: proc(
 	return settings, roots, roots_allocator, .None
 }
 
+@(private)
 system_roots_release_pool :: proc(pool: ^Root_Pool, allocator: mem.Allocator) {
 	if pool == nil do return
 	root_pool_destroy(pool)
 	free(pool, allocator)
 }
 
+@(private)
 system_roots_release :: proc(conn: ^Conn) {
 	if conn == nil || conn.system_roots == nil do return
 	// root_cas borrows the pool. Drop that view before the bytes are freed.
@@ -612,6 +616,7 @@ async_failure :: proc(conn: ^Async_Conn) -> IO_Error {
 	return conn.io_error
 }
 
+@(private)
 async_submit :: proc(
 	data: rawptr,
 	op: ^net.Async_Operation,
@@ -650,6 +655,7 @@ async_submit :: proc(
 	return {}
 }
 
+@(private)
 async_cancel :: proc(data: rawptr, op: ^net.Async_Operation) -> net.Connection_Error {
 	conn := cast(^Async_Conn)data
 	if !op.pending do return {}
@@ -667,6 +673,7 @@ async_cancel :: proc(data: rawptr, op: ^net.Async_Operation) -> net.Connection_E
 	return {}
 }
 
+@(private)
 async_queue :: proc(conn: ^Async_Conn) {
 	if !conn.queued {
 		conn.queued = true
@@ -674,6 +681,7 @@ async_queue :: proc(conn: ^Async_Conn) {
 	}
 }
 
+@(private)
 async_pump :: proc(data: rawptr) {
 	conn := cast(^Async_Conn)data
 	conn.queued = false
@@ -696,6 +704,7 @@ async_pump :: proc(data: rawptr) {
 	}
 }
 
+@(private)
 async_terminal :: proc(conn: ^Async_Conn, error: net.Connection_Error, details: IO_Error) {
 	if conn.failure.kind == .None {
 		conn.failure = error
@@ -716,6 +725,7 @@ async_terminal :: proc(conn: ^Async_Conn, error: net.Connection_Error, details: 
 	async_queue(conn)
 }
 
+@(private)
 async_emit :: proc(
 	conn: ^Async_Conn,
 	kind: net.Async_Operation_Kind,
@@ -732,6 +742,7 @@ async_emit :: proc(
 	op.callback(op)
 }
 
+@(private)
 async_handshake_complete :: proc(conn: ^Async_Conn, error: net.Connection_Error) {
 	op := conn.handshake_op
 	if op == nil do return
@@ -740,6 +751,7 @@ async_handshake_complete :: proc(conn: ^Async_Conn, error: net.Connection_Error)
 	op.callback(op)
 }
 
+@(private)
 async_shutdown_drive :: proc(conn: ^Async_Conn) {
 	if conn.rx.pending do net.async_cancel(conn.transport, &conn.rx)
 	if conn.tx.pending {
@@ -797,6 +809,7 @@ async_shutdown_drive :: proc(conn: ^Async_Conn) {
 	}
 }
 
+@(private)
 async_shutdown_done :: proc(op: ^net.Async_Operation) {
 	conn := cast(^Async_Conn)op.user_data
 	conn.transport_closed = true

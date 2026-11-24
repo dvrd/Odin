@@ -4,11 +4,15 @@ import "core:bytes"
 import "core:crypto"
 import "core:crypto/aes"
 
+@(private)
 TLS12_GCM_EXPLICIT_NONCE_SIZE :: 8
+@(private)
 TLS12_GCM_OVERHEAD :: TLS12_GCM_EXPLICIT_NONCE_SIZE + GCM_TAG_SIZE
+@(private)
 TLS12_MAX_CIPHERTEXT_SIZE :: MAX_PLAINTEXT_SIZE + TLS12_GCM_OVERHEAD
 // RFC9325 section4.4 recommends the TLS1.3 2^24.5 full-record ceiling also
 // for TLS1.2 AESGCM. A conservative2^24 cap applies to each direction/key.
+@(private)
 TLS12_MAX_RECORDS_PER_KEY :: u64(1 << 24)
 
 // Separate type prevents accidentally treating TLS1.2 explicit-nonce/AAD records
@@ -22,10 +26,12 @@ TLS12_Record_Protection :: struct {
 	failure: Record_Protection_Error,
 }
 
+@(private)
 tls12_record_protection_clear :: proc(state: ^TLS12_Record_Protection) {
 	if state != nil {crypto.zero_explicit(state, size_of(state^))}
 }
 
+@(private)
 tls12_record_protection_init :: proc(state: ^TLS12_Record_Protection, key: [16]u8, iv: [4]u8) {
 	if state == nil {return}
 	tls12_record_protection_clear(state)
@@ -39,6 +45,7 @@ tls12_record_protection_init :: proc(state: ^TLS12_Record_Protection, key: [16]u
 // Complete TLS1.2 record, RFC5246 section6.2.3.3/RFC5288. The deterministic
 // explicit nonce is sequence in network order (RFC9325 section4.2). Validation
 // preserves all inputs/dst and consumes no sequence; body and dst cannot alias.
+@(private)
 tls12_record_seal :: proc(
 	state: ^TLS12_Record_Protection,
 	dst: []u8,
@@ -67,6 +74,7 @@ tls12_record_seal :: proc(
 // its own monotonically increasing sequence authenticates AAD. Local size/alias
 // errors are retryable. Malformed/authenticated-content failures erase/poison
 // the direction. Tag failure returns no plaintext and zeros the affected dst.
+@(private)
 tls12_record_open :: proc(
 	state: ^TLS12_Record_Protection,
 	dst: []u8,

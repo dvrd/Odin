@@ -8,6 +8,7 @@ import "core:crypto/x509"
 import "core:time"
 
 MAX_SERVER_CERTIFICATES :: 16
+@(private)
 MAX_CERTIFICATE_MESSAGE_SIZE :: 1 << 20
 SERVER_CERTIFICATE_VERIFY_CONTEXT :: "TLS 1.3, server CertificateVerify"
 
@@ -100,6 +101,7 @@ verify_server_certificates :: proc(
 // certificates of the message, is valid at now, allows server authentication
 // and names server_name (x509.verify_chain decides what an empty name or an
 // IP address means). certs holds at least the leaf.
+@(private)
 verify_server_chain :: proc(
 	certs: ^Server_Certificates,
 	server_name: string,
@@ -142,6 +144,7 @@ verify_server_certificate_signature :: proc(
 
 // CertificateVerify of either role over a transcript digest of the suite's
 // hash. server names the signer.
+@(private)
 verify_certificate_signature :: proc(
 	certs: ^Server_Certificates,
 	message: []u8,
@@ -198,6 +201,7 @@ verify_certificate_signature :: proc(
 // Verifies signature over signed with the leaf's key under scheme: every
 // scheme of upstream's SIGNATURE_SCHEMES, through upstream's scheme tables.
 // The caller has already restricted scheme to the ones it offered.
+@(private)
 authentication_signature_check :: proc(
 	leaf: ^x509.Certificate,
 	scheme: Signature_Scheme,
@@ -258,10 +262,12 @@ authentication_signature_check :: proc(
 	return valid, {}
 }
 
+@(private)
 signature_scheme_is_pkcs1 :: proc(scheme: Signature_Scheme) -> bool {
 	return scheme == .Rsa_Pkcs1_Sha256 || scheme == .Rsa_Pkcs1_Sha384 || scheme == .Rsa_Pkcs1_Sha512
 }
 
+@(private)
 authentication_certificates_parse_into :: proc(
 	certs: ^Server_Certificates,
 	message: []u8,
@@ -296,6 +302,7 @@ authentication_certificates_parse_into :: proc(
 	return authentication_certificate_entries_parse(certs, message)
 }
 
+@(private)
 authentication_certificate_entries_parse :: proc(
 	certs: ^Server_Certificates,
 	message: []u8,
@@ -343,10 +350,12 @@ authentication_certificate_entries_parse :: proc(
 	return {}
 }
 
+@(private)
 authentication_u16 :: proc(data: []u8, at: int) -> u16 {
 	return cast(u16)data[at] << 8 | cast(u16)data[at + 1]
 }
 
+@(private)
 authentication_u24 :: proc(data: []u8, at: int) -> int {
 	return cast(int)data[at] << 16 | cast(int)data[at + 1] << 8 | cast(int)data[at + 2]
 }

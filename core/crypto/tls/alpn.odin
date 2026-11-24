@@ -53,7 +53,9 @@ alpn_clear :: proc(conn: ^Conn) {
 }
 
 // Opaque HTTP tokens. Matching them does not implement HTTP/2 or HTTP/3.
+@(private)
 ALPN_HTTP11 :: "http/1.1"
+@(private)
 ALPN_H2 :: "h2"
 ALPN_H3 :: "h3"
 

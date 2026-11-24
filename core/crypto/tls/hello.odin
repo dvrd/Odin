@@ -11,8 +11,10 @@ import "core:strings"
 // those enumerations do not name.
 
 // extended_master_secret, RFC 7627. Offered only for the TLS 1.2 fallback.
+@(private)
 EXTENSION_EXTENDED_MASTER_SECRET :: Extension_Type(23)
 
+@(private)
 VERSION_TLS_1_3 :: cast(u16)0x0304
 MAX_SERVER_NAME_SIZE :: 253
 // Includes the four-byte handshake header; excludes the record header.
@@ -47,6 +49,7 @@ Client_Hello_Error :: enum {
 
 // Accept IP literals for certificate verification, but omit them from SNI.
 // DNS names must already be ASCII (use IDNA conversion before configuring).
+@(private)
 server_name_valid :: proc(server_name: string) -> bool {
 	name := server_name
 	if len(name) == 0 do return false
@@ -160,6 +163,7 @@ client_hello_encode :: proc(
 	return written, .None
 }
 
+@(private)
 client_hello_extensions_encode :: proc(dst: []u8, hello: Client_Hello, at: ^int) {
 	hello_put_extension(dst, at, .Supported_Versions, 3)
 	dst[at^] = 2
@@ -201,6 +205,7 @@ client_hello_extensions_encode :: proc(dst: []u8, hello: Client_Hello, at: ^int)
 // connection when the peer selects one of the two AES-128-GCM ECDHE suites.
 // No session id is written here. A resumption PSK is appended later, without
 // early_data. client_hello_encode is unchanged.
+@(private)
 compatible_client_hello_encode :: proc(
 	dst: []u8,
 	hello: Client_Hello,
@@ -331,6 +336,7 @@ compatible_client_hello_encode :: proc(
 // verbatim is how upstream's client treats its arguments: the name is sent
 // as given unless it is an IP address (an empty name sends no server_name),
 // and the number of ALPN names is not limited.
+@(private)
 upstream_client_hello_encode :: proc(
 	dst: []u8,
 	hello: Client_Hello,
@@ -470,18 +476,21 @@ upstream_client_hello_encode :: proc(
 	return at, .None
 }
 
+@(private)
 hello_put_u16 :: proc(dst: []u8, at: ^int, value: u16) {
 	dst[at^] = cast(u8)(value >> 8)
 	dst[at^ + 1] = cast(u8)value
 	at^ += 2
 }
 
+@(private)
 hello_put_extension :: proc(dst: []u8, at: ^int, extension: Extension_Type, size: int) {
 	hello_put_u16(dst, at, cast(u16)extension)
 	hello_put_u16(dst, at, cast(u16)size)
 }
 
 // Offset of ClientHello.random in the handshake message: header, legacy_version.
+@(private)
 CLIENT_HELLO_RANDOM_OFFSET :: 4 + 2
 
 // ServerHello wire format
@@ -546,6 +555,7 @@ server_hello_decode :: proc(wire: []u8, allow_psk: bool = false) -> (hello: Serv
 // The same validation against an offer: the suite and the group must be ones
 // the client offered, the share must have the size of its group, and the
 // legacy session id must echo session_id (empty for the Compatible offer).
+@(private)
 server_hello_decode_offered :: proc(
 	wire: []u8,
 	suites: []Cipher_Suite,
@@ -604,6 +614,7 @@ server_hello_decode_offered :: proc(
 
 // Whether a ServerHello or HelloRetryRequest of at least 39 bytes carries
 // exactly session_id as its legacy_session_id_echo.
+@(private)
 hello_session_echoed :: proc(wire: []u8, session_id: []u8) -> bool {
 	if int(wire[38]) != len(session_id) || len(wire) < 39 + len(session_id) {
 		return false
@@ -617,6 +628,7 @@ hello_session_echoed :: proc(wire: []u8, session_id: []u8) -> bool {
 	return true
 }
 
+@(private)
 server_hello_extensions_decode :: proc(
 	wire: []u8,
 	hello: ^Server_Hello,
@@ -702,10 +714,12 @@ server_hello_extensions_decode :: proc(
 	return hello^, .None
 }
 
+@(private)
 handshake_body_size :: proc(wire: []u8) -> int {
 	return cast(int)wire[1] << 16 | cast(int)wire[2] << 8 | cast(int)wire[3]
 }
 
+@(private)
 hello_u16 :: proc(wire: []u8, at: int) -> u16 {
 	return cast(u16)wire[at] << 8 | cast(u16)wire[at + 1]
 }

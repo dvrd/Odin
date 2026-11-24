@@ -70,18 +70,21 @@ hkdf_expand_label :: proc(
 
 // Every internal call uses secrets sized by their hash and known TLS labels,
 // so label validation cannot fail unless this code is changed.
+@(private)
 schedule_expand :: proc(algorithm: hash.Algorithm, secret: []u8, label: string, context_bytes, dst: []u8) {
 	err := hkdf_expand_label(secret, label, context_bytes, dst, algorithm)
 	assert(err == .None, "invalid internal TLS HKDF parameters")
 }
 
 // The current stage secret of keys: early, handshake or master.
+@(private)
 schedule_secret :: proc(keys: ^Handshake_Keys) -> []u8 {
 	return keys.secret[:hash.DIGEST_SIZES[keys.hash]]
 }
 
 // Early secret of the schedule. An empty psk is the full handshake's zero
 // IKM (upstream's init_handshake_keys); a resumption PSK replaces that IKM.
+@(private)
 schedule_init :: proc(keys: ^Handshake_Keys, algorithm: hash.Algorithm, psk: []u8 = nil) {
 	init_handshake_keys(keys, algorithm)
 	if len(psk) == 0 {
@@ -93,12 +96,14 @@ schedule_init :: proc(keys: ^Handshake_Keys, algorithm: hash.Algorithm, psk: []u
 }
 
 // Derive-Secret(stage secret, label, transcript) for a transcript digest.
+@(private)
 schedule_derive_secret :: proc(keys: ^Handshake_Keys, label: string, transcript_digest: []u8, dst: []u8) {
 	schedule_expand(keys.hash, schedule_secret(keys), label, transcript_digest, dst)
 }
 
 // The Finished MAC over a transcript digest (RFC 8446 section 4.4.4), also the
 // PSK binder when base_key is the binder key. dst holds one digest.
+@(private)
 schedule_finished_mac :: proc(algorithm: hash.Algorithm, base_key, transcript_digest, dst: []u8) {
 	finished_key_storage: [hash.MAX_DIGEST_SIZE]u8
 	defer crypto.zero_explicit(&finished_key_storage, size_of(finished_key_storage))
@@ -111,6 +116,7 @@ schedule_finished_mac :: proc(algorithm: hash.Algorithm, base_key, transcript_di
 // Loads one traffic secret of suite into the role's slot of scratch secrets,
 // so upstream's per-direction derivations can run on a secret that was
 // exported, stored or received as an event.
+@(private)
 schedule_load_secret :: proc(secrets: ^Connection_Secrets, suite: Cipher_Suite, traffic_secret: []u8, is_client: bool) {
 	secrets.hash = CIPHER_SUITE_HASH[suite]
 	secrets.aead = CIPHER_SUITE_AEAD[suite]
@@ -122,6 +128,7 @@ schedule_load_secret :: proc(secrets: ^Connection_Secrets, suite: Cipher_Suite, 
 	}
 }
 
+@(private)
 schedule_message_valid :: proc(wire: []u8, message_type: Handshake_Type) -> bool {
 	if len(wire) < 4 || wire[0] != u8(message_type) {
 		return false
@@ -137,6 +144,7 @@ schedule_message_valid :: proc(wire: []u8, message_type: Handshake_Type) -> bool
 // the tests and harnesses drive. They hold no schedule logic of their own
 // beyond naming the labels for a transcript digest.
 
+@(private)
 Handshake_Secrets :: struct {
 	handshake_secret:      [32]u8,
 	client_traffic_secret: [32]u8,
@@ -155,6 +163,7 @@ Handshake_Secrets :: struct {
 // been checked by the handshake layer; this procedure checks framing only.
 // The returned secrets remain unauthenticated until CertificateVerify and
 // Finished verification complete. The caller owns and must clear the result.
+@(private)
 handshake_secrets_derive :: proc(
 	shared_secret: [32]u8,
 	client_hello: []u8,
@@ -184,6 +193,7 @@ handshake_secrets_derive :: proc(
 // The caller has validated message framing/order. Hash CH through SH inclusive,
 // with the synthetic message_hash prefix when retry was accepted. Returned
 // client/server directions are protocol roles, independent of the local role.
+@(private)
 handshake_secrets_derive_from_hash :: proc(
 	shared_secret: [32]u8,
 	transcript_hash: [32]u8,
@@ -218,6 +228,7 @@ handshake_secrets_derive_from_hash :: proc(
 // Finished verification and application key derivation
 
 FINISHED_MESSAGE_SIZE :: 4 + 32
+@(private)
 MAX_FINISHED_MESSAGE_SIZE :: 4 + MAX_TRANSCRIPT_HASH_SIZE
 
 Finished_Error :: enum {
@@ -240,6 +251,7 @@ Application_Secrets :: struct {
 
 // RFC 8446 section 4.4.4. transcript_hash excludes the Finished being
 // generated/verified, but includes all preceding handshake message headers.
+@(private)
 finished_verify_data :: proc(traffic_secret: [32]u8, transcript_hash: [32]u8) -> (verify_data: [32]u8) {
 	secret := traffic_secret
 	defer crypto.zero_explicit(&secret, size_of(secret))
@@ -298,6 +310,7 @@ finished_encode :: proc(
 	return FINISHED_MESSAGE_SIZE, .None
 }
 
+@(private)
 finished_header_encode :: proc(dst: []u8, verify_data_size: int) {
 	dst[0] = u8(Handshake_Type.Finished)
 	dst[1] = 0
@@ -309,6 +322,7 @@ finished_header_encode :: proc(dst: []u8, verify_data_size: int) {
 // excludes client Finished. Only install/use these keys after authenticating
 // the server and its Finished, and send client Finished under handshake keys.
 // The caller owns the returned secrets and must erase them when no longer used.
+@(private)
 application_secrets_derive :: proc(
 	handshake_secret: [32]u8,
 	server_finished_transcript_hash: [32]u8,

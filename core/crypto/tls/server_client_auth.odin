@@ -24,6 +24,7 @@ server_handshake_peer_identity :: proc(owner: ^Server_Handshake) -> Peer_Identit
 	return owner._peer_identity
 }
 
+@(private)
 server_client_auth_clear :: proc(owner: ^Server_Handshake) {
 	if owner._client_auth == nil {
 		return
@@ -42,6 +43,7 @@ server_client_auth_clear :: proc(owner: ^Server_Handshake) {
 	owner._client_auth = nil
 }
 
+@(private)
 server_client_auth_verify_chain :: proc(owner: ^Server_Handshake, message: []u8) -> bool {
 	auth := owner._client_auth
 	previous := context.allocator
@@ -80,6 +82,7 @@ server_client_auth_verify_chain :: proc(owner: ^Server_Handshake, message: []u8)
 	return true
 }
 
+@(private)
 server_client_auth_verify_signature :: proc(owner: ^Server_Handshake, message: []u8) -> bool {
 	if len(message) < 8 || message[0] != 15 || handshake_body_size(message) + 4 != len(message) {
 		return false
@@ -103,6 +106,7 @@ server_client_auth_verify_signature :: proc(owner: ^Server_Handshake, message: [
 	return valid && e.kind == .None
 }
 
+@(private)
 server_client_auth_feed :: proc(
 	owner: ^Server_Handshake,
 	level: Server_Handshake_Level,

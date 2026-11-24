@@ -18,6 +18,7 @@ Server_Resumption :: struct {
 	early_secret:                     [32]u8,
 }
 
+@(private)
 server_handshake_resumed :: proc(owner: ^Server_Handshake) -> bool {
 	return server_handshake_valid(owner) && owner._phase == .Complete && owner._resumed
 }

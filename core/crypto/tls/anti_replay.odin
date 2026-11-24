@@ -5,6 +5,7 @@ import "core:mem"
 import "core:sync"
 import "core:time"
 
+@(private)
 Anti_Replay_Error :: enum {
 	None,
 	Invalid,
@@ -70,6 +71,7 @@ anti_replay_close :: proc(owner: ^Anti_Replay) {
 	owner._closed = true
 }
 
+@(private)
 anti_replay_reserve :: proc(owner: ^Anti_Replay, identity: [32]u8, expires: i64, now: i64) -> Anti_Replay_Error {
 	if owner == nil || now < 0 || expires <= now {
 		return .Expired
@@ -117,6 +119,7 @@ Server_Early_Data_Config :: struct {
 
 SERVER_EARLY_CONTEXT_MAX :: 192
 
+@(private)
 server_early_data_config_valid :: proc(config: ^Server_Early_Data_Config) -> bool {
 	if config == nil {
 		return true

@@ -18,6 +18,7 @@ Server_Handshake_Parameters_Config :: struct {
 	quic_transport_parameters: []u8,
 }
 
+@(private)
 Server_Handshake_Parameters :: struct {
 	mode:                        Server_Handshake_Mode,
 	alpn, peer_quic, local_quic: []u8,

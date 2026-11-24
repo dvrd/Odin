@@ -25,14 +25,17 @@ TLS12_Client :: struct {
 
 // Certificate chains in the compatibility probes fit well under this. A larger
 // message is refused instead of growing the flight without a bound.
+@(private)
 TLS12_FLIGHT_STORAGE :: 256 * 1024
 
+@(private)
 tls12_client_clear :: proc(conn: ^Conn) {
 	if conn == nil do return
 	tls12_prefix_release(conn)
 	crypto.zero_explicit(&conn.tls12, size_of(conn.tls12))
 }
 
+@(private)
 tls12_prefix_release :: proc(conn: ^Conn) {
 	if conn == nil || conn.tls12.prefix == nil do return
 	delete(conn.tls12.prefix, conn.tls12.prefix_allocator)
@@ -40,11 +43,13 @@ tls12_prefix_release :: proc(conn: ^Conn) {
 	conn.tls12.prefix_allocator = {}
 }
 
+@(private)
 tls12_server_hello_selected :: proc(message: []u8) -> bool {
 	cipher, ok := tls12_server_hello_cipher(message)
 	return ok && (cipher == TLS12_ECDHE_RSA_AES128_GCM_SHA256 || cipher == TLS12_ECDHE_ECDSA_AES128_GCM_SHA256)
 }
 
+@(private)
 tls12_server_hello_cipher :: proc(message: []u8) -> (u16, bool) {
 	if len(message) < 39 do return 0, false
 	session := int(message[38])
@@ -54,6 +59,7 @@ tls12_server_hello_cipher :: proc(message: []u8) -> (u16, bool) {
 	return hello_u16(message, at), true
 }
 
+@(private)
 tls12_server_hello_accept :: proc(conn: ^Conn, message: []u8) -> Server_Hello_Read_Error {
 	if len(message) > len(conn.tls12.server_hello) {
 		return server_hello_fail(conn, {kind = .Message_Oversized})
@@ -81,6 +87,7 @@ tls12_server_hello_accept :: proc(conn: ^Conn, message: []u8) -> Server_Hello_Re
 	return {}
 }
 
+@(private)
 tls12_hello_error_map :: proc(err: TLS12_Hello_Error) -> Server_Hello_Error {
 	switch err {
 	case .None:
@@ -109,6 +116,7 @@ tls12_hello_error_map :: proc(err: TLS12_Hello_Error) -> Server_Hello_Error {
 	return .Unsupported_Extension
 }
 
+@(private)
 tls12_client_establish :: proc(conn: ^Conn) -> Handshake_Error {
 	if conn == nil || !conn.tls12.negotiated || conn.phase != .Server_Hello_Received {
 		return handshake_fail(conn, {kind = .Invalid_State})
@@ -265,6 +273,7 @@ tls12_client_establish :: proc(conn: ^Conn) -> Handshake_Error {
 	return {}
 }
 
+@(private)
 tls12_take_handshake :: proc(
 	conn: ^Conn,
 	framer: ^TLS12_Handshake_Framer,
@@ -296,6 +305,7 @@ tls12_take_handshake :: proc(
 	return copied, {}
 }
 
+@(private)
 tls12_next_handshake :: proc(
 	conn: ^Conn,
 	framer: ^TLS12_Handshake_Framer,
@@ -348,6 +358,7 @@ tls12_next_handshake :: proc(
 	}
 }
 
+@(private)
 tls12_plaintext_fail :: proc(conn: ^Conn, err: Record_Read_Error) -> Handshake_Error {
 	kind := Handshake_Record_Read_Error_Kind.Body_Read_Failed
 	if err.kind == .Header_Read_Failed do kind = .Header_Read_Failed
@@ -360,6 +371,7 @@ tls12_plaintext_fail :: proc(conn: ^Conn, err: Record_Read_Error) -> Handshake_E
 	})
 }
 
+@(private)
 tls12_send_plaintext :: proc(conn: ^Conn, content: TLS_Content_Type, body: []u8) -> Handshake_Error {
 	if len(body) > 256 {
 		return handshake_fail(conn, {kind = .Invalid_State})
@@ -375,6 +387,7 @@ tls12_send_plaintext :: proc(conn: ^Conn, content: TLS_Content_Type, body: []u8)
 	return {}
 }
 
+@(private)
 tls12_send_encrypted :: proc(conn: ^Conn, content: TLS_Content_Type, body: []u8) -> Handshake_Error {
 	wire: [RECORD_HEADER_SIZE + 256]u8
 	written, protection_error := tls12_record_seal(&conn.tls12.send, wire[:], content, body)
@@ -388,6 +401,7 @@ tls12_send_encrypted :: proc(conn: ^Conn, content: TLS_Content_Type, body: []u8)
 	return {}
 }
 
+@(private)
 tls12_expect_server_ccs :: proc(conn: ^Conn, scratch: []u8) -> Handshake_Error {
 	header, body, read_error := record_read_plaintext(conn.transport, scratch)
 	if read_error.kind != .None do return tls12_plaintext_fail(conn, read_error)
@@ -403,6 +417,7 @@ tls12_expect_server_ccs :: proc(conn: ^Conn, scratch: []u8) -> Handshake_Error {
 	return {}
 }
 
+@(private)
 tls12_read_encrypted :: proc(conn: ^Conn) -> (TLS_Content_Type, []u8, Handshake_Error) {
 	wire: [RECORD_HEADER_SIZE + TLS12_MAX_CIPHERTEXT_SIZE]u8
 	header_count, header_error := transport.read_exact(conn.transport, wire[:RECORD_HEADER_SIZE])
@@ -439,6 +454,7 @@ tls12_read_encrypted :: proc(conn: ^Conn) -> (TLS_Content_Type, []u8, Handshake_
 	return content, conn.application.inbound[:len(body)], {}
 }
 
+@(private)
 tls12_encrypted_alert :: proc(conn: ^Conn, body: []u8) -> Handshake_Error {
 	if len(body) < 2 {
 		return handshake_fail(conn, {kind = .Malformed_Message})
@@ -449,6 +465,7 @@ tls12_encrypted_alert :: proc(conn: ^Conn, body: []u8) -> Handshake_Error {
 	})
 }
 
+@(private)
 tls12_application_read :: proc(conn: ^Conn, dst: []u8) -> (int, IO_Error) {
 	if err := application_ensure(conn); err.kind != .None do return 0, err
 	if len(dst) == 0 do return 0, {}
@@ -487,6 +504,7 @@ tls12_application_read :: proc(conn: ^Conn, dst: []u8) -> (int, IO_Error) {
 	return 0, application_fail(conn, {kind = .No_Progress})
 }
 
+@(private)
 tls12_application_write :: proc(conn: ^Conn, src: []u8) -> (written: int, error: IO_Error) {
 	if err := application_ensure(conn); err.kind != .None do return 0, err
 	for written < len(src) {
@@ -502,11 +520,13 @@ tls12_application_write :: proc(conn: ^Conn, src: []u8) -> (written: int, error:
 	return written, {}
 }
 
+@(private)
 tls12_application_close_notify :: proc(conn: ^Conn) -> IO_Error {
 	alert := [?]u8{1, 0}
 	return tls12_application_record_write(conn, .Alert, alert[:])
 }
 
+@(private)
 tls12_application_record_write :: proc(conn: ^Conn, content: TLS_Content_Type, payload: []u8) -> IO_Error {
 	wire: [RECORD_HEADER_SIZE + TLS12_MAX_CIPHERTEXT_SIZE]u8
 	size, protection_error := tls12_record_seal(&conn.tls12.send, wire[:], content, payload)
@@ -520,6 +540,7 @@ tls12_application_record_write :: proc(conn: ^Conn, content: TLS_Content_Type, p
 	return {}
 }
 
+@(private)
 tls12_application_record_read :: proc(conn: ^Conn) -> (TLS_Content_Type, []u8, IO_Error) {
 	wire: [RECORD_HEADER_SIZE + TLS12_MAX_CIPHERTEXT_SIZE]u8
 	header_count, header_error := transport.read_exact(conn.transport, wire[:RECORD_HEADER_SIZE])

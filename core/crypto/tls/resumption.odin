@@ -18,9 +18,13 @@ RESUMPTION_BINDERS_TAIL :: 2 + 1 + RESUMPTION_BINDER_LEN
 // psk_key_exchange_modes plus one pre_shared_key identity and one SHA-256 binder.
 MAX_RESUMPTION_EXTENSION :: 6 + 4 + 2 + 2 + SESSION_TICKET_MAX + 4 + RESUMPTION_BINDERS_TAIL
 
+@(private)
 EXTENSION_PRE_SHARED_KEY :: u16(41)
+@(private)
 EXTENSION_EARLY_DATA :: u16(42)
+@(private)
 EXTENSION_PSK_MODES :: u16(45)
+@(private)
 PSK_DHE_KE :: u8(1)
 
 Session :: struct {
@@ -65,6 +69,7 @@ Early_Data_Policy :: struct {
 	allow: proc(method: string) -> bool,
 }
 
+@(private)
 Early_Data_Result :: enum {
 	None,
 	Applied,
@@ -228,6 +233,7 @@ session_cache_lookup :: proc(cache: ^Session_Cache, server_name: string, now: ti
 	return nil
 }
 
+@(private)
 session_offerable :: proc(session: ^Session, server_name: string, now: time.Time) -> bool {
 	if session == nil ||
 	   !session.usable ||
@@ -346,6 +352,7 @@ session_remember :: proc(
 	return true
 }
 
+@(private)
 session_psk :: proc(master: [32]u8, nonce: []u8) -> (psk: [32]u8) {
 	secret := master
 	defer crypto.zero_explicit(&secret, size_of(secret))
@@ -353,6 +360,7 @@ session_psk :: proc(master: [32]u8, nonce: []u8) -> (psk: [32]u8) {
 	return
 }
 
+@(private)
 session_obfuscated_age :: proc(session: ^Session, now: time.Time) -> u32 {
 	age := time.diff(session.received, now)
 	if age < 0 {
@@ -525,6 +533,7 @@ resumption_retry_prepare :: proc(
 
 // Writes the PSK binder over the truncated ClientHello (RFC 8446 section
 // 4.2.11.2): a Finished MAC keyed from the PSK's early secret. SHA-256 PSKs.
+@(private)
 resumption_write_binder :: proc(hello: []u8, psk: [32]u8, prefix: [][]u8) -> bool {
 	if len(hello) < RESUMPTION_BINDERS_TAIL + 4 {
 		return false
@@ -546,6 +555,7 @@ resumption_write_binder :: proc(hello: []u8, psk: [32]u8, prefix: [][]u8) -> boo
 	return true
 }
 
+@(private)
 resumption_binder_key :: proc(psk: [32]u8) -> (key: [32]u8) {
 	secret := psk
 	defer crypto.zero_explicit(&secret, size_of(secret))
@@ -560,6 +570,7 @@ resumption_binder_key :: proc(psk: [32]u8) -> (key: [32]u8) {
 
 // Derives the resumption master secret once the schedule holds the master
 // secret and the digest through client Finished is known.
+@(private)
 resumption_capture :: proc(conn: ^Conn) {
 	// Tickets are scoped to negotiated ALPN and the exact configured client identity.
 	if conn == nil || !conn.config.remember_tickets || !conn.have_client_finished_hash {
@@ -733,6 +744,7 @@ early_data_usable :: proc(conn: ^Conn, method: string) -> bool {
 // One application effect for this handshake. Acceptance of a replay-safe method
 // applies it. Rejection or a method the policy refuses does not. A later call
 // does not apply it again.
+@(private)
 connection_early_data_apply :: proc(
 	conn: ^Conn,
 	method: string,
@@ -762,6 +774,7 @@ connection_early_data_apply :: proc(
 // Fallback after rejected early data, or after a method the policy refused.
 // Does nothing when the effect was already applied, including an accepted
 // replay-safe 0-RTT attempt.
+@(private)
 connection_early_data_fallback :: proc(
 	conn: ^Conn,
 	method: string,

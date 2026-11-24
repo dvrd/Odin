@@ -8,6 +8,7 @@ import credential_store "credentials/store"
 
 SERVER_ASYNC_MAX_OWNED_BYTES :: 256 * 1024
 
+@(private)
 Server_Async_Init_Error :: enum {
 	None,
 	Invalid_Owner,
@@ -79,6 +80,7 @@ Server_Async_Send :: enum {
 	Fatal_Alert,
 }
 
+@(private)
 Server_Async_Keys :: struct {
 	read, write: Record_Protection,
 	// Application traffic secrets of the negotiated suite, in upstream's
@@ -137,6 +139,7 @@ Server_Async_Conn :: struct {
 	_resumed:                                                           bool,
 }
 
+@(private)
 server_async_valid :: proc(s: ^Server_Async_Conn) -> bool {return s != nil && s._self == s}
 
 server_async_server :: proc(
@@ -328,6 +331,7 @@ server_async_key_update :: proc(s: ^Server_Async_Conn, request_peer := false) ->
 	return {}
 }
 
+@(private)
 server_async_allocator :: proc(
 	data: rawptr,
 	mode: mem.Allocator_Mode,
@@ -370,6 +374,7 @@ server_async_allocator :: proc(
 	}
 }
 
+@(private)
 server_async_grant :: proc(s: ^Server_Async_Conn, slot: ^[]u8, size: int, alignment := 1) -> bool {
 	if len(slot^) != 0 {
 		return true
@@ -383,6 +388,7 @@ server_async_grant :: proc(s: ^Server_Async_Conn, slot: ^[]u8, size: int, alignm
 	return true
 }
 
+@(private)
 server_async_free :: proc(s: ^Server_Async_Conn, slot: ^[]u8, alignment := 1) {
 	if raw_data(slot^) == nil {
 		return
@@ -391,10 +397,12 @@ server_async_free :: proc(s: ^Server_Async_Conn, slot: ^[]u8, alignment := 1) {
 	slot^ = nil
 }
 
+@(private)
 server_async_keys :: proc(s: ^Server_Async_Conn) -> ^Server_Async_Keys {
 	return cast(^Server_Async_Keys)raw_data(s._key_grant)
 }
 
+@(private)
 server_async_queue :: proc(s: ^Server_Async_Conn) {
 	if !s._queued {
 		s._queued = true
@@ -402,6 +410,7 @@ server_async_queue :: proc(s: ^Server_Async_Conn) {
 	}
 }
 
+@(private)
 server_async_fail :: proc(s: ^Server_Async_Conn, e: net.Connection_Error, detail: Server_Async_Failure) {
 	if s._failure.kind == .None {
 		s._failure, s._detail = e, detail
@@ -419,6 +428,7 @@ server_async_fail :: proc(s: ^Server_Async_Conn, e: net.Connection_Error, detail
 	server_async_queue(s)
 }
 
+@(private)
 server_async_emit :: proc(s: ^Server_Async_Conn, kind: net.Async_Operation_Kind, e: net.Connection_Error) {
 	op := s._read_op if kind == .Read else s._write_op
 	if op == nil {
@@ -435,6 +445,7 @@ server_async_emit :: proc(s: ^Server_Async_Conn, kind: net.Async_Operation_Kind,
 	op.callback(op)
 }
 
+@(private)
 server_async_handshake_emit :: proc(s: ^Server_Async_Conn, e: net.Connection_Error) {
 	op := s._handshake_op
 	if op == nil {
@@ -445,6 +456,7 @@ server_async_handshake_emit :: proc(s: ^Server_Async_Conn, e: net.Connection_Err
 	op.callback(op)
 }
 
+@(private)
 server_async_submit :: proc(
 	data: rawptr,
 	op: ^net.Async_Operation,
@@ -491,6 +503,7 @@ server_async_submit :: proc(
 	return {}
 }
 
+@(private)
 server_async_cancel :: proc(data: rawptr, op: ^net.Async_Operation) -> net.Connection_Error {
 	s := cast(^Server_Async_Conn)data
 	if !server_async_valid(s) {
@@ -519,6 +532,7 @@ server_async_cancel :: proc(data: rawptr, op: ^net.Async_Operation) -> net.Conne
 	return {}
 }
 
+@(private)
 server_async_pump :: proc(data: rawptr) {
 	s := cast(^Server_Async_Conn)data
 	s._queued = false
@@ -543,6 +557,7 @@ server_async_pump :: proc(data: rawptr) {
 	}
 }
 
+@(private)
 server_async_shutdown_done :: proc(op: ^net.Async_Operation) {
 	s := cast(^Server_Async_Conn)op.user_data
 	s._transport_closed = true
@@ -552,6 +567,7 @@ server_async_shutdown_done :: proc(op: ^net.Async_Operation) {
 	server_async_queue(s)
 }
 
+@(private)
 server_async_cleanup :: proc(s: ^Server_Async_Conn) {
 	if s._cleaned {
 		return
@@ -572,6 +588,7 @@ server_async_cleanup :: proc(s: ^Server_Async_Conn) {
 	s._phase = .Closed
 }
 
+@(private)
 server_async_shutdown_drive :: proc(s: ^Server_Async_Conn) {
 	if s._rx.pending {
 		_ = net.async_cancel(s._transport, &s._rx)
@@ -633,6 +650,7 @@ server_async_shutdown_drive :: proc(s: ^Server_Async_Conn) {
 	}
 }
 
+@(private)
 server_async_alert :: proc(detail: Server_Async_Failure) -> u8 {
 	if detail.kind == .Limit {
 		return 80

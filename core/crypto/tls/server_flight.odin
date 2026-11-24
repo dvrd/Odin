@@ -53,6 +53,7 @@ Server_Application_Secrets :: struct {
 }
 
 // Bytes of one traffic secret of the flight's suite.
+@(private)
 server_flight_secret_size :: proc(f: ^Server_Flight) -> int {
 	return hash.DIGEST_SIZES[CIPHER_SUITE_HASH[f.cipher]]
 }
@@ -170,6 +171,7 @@ server_handshake_start_flight :: proc(
 	return .None
 }
 
+@(private)
 server_flight_certificate_scheme :: proc(algorithm: x509.Signature_Algorithm) -> u16 {
 	#partial switch algorithm {
 	case .ECDSA_SHA256:
@@ -185,6 +187,7 @@ server_flight_certificate_scheme :: proc(algorithm: x509.Signature_Algorithm) ->
 	}
 }
 
+@(private)
 server_flight_cleanup :: proc(owner: ^Server_Handshake) {
 	if server_retry_active(owner) {
 		server_retry_clear(owner)
@@ -195,12 +198,14 @@ server_flight_cleanup :: proc(owner: ^Server_Handshake) {
 	crypto.zero_explicit(&owner._flight, size_of(owner._flight))
 }
 
+@(private)
 server_flight_put24 :: proc(dst: []u8, value: int) {
 	dst[0], dst[1], dst[2] = u8(value >> 16), u8(value >> 8), u8(value)
 }
 
 // Explicit pointer views at stack-backed call sites preserve the copy contract:
 // publish uses borrow_bytes=false and copies bytes before returning.
+@(private)
 server_flight_bytes :: proc(owner: ^Server_Handshake, bytes: []u8, initial := false) -> Server_Handshake_Error {
 	return server_handshake_publish(
 		owner,
@@ -208,6 +213,7 @@ server_flight_bytes :: proc(owner: ^Server_Handshake, bytes: []u8, initial := fa
 	)
 }
 
+@(private)
 server_flight_secret :: proc(
 	owner: ^Server_Handshake,
 	secret: []u8,
@@ -229,6 +235,7 @@ server_flight_secret :: proc(
 // Called only with no outstanding borrow. State advances when publishing; the
 // next stage cannot execute until that entire event was accepted. Hashing occurs
 // exactly once in accept, so SH/CV/Finished snapshots include accepted bytes only.
+@(private)
 server_flight_next :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 	f := &owner._flight
 	if owner._resumption != nil && owner._resumption.early_accepted && !owner._resumption.early_event_sent {
@@ -388,11 +395,13 @@ server_flight_next :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 }
 
 // Keep the X25519 wrapper used by deterministic fixtures.
+@(private)
 server_flight_hello :: proc(dst: []u8, session: []u8, public, random: [32]u8) -> int {
 	pub := public
 	return server_flight_group_hello(dst, session, .X25519, pub[:], random)
 }
 
+@(private)
 server_flight_group_hello :: proc(
 	dst: []u8,
 	session: []u8,
@@ -426,6 +435,7 @@ server_flight_group_hello :: proc(
 	return at
 }
 
+@(private)
 server_flight_curve :: proc(group: Named_Group) -> ecdh.Curve {
 	#partial switch group {
 	case .X448:
@@ -442,6 +452,7 @@ server_flight_curve :: proc(group: Named_Group) -> ecdh.Curve {
 
 // Private deterministic seam; production uses OS-generated keys through the
 // pointer API, never a by-value ECDH union or a persistent per-owner key.
+@(private)
 server_flight_prepare_hello :: proc(owner: ^Server_Handshake, private_key, random: [32]u8) -> Server_Handshake_Error {
 	private: ecdh.Private_Key
 	defer ecdh.private_key_clear(&private)
@@ -459,6 +470,7 @@ server_flight_prepare_hello :: proc(owner: ^Server_Handshake, private_key, rando
 // into share_dst and the shared secret into secret_dst. X25519MLKEM768
 // encapsulates to the client's ML-KEM key and adds X25519 with private
 // (RFC 8446 section 4.2.8; the hybrid concatenates KEM then ECDH).
+@(private)
 server_flight_key_exchange :: proc(
 	group: Named_Group,
 	private: ^ecdh.Private_Key,
@@ -506,6 +518,7 @@ server_flight_key_exchange :: proc(
 
 // Emits ServerHello for the selected suite and group, then runs upstream's
 // schedule to the handshake traffic secrets over the transcript through it.
+@(private)
 server_flight_prepare_ecdh :: proc(
 	owner: ^Server_Handshake,
 	private: ^ecdh.Private_Key,

@@ -4,6 +4,7 @@ import "core:crypto"
 import "core:crypto/hash"
 import "core:mem"
 
+@(private)
 SERVER_HANDSHAKE_OUTPUT_CAP :: 2048
 
 Server_Handshake_Level :: enum {
@@ -49,6 +50,7 @@ Server_Handshake_Error :: enum {
 	No_Application_Protocol,
 }
 
+@(private)
 Server_Handshake_Status :: enum {
 	Need_Input,
 	Need_Event_Drain,
@@ -168,10 +170,12 @@ server_handshake_init :: proc(
 	return .None
 }
 
+@(private)
 server_handshake_valid :: proc(owner: ^Server_Handshake) -> bool {
 	return owner != nil && owner._self == owner
 }
 
+@(private)
 server_handshake_wipe_free :: proc(owner: ^Server_Handshake, grant: []u8, alignment: int = 1) {
 	if raw_data(grant) == nil {
 		return
@@ -180,6 +184,7 @@ server_handshake_wipe_free :: proc(owner: ^Server_Handshake, grant: []u8, alignm
 	_, _ = owner._allocator.procedure(owner._allocator.data, .Free, 0, alignment, raw_data(grant), len(grant))
 }
 
+@(private)
 server_handshake_allocate :: proc(owner: ^Server_Handshake, size: int, alignment: int = 1) -> ([]u8, bool) {
 	owner._stats.allocation_attempts += 1
 	owner._stats.requested_bytes += size
@@ -196,6 +201,7 @@ server_handshake_allocate :: proc(owner: ^Server_Handshake, size: int, alignment
 	return grant, true
 }
 
+@(private)
 server_handshake_release_input :: proc(owner: ^Server_Handshake) {
 	owner._hello, owner._selection = {}, {}
 	owner._stats.live_bytes -= len(owner._input)
@@ -205,6 +211,7 @@ server_handshake_release_input :: proc(owner: ^Server_Handshake) {
 	owner._received, owner._message_size = 0, 0
 }
 
+@(private)
 server_handshake_clear_event :: proc(owner: ^Server_Handshake) {
 	crypto.zero_explicit(&owner._secret, size_of(owner._secret))
 	if len(owner._output) > 0 {
@@ -213,6 +220,7 @@ server_handshake_clear_event :: proc(owner: ^Server_Handshake) {
 	owner._event = {}
 }
 
+@(private)
 server_handshake_cleanup :: proc(owner: ^Server_Handshake, keep_parameters := false) {
 	if !keep_parameters {
 		server_resumption_clear(owner)
@@ -231,6 +239,7 @@ server_handshake_cleanup :: proc(owner: ^Server_Handshake, keep_parameters := fa
 	crypto.zero_explicit(&owner._transcript, size_of(owner._transcript))
 }
 
+@(private)
 server_handshake_id :: proc(owner: ^Server_Handshake) -> bool {
 	if owner._next_id == max(u64) {
 		return false
@@ -239,6 +248,7 @@ server_handshake_id :: proc(owner: ^Server_Handshake) -> bool {
 	return true
 }
 
+@(private)
 server_handshake_fail :: proc(owner: ^Server_Handshake, error: Server_Handshake_Error) {
 	// A producer may already have published failure. Preserve that borrow/ID.
 	if owner._phase == .Failed {
@@ -488,6 +498,7 @@ server_handshake_stats :: proc(owner: ^Server_Handshake) -> (Server_Handshake_St
 // manufacture success or install keys through the event consumer interface.
 // A borrowed DER chunk must remain pinned by its producer through acceptance
 // or cleanup. The flight producer owns that pin.
+@(private)
 server_handshake_publish :: proc(
 	owner: ^Server_Handshake,
 	source: Server_Handshake_Event,

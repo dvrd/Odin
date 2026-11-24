@@ -2,6 +2,7 @@ package tls
 
 import "core:bytes"
 
+@(private)
 TLS12_Framing_Error :: enum {
 	None,
 	Invalid_State,
@@ -12,12 +13,14 @@ TLS12_Framing_Error :: enum {
 // Single-writer framing cursor over caller-owned storage. Input is copied and
 // never retained; returned complete messages borrow storage until next/reset.
 // It frames handshake messages, not TLS records or authenticated protocol order.
+@(private)
 TLS12_Handshake_Framer :: struct {
 	storage:        []u8,
 	used, expected: int,
 	failure:        TLS12_Framing_Error,
 }
 
+@(private)
 tls12_framing_init :: proc(storage: []u8) -> (TLS12_Handshake_Framer, TLS12_Framing_Error) {
 	if len(storage) < 4 || len(storage) > MAX_CERTIFICATE_MESSAGE_SIZE {
 		return {}, .Invalid_State
@@ -31,6 +34,7 @@ tls12_framing_init :: proc(storage: []u8) -> (TLS12_Handshake_Framer, TLS12_Fram
 // the cursor after consuming its header; no body is copied or allocated.
 // Alias/local state errors consume/write nothing. Ownership, record types and
 // the per-operation deadline remain the connection driver's responsibility.
+@(private)
 tls12_framing_push :: proc(
 	state: ^TLS12_Handshake_Framer,
 	input: []u8,
@@ -87,6 +91,7 @@ tls12_framing_push :: proc(
 // Reset only a complete accepted message. The owner must first discard all
 // borrowed message views. A failed/partial cursor requires explicit reinit or
 // teardown rather than silently forgetting consumed protocol bytes.
+@(private)
 tls12_framing_next :: proc(state: ^TLS12_Handshake_Framer) -> TLS12_Framing_Error {
 	if state == nil ||
 	   len(state.storage) < 4 ||

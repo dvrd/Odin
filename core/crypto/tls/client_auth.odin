@@ -46,6 +46,7 @@ Client_Certificate_Request :: struct {
 	count:   int,
 }
 
+@(private)
 client_certificate_request_schemes :: proc(message: []u8) -> (Client_Certificate_Request, Handshake_Error) {
 	request: Client_Certificate_Request
 	if len(message) < 11 || message[0] != 13 || handshake_body_size(message) + 4 != len(message) || message[4] != 0 {
@@ -110,6 +111,7 @@ client_auth_request_decode :: proc(conn: ^Conn, message: []u8) -> Handshake_Erro
 // Finished. The transcript already includes the authenticated server Finished.
 // The result is owned by allocator. Store generations are pinned only while
 // copying/signing; the resulting flight has no borrowed key or DER references.
+@(private)
 client_authentication_flight :: proc(
 	store: ^credential_store.Store,
 	schemes: []u16,

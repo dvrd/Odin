@@ -8,6 +8,7 @@ import Sec "core:sys/darwin/Security"
 // used: the TLS verifier keeps doing the certificate and hostname checks.
 // A certificate this parser cannot represent is skipped. An explicit ca_file
 // never reaches this path.
+@(private)
 root_pool_load_darwin :: proc(pool: ^Root_Pool) -> Root_Error {
 	if pool == nil || pool.count != 0 || pool.allocator.procedure != nil {
 		return {kind = .Invalid_State}

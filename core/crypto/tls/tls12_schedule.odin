@@ -4,11 +4,16 @@ import "core:bytes"
 import "core:crypto"
 import "core:crypto/hmac"
 
+@(private)
 TLS12_MASTER_SECRET_SIZE :: 48
+@(private)
 TLS12_FINISHED_SIZE :: 12
+@(private)
 TLS12_FINISHED_MESSAGE_SIZE :: 4 + TLS12_FINISHED_SIZE
+@(private)
 TLS12_PRF_MAX_OUTPUT :: 4096
 
+@(private)
 TLS12_Schedule_Error :: enum {
 	None,
 	Invalid_Secret_Length,
@@ -22,6 +27,7 @@ TLS12_Schedule_Error :: enum {
 // The label excludes a trailing NUL. Validation writes no destination bytes;
 // dst must not alias any input. Empty output is valid. Secret material owned
 // by the caller is never modified; intermediate keyed states are erased.
+@(private)
 tls12_prf_sha256 :: proc(secret: []u8, label: string, seed, dst: []u8) -> TLS12_Schedule_Error {
 	if len(secret) < 1 || len(secret) > 512 {return .Invalid_Secret_Length}
 	if len(label) < 1 || len(label) > 64 {return .Invalid_Label_Length}
@@ -57,6 +63,7 @@ tls12_prf_sha256 :: proc(secret: []u8, label: string, seed, dst: []u8) -> TLS12_
 // Pure legacy derivation for vectors/explicit policy only. New handshakes must
 // negotiate RFC7627 EMS; this helper does not authorize a non-EMS handshake.
 // Caller owns the returned secret and must erase it after deriving traffic keys.
+@(private)
 tls12_master_secret :: proc(
 	pre_master: []u8,
 	client_random, server_random: [32]u8,
@@ -69,6 +76,7 @@ tls12_master_secret :: proc(
 
 // session_hash is SHA256(ClientHello through ClientKeyExchange), including
 // handshake headers, excluding TLS record/CCS headers (RFC7627 sections3–4).
+@(private)
 tls12_extended_master_secret :: proc(
 	pre_master: []u8,
 	session_hash: [32]u8,
@@ -80,15 +88,18 @@ tls12_extended_master_secret :: proc(
 
 // RFC5288 AES128GCM has no separate MAC keys: two16-byte keys, two4-byte salts.
 // Owns key material. Clear after installing both independent record directions.
+@(private)
 TLS12_Key_Block :: struct {
 	client_key, server_key: [16]u8,
 	client_iv, server_iv: [4]u8,
 }
 
+@(private)
 tls12_key_block_clear :: proc(keys: ^TLS12_Key_Block) {
 	if keys != nil {crypto.zero_explicit(keys, size_of(keys^))}
 }
 
+@(private)
 tls12_key_block :: proc(
 	master: [48]u8,
 	client_random, server_random: [32]u8,
@@ -108,6 +119,7 @@ tls12_key_block :: proc(
 
 // RFC5246 section7.4.9. Hash excludes the Finished being computed; the server
 // hash includes the client's Finished in a full client-initiated handshake.
+@(private)
 tls12_finished_verify_data :: proc(
 	master: [48]u8,
 	transcript_hash: [32]u8,
@@ -122,6 +134,7 @@ tls12_finished_verify_data :: proc(
 	return
 }
 
+@(private)
 tls12_finished_encode :: proc(
 	dst: []u8,
 	master: [48]u8,
@@ -136,6 +149,7 @@ tls12_finished_encode :: proc(
 	return TLS12_FINISHED_MESSAGE_SIZE, .None
 }
 
+@(private)
 tls12_finished_verify :: proc(
 	message: []u8,
 	master: [48]u8,
