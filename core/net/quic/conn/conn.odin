@@ -6,7 +6,7 @@
 // Not implemented here: version negotiation (unknown versions and Version
 // Negotiation packets are discarded), Retry, preferred address, coalesced
 // packets, multipath, and
-// migration of retained stream IDs beyond the bounded stream table. STREAM
+// more streams open at once than the bounded stream table holds. STREAM
 // bytes and FIN/RESET are retained until acknowledged and retransmitted on loss.
 // Receive fragments are buffered inside a sliding window; consumed bytes return
 // MAX_DATA/MAX_STREAM_DATA credit. CRYPTO retries remain handshake-driver owned.
@@ -58,6 +58,10 @@ Error :: enum {
 	Discarded,
  Stateless_Reset,
  Unsupported,
+	// The caller opened one of its own streams out of order. Streams of one
+	// kind (the low two bits of the ID) must be opened lowest ID first, each
+	// exactly four above the last. The stream was not opened.
+	Stream_Order,
 }
 
 Phase :: enum {
@@ -126,6 +130,8 @@ Buf :: struct {
 	send_limit:                        u64,
 	recv_credit:                       u64,
 	credit_dirty:                      bool,
+	// The application has been handed the end of the receive side.
+	fin_read, reset_read:              bool,
 }
 
 Connection :: struct {
@@ -192,6 +198,11 @@ Connection :: struct {
 	directional_limits:                          bool,
 	peer_bidi_local, peer_bidi_remote, peer_uni: u64,
 	peer_bidi_streams, peer_uni_streams:         u64,
+	// Streams opened so far of each kind (ID & 3). An ID below this mark with
+	// no record is a closed stream whose record was released.
+	opened:                                      [4]u64,
+	// MAX_DATA must be sent although no stream record carries the credit.
+	max_data_dirty:                              bool,
 }
 
 init :: proc(c: ^Connection, cfg: Config) -> Error {
@@ -369,7 +380,15 @@ write :: proc(c: ^Connection, id: u64, data: []u8, fin: bool) -> (int, Error) {
 		return 0, .Protocol
 	}
 	fresh := find_buf(c, id) == nil
-	buf, e := take_buf(c, id, true); if e != .None {
+	limit, count := send_limits(c, id)
+	// Refused by the peer's stream limit, a new stream is not opened at all.
+	if fresh && id % 2 == u64(c.role) && id >> 2 >= count {
+		if id >> 2 > c.opened[id & 3] {
+			return 0, .Stream_Order
+		}
+		return 0, .Flow_Control
+	}
+	buf, e := open_local(c, id); if e != .None {
 		return 0, e
 	}
 	if buf.reset || buf.fin || buf.stop {
@@ -380,16 +399,17 @@ write :: proc(c: ^Connection, id: u64, data: []u8, fin: bool) -> (int, Error) {
 	if len(data) > c.streams.window[.Send] - buf.n ||
 	   win_missing(c, buf, .Send, end, end + u64(len(data))) > pool_room(c, .Send) {
 		if fresh {
-			buf^ = {}
+			unopen(c, buf)
 		}; return 0, .Capacity
 	}
-	limit, count := send_limits(c, id)
 	if buf.send_limit > limit {
 		limit = buf.send_limit
 	}
 	if e := harness.stream_send_admit(&c.model, id, len(data), fin, limit, count); e != .None {
-		if fresh {
-			buf^ = {}
+		// A stream that only waits for flow-control credit stays open, so the
+		// caller's next stream of this kind is still in order.
+		if fresh && e != .Flow_Control {
+			unopen(c, buf)
 		}; return 0, map_harness(e)
 	}
 	buf.send_limit = limit
@@ -417,6 +437,7 @@ read :: proc(c: ^Connection, id: u64, dst: []u8) -> (int, bool, Error) {
 		return 0, false, .None
 	}
 	if buf.recv_reset {
+		buf.reset_read = true; reap(c)
 		return 0, false, .Protocol
 	}
 	n := min(buf.recv_n, len(dst))
@@ -436,6 +457,9 @@ read :: proc(c: ^Connection, id: u64, dst: []u8) -> (int, bool, Error) {
 		buf.recv_credit += u64(n); buf.credit_dirty = true
 	}
 	fin := buf.recv_fin && buf.recv_base == buf.recv_final && buf.recv_n == 0
+	if fin {
+		buf.fin_read = true; reap(c)
+	}
 	return n, fin, .None
 }
 
@@ -445,7 +469,11 @@ reset_stream_with_error :: proc(c: ^Connection, id,code: u64) -> Error {
 	if e := usable(c); e != .None {
 		return e
 	}
-	buf, err := take_buf(c, id, true)
+	// A stream that already closed has nothing left to reset.
+	if stream_closed(c, id) {
+		return .None
+	}
+	buf, err := open_local(c, id)
 	if err != .None {
 		return err
 	}
@@ -843,6 +871,7 @@ pump :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 			return send_done(c, now, dst)
 		}
         if n,e,sent:=post_handshake_pump(c,now,dst);sent{return n,e}
+        if n,e,sent:=send_max_data(c,now,dst);sent{return n,e}
         if n,e,sent:=send_stop_progress(c,now,dst);sent{return n,e}
 		if n, err, sent := send_stream_progress(c, now, dst); sent {
 			return n, err
@@ -905,25 +934,130 @@ find_buf :: proc(c: ^Connection, id: u64) -> ^Buf {
 }
 
 @(private)
-take_buf :: proc(c: ^Connection, id: u64, create: bool) -> (^Buf, Error) {
-	if buf := find_buf(c, id); buf != nil {
-		return buf, .None
+free_records :: proc(c: ^Connection) -> int {
+	n := 0
+	for b in c.bufs {
+		if !b.used {
+			n += 1
+		}
 	}
-	if !create {
-		return nil, .Invalid
-	}
-	if id >= u64(1) << 62 {
-		return nil, .Protocol
-	}
+	return n
+}
+
+@(private)
+new_record :: proc(c: ^Connection, id: u64) -> ^Buf {
 	for &buf in c.bufs {
 		if !buf.used {
 			buf = {}
 			buf.used = true
 			buf.id = id
-			return &buf, .None
+			return &buf
 		}
 	}
-	return nil, .Capacity
+	return nil
+}
+
+// The stream was opened and its record has been released.
+@(private)
+stream_closed :: proc(c: ^Connection, id: u64) -> bool {
+	return id < u64(1) << 62 && id >> 2 < c.opened[id & 3] && find_buf(c, id) == nil
+}
+
+// The record for a stream this endpoint may open, opening it if it is next.
+@(private)
+open_local :: proc(c: ^Connection, id: u64) -> (^Buf, Error) {
+	buf := find_buf(c, id)
+	if id >= u64(1) << 62 || id % 2 != u64(c.role) {
+		return buf, .None if buf != nil else .Protocol
+	}
+	next := c.opened[id & 3]
+	if id >> 2 < next {
+		return buf, .None if buf != nil else .Protocol
+	}
+	if id >> 2 > next {
+		return nil, .Stream_Order
+	}
+	// The peer may have granted credit before the stream was opened.
+	if buf == nil {
+		buf = new_record(c, id)
+		if buf == nil {
+			return nil, .Capacity
+		}
+	}
+	c.opened[id & 3] = next + 1
+	return buf, .None
+}
+
+// Undoes open_local for a stream that then could not be used.
+@(private)
+unopen :: proc(c: ^Connection, buf: ^Buf) {
+	c.opened[buf.id & 3] -= 1
+	buf^ = {}
+}
+
+// The record a frame from the peer refers to. A stream the peer opens also
+// opens every lower stream of its kind, so each gets a record now and frames
+// that arrive out of order find theirs. closed means the frame is stale.
+@(private)
+peer_record :: proc(c: ^Connection, id: u64) -> (buf: ^Buf, closed: bool, err: Error) {
+	if buf = find_buf(c, id); buf != nil {
+		return buf, false, .None
+	}
+	if id >= u64(1) << 62 {
+		return nil, false, .Protocol
+	}
+	index := id >> 2; next := c.opened[id & 3]
+	if index < next {
+		return nil, true, .None
+	}
+	if id % 2 == u64(c.role) {
+		c.reason = "frame for an unopened local stream"; return nil, false, .Protocol
+	}
+	if index >= c.model.max_streams_recv {
+		c.reason = "stream limit"; return nil, false, .Flow_Control
+	}
+	if index - next >= u64(free_records(c)) {
+		return nil, false, .Capacity
+	}
+	for i in next ..= index {
+		buf = new_record(c, i << 2 | id & 3)
+	}
+	c.opened[id & 3] = index + 1
+	return buf, false, .None
+}
+
+// Releases every record whose stream is closed in both directions: all sent
+// bytes and the FIN or RESET_STREAM acknowledged, and the received end handed
+// to the application or abandoned by it with STOP_SENDING.
+@(private)
+reap :: proc(c: ^Connection) {
+	for &b in c.bufs {
+		if !b.used {
+			continue
+		}
+		local := b.id % 2 == u64(c.role); uni := b.id & 2 != 0
+		if !uni || local {
+			if b.fin && b.fin_acked {
+				compact_send(c, &b)
+			}
+			if !(b.reset && b.reset_acked || b.fin && b.fin_acked && b.n == 0) {
+				continue
+			}
+		}
+		if !uni || !local {
+			complete := b.recv_fin && b.recv_base + u64(b.recv_n) == b.recv_final
+			if !(b.recv_reset && (b.reset_read || b.want_stop) ||
+				   b.recv_fin && (b.fin_read || b.want_stop && complete)) {
+				continue
+			}
+		}
+		// Bytes the application never read still return their connection credit.
+		if credit, _ := harness.stream_release(&c.model, b.id); credit > 0 {
+			c.max_data_dirty = true
+		}
+		win_clear(c, &b, .Send); win_clear(c, &b, .Recv)
+		b = {}
+	}
 }
 
 @(private)
@@ -1276,7 +1410,7 @@ stream_fits_recv :: proc(c: ^Connection, p: Parsed, need: ^int) -> bool {
 		base = buf.recv_base
 	}
 	end := p.stream_off + u64(len(p.stream_data))
-	if end <= base || buf != nil && buf.recv_reset {
+	if end <= base || buf != nil && buf.recv_reset || stream_closed(c, p.stream_id) {
 		return true
 	}
 	if end - base > u64(c.streams.window[.Recv]) {
@@ -1315,11 +1449,15 @@ apply_parsed :: proc(c: ^Connection, level: quic.Encryption_Level, parsed: Parse
 				c.reason = "MAX_STREAM_DATA direction existing"; return .Protocol
 			}; b.send_limit = max(b.send_limit, credit.value)
 		} else {
-			if !send_direction(c, credit.id) {
-				c.reason = "MAX_STREAM_DATA direction new"; return .Protocol
-			}; new_buf, e := take_buf(c, credit.id, true); if e != .None {
-				return e
-			}; new_buf.send_limit = credit.value
+			// Stale for a closed stream. Credit for a local stream that is not
+			// open yet waits in a record until the application opens it.
+			if !stream_closed(c, credit.id) {
+				if !send_direction(c, credit.id) {
+					c.reason = "MAX_STREAM_DATA direction new"; return .Protocol
+				}; new_buf := new_record(c, credit.id); if new_buf == nil {
+					return .Capacity
+				}; new_buf.send_limit = credit.value
+			}
 		}
 	}
 	if parsed.max_streams_bidi {
@@ -1339,19 +1477,21 @@ apply_parsed :: proc(c: ^Connection, level: quic.Encryption_Level, parsed: Parse
 	}
 
 	if parsed.reset {
-		buf, err := take_recv(c, parsed.reset_id)
+		buf, closed, err := peer_record(c, parsed.reset_id)
 		if err != .None {
 			fail(c, "reset stream")
 			return err
 		}
-		if e := harness.stream_receive_reset(&c.model, parsed.reset_id, parsed.reset_final);
-		   e != .None {
-			return map_harness(e)
+		if !closed {
+			if e := harness.stream_receive_reset(&c.model, parsed.reset_id, parsed.reset_final);
+			   e != .None {
+				return map_harness(e)
+			}
+			buf.recv_reset = true;buf.recv_reset_error=parsed.reset_error; buf.recv_final = parsed.reset_final
+			buf.recv_n = 0; buf.recv_held = 0; win_clear(c, buf, .Recv)
 		}
-		buf.recv_reset = true;buf.recv_reset_error=parsed.reset_error; buf.recv_final = parsed.reset_final
-		buf.recv_n = 0; buf.recv_held = 0; win_clear(c, buf, .Recv)
 	}
-	if parsed.stop {
+	if parsed.stop && !stream_closed(c, parsed.stop_id) {
 		if !send_direction(c, parsed.stop_id) || find_buf(c, parsed.stop_id) == nil {
 			c.reason = "STOP_SENDING direction"; return .Protocol
 		}
@@ -1378,23 +1518,8 @@ apply_parsed :: proc(c: ^Connection, level: quic.Encryption_Level, parsed: Parse
 	if parsed.close {
 		c.reason = "peer close"
 	}
+	reap(c)
 	return .None
-}
-
-@(private)
-take_recv :: proc(c: ^Connection, id: u64) -> (^Buf, Error) {
-	if buf := find_buf(c, id); buf != nil {
-		return buf, .None
-	}
-	for &buf in c.bufs {
-		if !buf.used {
-			buf = {}
-			buf.used = true
-			buf.id = id
-			return &buf, .None
-		}
-	}
-	return nil, .Capacity
 }
 
 @(private)

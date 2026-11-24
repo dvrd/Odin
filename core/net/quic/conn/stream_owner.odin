@@ -121,6 +121,8 @@ Tx_Packet :: struct {
 	pn, id, offset:           u64,
 	n:                        int,
 	fin, reset, credit, done,stop: bool,
+	// A lone MAX_DATA for credit that no stream record carries.
+	max_data:                 bool,
 	credit_value:             u64,
 }
 
@@ -160,7 +162,7 @@ compact_send :: proc(c: ^Connection, b: ^Buf) {
 }
 @(private)
 receive_stream :: proc(c: ^Connection, p: Parsed) -> Error {
-	b, e := take_recv(c, p.stream_id); if e != .None {
+	b, closed, e := peer_record(c, p.stream_id); if e != .None || closed {
 		return e
 	}
 	end := p.stream_off + u64(len(p.stream_data)); if end < p.stream_off {
@@ -247,6 +249,10 @@ mark_retry :: proc(c: ^Connection, t: Tx_Packet) {
 	if t.done {
 		c.done_sent = false; return
 	}
+	// A lost credit frame also carried MAX_DATA; its stream may be gone.
+	if t.max_data || t.credit && find_buf(c, t.id) == nil {
+		c.max_data_dirty = true; return
+	}
 	if b := find_buf(c, t.id); b != nil {
 		if t.stop {b.stop_retry=true;return}
         if t.credit {
@@ -298,7 +304,7 @@ acknowledge_tx :: proc(c: ^Connection, p: Parsed) {
 			}
 		}; if acked {
 			if b:=find_buf(c,t.id);b!=nil&&t.stop {b.stop_acked=true;b.stop_retry=false}
-            if b := find_buf(c, t.id); b != nil && !t.credit && !t.stop {
+if b := find_buf(c, t.id); b != nil && !t.credit && !t.stop && !t.max_data {
 				n := win_ack(c, b, retained_range(b, t.offset, t.n))
 				if t.fin {
 					b.fin_acked = true; b.fin_retry = false
@@ -464,4 +470,32 @@ stream_frame_room :: proc(c: ^Connection, dst, used: int, id, offset: u64) -> in
 	// Type, stream ID, offset and a two-byte length, then the AEAD tag.
 	room := min(c.max_datagram, dst, MAX_DATAGRAM) - header - used - (1 + id_n + offset_n + 2) - 16
 	return min(room, 16383)
+}
+
+@(private)
+send_max_data :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, bool) {
+	if !c.max_data_dirty || !journal_room(c) {
+		return 0, .None, false
+	}
+	req := harness.Emit {
+		space = .Application,
+		ping  = true,
+		probe = c.force_probe,
+	}; attach_ack(c, &req, .Application)
+	frame: [64]u8; at, ok := encode_ack_if(c, frame[:], 0, req)
+	if ok && at < len(frame) {
+		frame[at] = 0x10; at, ok = put_varint(frame[:], at + 1, c.model.recv_max_data)
+	}
+	if !ok {
+		return 0, .Capacity, true
+	}
+	pn := c.model.spaces[2].next_send
+	n, e := seal_and_emit(c, now, dst, req, frame[:at], 0); if e != .None {
+		return n, e, true
+	}
+	if !record_tx(c, {pn = pn, max_data = true}) {
+		fail(c, "retention journal full"); return 0, .Failed, true
+	}
+	c.max_data_dirty = false; c.force_probe = false
+	return n, .None, true
 }

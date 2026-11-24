@@ -232,3 +232,24 @@ stream_send_limit :: proc(m: ^Model, id, limit: u64) -> Error {
 	}
 	return .None
 }
+
+// Frees the slot of an externally owned stream that its owner has closed in
+// both directions. Received bytes the application never consumed, including
+// the unseen remainder of a reset stream, are returned as connection credit;
+// credit is how far the connection receive limit rose.
+stream_release :: proc(m: ^Model, id: u64) -> (credit: u64, err: Error) {
+	if m == nil || !m.initialized {
+		return 0, .Invalid_Input
+	}
+	slot := find_stream(m, id); if slot < 0 {
+		return 0, .None
+	}
+	s := &m.streams[slot]
+	if s.recv_highest > s.consumed {
+		credit = min(s.recv_highest - s.consumed, (u64(1) << 62) - 1 - m.recv_max_data)
+	}
+	m.recv_max_data += credit
+	sub_send_retained(m, s, s.send_retained); sub_recv_retained(m, s, s.recv_retained)
+	s^ = {}; m.live_streams -= 1
+	return credit, .None
+}

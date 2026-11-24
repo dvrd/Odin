@@ -7,15 +7,20 @@ stop_sending_with_error :: proc(c: ^Connection, id, code: u64) -> Error {
 	}; if code >= u64(1) << 62 {
 		return .Invalid
 	}
-	b, e := take_recv(c, id); if e != .None {
-		return e
+	// A closed stream has nothing left to stop.
+	if stream_closed(c, id) {
+		return .None
+	}
+	b := find_buf(c, id); if b == nil {
+		return .Protocol
 	}
 	if b.want_stop {
 		if b.stop_error == code {
 			return .None
 		}; return .Protocol
 	}
-	b.want_stop = true; b.stop_error = code; return .None
+	// The receive side may already have ended; then nothing else holds the record.
+	b.want_stop = true; b.stop_error = code; reap(c); return .None
 }
 receive_reset_error :: proc(c: ^Connection, id: u64) -> (u64, bool) {
 	if c != nil {

@@ -50,11 +50,29 @@ connection receive window plus two blocks per record. A smaller send pool makes
 pool discards the packet it cannot buffer, unacknowledged. `next_readable` enumerates readable bytes, FIN and reset; applications
 must track delivered terminal events.
 
-Bounds are 32 stream IDs for the connection lifetime, 64 outstanding packets,
-32 STREAM and 32 MAX_STREAM_DATA frames per packet, 65 ACK ranges, 4096-byte
-maximum datagrams. Stream metadata remains until destroy to preserve final sizes
-and direction ownership after data storage is reclaimed. Peer bidi streams permit
-responses; uni streams reject reverse writes.
+Bounds are 32 streams open at once, 64 outstanding packets, 32 STREAM and 32
+MAX_STREAM_DATA frames per packet, 65 ACK ranges, 4096-byte maximum datagrams.
+Peer bidi streams permit responses; uni streams reject reverse writes.
+
+A stream's record is released once the stream is closed in both directions:
+every sent byte and the FIN or RESET_STREAM acknowledged, and the received end
+handed to the application (`read` returned `fin`, or `Protocol` for a reset
+stream) or abandoned with `stop_sending_with_error`. A bidi stream the
+application never finishes or resets keeps its record.
+`remaining_stream_records` counts free records, so it reflects streams open now.
+Unread bytes of a released stream return their connection credit in a retained
+MAX_DATA frame.
+
+A released ID is recognised by a mark per stream kind (ID & 3): the count of
+streams opened so far. Below the mark with no record means closed. Frames for a
+closed stream are ignored. Calls about one answer without reopening it: `read`
+returns no bytes and no `fin`, `write` returns `Protocol`,
+`reset_stream_with_error` and `stop_sending_with_error` return `None`.
+Because of the mark, local streams of one kind must be opened lowest ID first,
+each four above the last; skipping one returns `Stream_Order` and opens
+nothing. A new stream that only waits for flow-control credit counts as opened.
+A stream the peer opens also opens every lower stream of its kind, each with a
+record, so its frames may arrive in any order.
 
 After authenticated transport parameters, `migration_enable` installs an endpoint
 and bounded CID ownership. Advertise an active CID limit of four and pass the
