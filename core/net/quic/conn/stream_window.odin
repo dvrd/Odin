@@ -20,10 +20,13 @@ POOL_BLOCK :: 1024
 
 @(private)
 INLINE_BLOCK :: 128
+
 @(private)
 INLINE_SLOTS :: STREAM_BYTES / INLINE_BLOCK + 1
+
 @(private)
 INLINE_BLOCKS :: STREAMS * 2 * INLINE_SLOTS
+
 @(private)
 INLINE_STRIDE :: INLINE_BLOCK + INLINE_BLOCK / 4
 
@@ -48,6 +51,7 @@ Bits :: enum u8 {
 	Acked,
 	Retry,
 }
+
 // A received block uses the first bitmap for the bytes it holds.
 @(private)
 PRESENT :: Bits.Acked
@@ -86,7 +90,8 @@ stream_send_room :: proc(c: ^Connection, id: u64) -> int {
 	if p.block == 0 {
 		return 0
 	}
-	buffered := 0; tail := 0
+	buffered := 0
+	tail := 0
 	if b := find_buf(c, id); b != nil {
 		if b.reset || b.fin || b.stop {
 			return 0
@@ -107,14 +112,14 @@ stream_send_room :: proc(c: ^Connection, id: u64) -> int {
 pool_inline :: proc(c: ^Connection) {
 	p := &c.streams
 	p^ = {
-		block  = INLINE_BLOCK,
+		block = INLINE_BLOCK,
 		stride = INLINE_STRIDE,
-		shift  = 7,
+		shift = 7,
 		window = {.Send = STREAM_BYTES, .Recv = STREAM_BYTES},
-		slots  = {.Send = INLINE_SLOTS, .Recv = INLINE_SLOTS},
-		quota  = {.Send = STREAMS * INLINE_SLOTS, .Recv = STREAMS * INLINE_SLOTS},
+		slots = {.Send = INLINE_SLOTS, .Recv = INLINE_SLOTS},
+		quota = {.Send = STREAMS * INLINE_SLOTS, .Recv = STREAMS * INLINE_SLOTS},
 		blocks = c.stream_mem[:],
-		table  = c.stream_table[:],
+		table = c.stream_table[:],
 	}
 	pool_chain(p)
 }
@@ -140,7 +145,10 @@ pool_setup :: proc(c: ^Connection, w: Stream_Windows, recv_max_data: u64) -> Err
 			return .Invalid
 		}
 		pool_inline(c)
-		c.streams.window = {.Send = send, .Recv = recv}
+		c.streams.window = {
+			.Send = send,
+			.Recv = recv,
+		}
 		return .None
 	}
 	if w.allocator.procedure == nil {
@@ -151,15 +159,21 @@ pool_setup :: proc(c: ^Connection, w: Stream_Windows, recv_max_data: u64) -> Err
 	}
 	p := &c.streams
 	p^ = {
-		block     = POOL_BLOCK,
-		stride    = POOL_BLOCK + POOL_BLOCK / 4,
-		shift     = 10,
-		window    = {.Send = send, .Recv = recv},
-		heap      = true,
+		block = POOL_BLOCK,
+		stride = POOL_BLOCK + POOL_BLOCK / 4,
+		shift = 10,
+		window = {.Send = send, .Recv = recv},
+		heap = true,
 		allocator = w.allocator,
 	}
-	p.slots = {.Send = (send + POOL_BLOCK - 1) / POOL_BLOCK + 1, .Recv = (recv + POOL_BLOCK - 1) / POOL_BLOCK + 1}
-	p.quota = {.Send = STREAMS * p.slots[.Send], .Recv = STREAMS * p.slots[.Recv]}
+	p.slots = {
+		.Send = (send + POOL_BLOCK - 1) / POOL_BLOCK + 1,
+		.Recv = (recv + POOL_BLOCK - 1) / POOL_BLOCK + 1,
+	}
+	p.quota = {
+		.Send = STREAMS * p.slots[.Send],
+		.Recv = STREAMS * p.slots[.Recv],
+	}
 	// Unread bytes never exceed the connection receive window, and a stream
 	// wastes at most two partial blocks around them.
 	if bound := recv_max_data / POOL_BLOCK + 1 + 2 * STREAMS; bound < u64(p.quota[.Recv]) {
@@ -180,10 +194,12 @@ pool_setup :: proc(c: ^Connection, w: Stream_Windows, recv_max_data: u64) -> Err
 	}
 	memory, me := make([]u8, blocks * p.stride, w.allocator)
 	if me != nil {
-		delete(table, w.allocator); p^ = {}
+		delete(table, w.allocator)
+		p^ = {}
 		return .Allocation
 	}
-	p.table = table; p.blocks = memory
+	p.table = table
+	p.blocks = memory
 	pool_chain(p)
 	return .None
 }
@@ -193,7 +209,8 @@ pool_release :: proc(c: ^Connection) {
 	p := &c.streams
 	if p.heap {
 		crypto.zero_explicit(raw_data(p.blocks), len(p.blocks))
-		delete(p.blocks, p.allocator); delete(p.table, p.allocator)
+		delete(p.blocks, p.allocator)
+		delete(p.table, p.allocator)
 	}
 	p^ = {}
 }
@@ -223,7 +240,10 @@ pool_chain :: proc(p: ^Stream_Pool) {
 
 @(private)
 pool_link :: proc(block: []u8, next: u32) {
-	block[0] = u8(next); block[1] = u8(next >> 8); block[2] = u8(next >> 16); block[3] = u8(next >> 24)
+	block[0] = u8(next)
+	block[1] = u8(next >> 8)
+	block[2] = u8(next >> 16)
+	block[3] = u8(next >> 24)
 }
 
 @(private)
@@ -237,9 +257,11 @@ pool_take :: proc(p: ^Stream_Pool, d: Direction) -> u32 {
 	if p.free == 0 || p.held[d] >= p.quota[d] {
 		return 0
 	}
-	entry := p.free; block := pool_block(p, entry)
+	entry := p.free
+	block := pool_block(p, entry)
 	p.free = u32(block[0]) | u32(block[1]) << 8 | u32(block[2]) << 16 | u32(block[3]) << 24
-	pool_link(block, 0); p.held[d] += 1
+	pool_link(block, 0)
+	p.held[d] += 1
 	return entry
 }
 
@@ -247,7 +269,9 @@ pool_take :: proc(p: ^Stream_Pool, d: Direction) -> u32 {
 pool_give :: proc(p: ^Stream_Pool, d: Direction, entry: u32) {
 	block := pool_block(p, entry)
 	crypto.zero_explicit(raw_data(block), len(block))
-	pool_link(block, p.free); p.free = entry; p.held[d] -= 1
+	pool_link(block, p.free)
+	p.free = entry
+	p.held[d] -= 1
 }
 
 @(private)
@@ -261,7 +285,8 @@ win_ring :: proc(c: ^Connection, b: ^Buf, d: Direction) -> []u32 {
 	if p.block == 0 {
 		return nil
 	}
-	index := buf_index(c, b); n := p.slots[d]
+	index := buf_index(c, b)
+	n := p.slots[d]
 	at := index * p.slots[.Send]
 	if d == .Recv {
 		at = STREAMS * p.slots[.Send] + index * n
@@ -280,7 +305,8 @@ win_base :: proc(b: ^Buf, d: Direction) -> (u64, ^int) {
 // Ring position of block number k (offset >> shift), or -1 outside the ring.
 @(private)
 win_slot :: proc(c: ^Connection, b: ^Buf, d: Direction, ring: []u32, k: u64) -> int {
-	base, head := win_base(b, d); first := base >> c.streams.shift
+	base, head := win_base(b, d)
+	first := base >> c.streams.shift
 	if k < first || k - first >= u64(len(ring)) {
 		return -1
 	}
@@ -295,7 +321,8 @@ win_segment :: proc(c: ^Connection, b: ^Buf, d: Direction, off: u64, n: int) -> 
 	if p.block == 0 {
 		return nil, 0, n
 	}
-	at = int(off & u64(p.block - 1)); count = min(n, p.block - at)
+	at = int(off & u64(p.block - 1))
+	count = min(n, p.block - at)
 	ring := win_ring(c, b, d)
 	if slot := win_slot(c, b, d, ring, off >> p.shift); slot >= 0 && ring[slot] != 0 {
 		block = pool_block(p, ring[slot])
@@ -310,11 +337,13 @@ win_missing :: proc(c: ^Connection, b: ^Buf, d: Direction, lo, hi: u64) -> int {
 	if hi <= lo || p.block == 0 {
 		return 0
 	}
-	first := lo >> p.shift; last := (hi - 1) >> p.shift
+	first := lo >> p.shift
+	last := (hi - 1) >> p.shift
 	if b == nil {
 		return int(last - first + 1)
 	}
-	ring := win_ring(c, b, d); missing := 0
+	ring := win_ring(c, b, d)
+	missing := 0
 	for k := first; k <= last; k += 1 {
 		slot := win_slot(c, b, d, ring, k)
 		if slot < 0 || ring[slot] == 0 {
@@ -353,7 +382,8 @@ win_reserve :: proc(c: ^Connection, b: ^Buf, d: Direction, lo, hi: u64) -> bool 
 // Returns the blocks wholly below to. The caller then moves the base to to.
 @(private)
 win_advance :: proc(c: ^Connection, b: ^Buf, d: Direction, to: u64) {
-	p := &c.streams; ring := win_ring(c, b, d)
+	p := &c.streams
+	ring := win_ring(c, b, d)
 	base, head := win_base(b, d)
 	if len(ring) == 0 || to <= base {
 		return
@@ -365,7 +395,8 @@ win_advance :: proc(c: ^Connection, b: ^Buf, d: Direction, to: u64) {
 	}
 	for _ in 0 ..< int(steps) {
 		if ring[head^] != 0 {
-			pool_give(p, d, ring[head^]); ring[head^] = 0
+			pool_give(p, d, ring[head^])
+			ring[head^] = 0
 		}
 		head^ = (head^ + 1) % len(ring)
 	}
@@ -376,10 +407,12 @@ win_clear :: proc(c: ^Connection, b: ^Buf, d: Direction) {
 	ring := win_ring(c, b, d)
 	for &entry in ring {
 		if entry != 0 {
-			pool_give(&c.streams, d, entry); entry = 0
+			pool_give(&c.streams, d, entry)
+			entry = 0
 		}
 	}
-	_, head := win_base(b, d); head^ = 0
+	_, head := win_base(b, d)
+	head^ = 0
 }
 
 // Every block under src must be held.
@@ -411,7 +444,8 @@ win_read :: proc(c: ^Connection, b: ^Buf, d: Direction, off: u64, dst: []u8) {
 
 @(private)
 win_bitmap :: proc(c: ^Connection, block: []u8, which: Bits) -> []u8 {
-	size := c.streams.block; at := size + int(which) * (size / 8)
+	size := c.streams.block
+	at := size + int(which) * (size / 8)
 	return block[at:at + size / 8]
 }
 
@@ -429,7 +463,8 @@ win_run :: proc(c: ^Connection, b: ^Buf, d: Direction, which: Bits, off: u64, li
 			done += count
 			continue
 		}
-		bits := win_bitmap(c, block, which); whole: u8 = 0xff if value else 0
+		bits := win_bitmap(c, block, which)
+		whole: u8 = 0xff if value else 0
 		for i := 0; i < count; {
 			bit := at + i
 			if bit & 7 == 0 && count - i >= 8 && bits[bit >> 3] == whole {
@@ -465,9 +500,11 @@ win_set :: proc(c: ^Connection, b: ^Buf, d: Direction, which: Bits, off: u64, n:
 		if block != nil {
 			bits := win_bitmap(c, block, which)
 			for i in 0 ..< count {
-				bit := at + i; mask := u8(1) << uint(bit & 7)
+				bit := at + i
+				mask := u8(1) << uint(bit & 7)
 				if (bits[bit >> 3] & mask != 0) != value {
-					bits[bit >> 3] ~= mask; changed += 1
+					bits[bit >> 3] ~= mask
+					changed += 1
 				}
 			}
 		}
@@ -483,11 +520,14 @@ win_retry :: proc(c: ^Connection, b: ^Buf, off: u64, n: int) {
 	for done < n {
 		block, at, count := win_segment(c, b, .Send, off + u64(done), n - done)
 		if block != nil {
-			acked := win_bitmap(c, block, .Acked); retry := win_bitmap(c, block, .Retry)
+			acked := win_bitmap(c, block, .Acked)
+			retry := win_bitmap(c, block, .Retry)
 			for i in 0 ..< count {
-				bit := at + i; mask := u8(1) << uint(bit & 7)
+				bit := at + i
+				mask := u8(1) << uint(bit & 7)
 				if acked[bit >> 3] & mask == 0 {
-					retry[bit >> 3] |= mask; b.retry_pending = true
+					retry[bit >> 3] |= mask
+					b.retry_pending = true
 				}
 			}
 		}
@@ -502,11 +542,15 @@ win_ack :: proc(c: ^Connection, b: ^Buf, off: u64, n: int) -> int {
 	for done < n {
 		block, at, count := win_segment(c, b, .Send, off + u64(done), n - done)
 		if block != nil {
-			acked := win_bitmap(c, block, .Acked); retry := win_bitmap(c, block, .Retry)
+			acked := win_bitmap(c, block, .Acked)
+			retry := win_bitmap(c, block, .Retry)
 			for i in 0 ..< count {
-				bit := at + i; mask := u8(1) << uint(bit & 7)
+				bit := at + i
+				mask := u8(1) << uint(bit & 7)
 				if acked[bit >> 3] & mask == 0 {
-					acked[bit >> 3] |= mask; retry[bit >> 3] &~= mask; fresh += 1
+					acked[bit >> 3] |= mask
+					retry[bit >> 3] &~= mask
+					fresh += 1
 				}
 			}
 		}

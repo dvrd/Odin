@@ -21,18 +21,20 @@ bulk_byte :: proc(seed, i: int) -> u8 {
 
 @(private)
 bulk_random :: proc(state: ^u64) -> u64 {
-	state^ ~= state^ << 13; state^ ~= state^ >> 7; state^ ~= state^ << 17
+	state^ ~= state^ << 13
+	state^ ~= state^ >> 7
+	state^ ~= state^ << 17
 	return state^
 }
 
 // One direction of a bulk transfer on stream 0.
 @(private)
 Bulk_Side :: struct {
-	c:               ^conn.Connection,
-	seed:            int,
-	written, got:    int,
-	fin:             bool,
-	largest_write:   int,
+	c:             ^conn.Connection,
+	seed:          int,
+	written, got:  int,
+	fin:           bool,
+	largest_write: int,
 }
 
 @(private)
@@ -51,7 +53,8 @@ bulk_step :: proc(t: ^testing.T, side, other: ^Bulk_Side) {
 		if !testing.expect(t, e == .None && wn == n) {
 			return
 		}
-		side.written += n; side.largest_write = max(side.largest_write, n)
+		side.written += n
+		side.largest_write = max(side.largest_write, n)
 	}
 	for !side.fin {
 		n, fin, e := conn.read(side.c, 0, chunk[:])
@@ -64,7 +67,8 @@ bulk_step :: proc(t: ^testing.T, side, other: ^Bulk_Side) {
 				return
 			}
 		}
-		side.got += n; side.fin = fin
+		side.got += n
+		side.fin = fin
 		if n == 0 {
 			break
 		}
@@ -75,8 +79,11 @@ bulk_step :: proc(t: ^testing.T, side, other: ^Bulk_Side) {
 conn_wide_windows_carry_bulk_both_ways_through_loss_and_reordering :: proc(t: ^testing.T) {
 	testing.set_fail_timeout(t, 60 * time.Second)
 	limits := wide_limits()
-	limits.max_stream_data = BULK_WINDOW; limits.recv_max_stream_data = BULK_WINDOW
-	p := open_pair(t, limits, false, bulk_windows()); defer close_pair(p); settle(t, p)
+	limits.max_stream_data = BULK_WINDOW
+	limits.recv_max_stream_data = BULK_WINDOW
+	p := open_pair(t, limits, false, bulk_windows())
+	defer close_pair(p)
+	settle(t, p)
 	bulk_transfer(t, p)
 }
 
@@ -85,9 +92,15 @@ conn_wide_windows_carry_bulk_both_ways_through_loss_and_reordering :: proc(t: ^t
 @(test)
 conn_adopted_wide_windows_carry_bulk_both_ways_through_loss_and_reordering :: proc(t: ^testing.T) {
 	testing.set_fail_timeout(t, 60 * time.Second)
-	limits := wide_limits(); limits.recv_max_stream_data = BULK_WINDOW; limits.max_stream_data = BULK_WINDOW
-	p := open_pair(t, wide_limits(), false); defer close_pair(p); settle(t, p)
-	windows := bulk_windows(); windows.send_pool = 2 * BULK_WINDOW; windows.recv_pool = 2 * BULK_WINDOW
+	limits := wide_limits()
+	limits.recv_max_stream_data = BULK_WINDOW
+	limits.max_stream_data = BULK_WINDOW
+	p := open_pair(t, wide_limits(), false)
+	defer close_pair(p)
+	settle(t, p)
+	windows := bulk_windows()
+	windows.send_pool = 2 * BULK_WINDOW
+	windows.recv_pool = 2 * BULK_WINDOW
 	for old in ([2]^^conn.Connection{&p.client, &p.server}) {
 		space := old^.model.spaces[2]
 		adopted := new(conn.Connection)
@@ -113,7 +126,9 @@ conn_adopted_wide_windows_carry_bulk_both_ways_through_loss_and_reordering :: pr
 		}
 		// The sim addresses each end by the path its first connection learned.
 		adopted.model.path = old^.model.path
-		conn.destroy(old^); free(old^); old^ = adopted
+		conn.destroy(old^)
+		free(old^)
+		old^ = adopted
 	}
 	settle(t, p)
 	testing.expect(t, p.client.streams.heap && p.server.streams.heap)
@@ -126,12 +141,21 @@ bulk_transfer :: proc(t: ^testing.T, p: ^Pair) {
 	send, recv := conn.stream_windows(p.client)
 	testing.expect(t, send == BULK_WINDOW && recv == BULK_WINDOW)
 
-	client := Bulk_Side{c = p.client, seed = 1}; server := Bulk_Side{c = p.server, seed = 2}
-	random := u64(0x9e3779b97f4a7c15); packet: [conn.MAX_DATAGRAM]u8
+	client := Bulk_Side {
+		c    = p.client,
+		seed = 1,
+	}
+	server := Bulk_Side {
+		c    = p.server,
+		seed = 2,
+	}
+	random := u64(0x9e3779b97f4a7c15)
+	packet: [conn.MAX_DATAGRAM]u8
 	dropped, delayed, duplicated := 0, 0, 0
 	rounds := 0
 	for ; rounds < 200_000 && !(client.fin && server.fin); rounds += 1 {
-		bulk_step(t, &client, &server); bulk_step(t, &server, &client)
+		bulk_step(t, &client, &server)
+		bulk_step(t, &server, &client)
 		sent := 0
 		for c in ([2]^conn.Connection{p.client, p.server}) {
 			for _ in 0 ..< 12 {
@@ -143,14 +167,18 @@ bulk_transfer :: proc(t: ^testing.T, p: ^Pair) {
 					break
 				}
 				sent += 1
-				plan: sim.Plan; roll := bulk_random(&random) % 100
+				plan: sim.Plan
+				roll := bulk_random(&random) % 100
 				switch {
 				case roll < 5:
-					plan.drop = true; dropped += 1
+					plan.drop = true
+					dropped += 1
 				case roll < 20:
-					plan.delay = sim.Tick(1 + bulk_random(&random) % 30); delayed += 1
+					plan.delay = sim.Tick(1 + bulk_random(&random) % 30)
+					delayed += 1
 				case roll < 23:
-					plan.duplicate = true; plan.duplicate_delay = sim.Tick(bulk_random(&random) % 10)
+					plan.duplicate = true
+					plan.duplicate_delay = sim.Tick(bulk_random(&random) % 10)
 					duplicated += 1
 				}
 				src, dst := endpoint(c, p)
@@ -168,7 +196,15 @@ bulk_transfer :: proc(t: ^testing.T, p: ^Pair) {
 			}
 		}
 		if e := deliver(p, until); e != .None {
-			testing.expectf(t, false, "round %d: %v, client %q, server %q", rounds, e, p.client.reason, p.server.reason)
+			testing.expectf(
+				t,
+				false,
+				"round %d: %v, client %q, server %q",
+				rounds,
+				e,
+				p.client.reason,
+				p.server.reason,
+			)
 			return
 		}
 		for c in ([2]^conn.Connection{p.client, p.server}) {
@@ -187,7 +223,8 @@ bulk_transfer :: proc(t: ^testing.T, p: ^Pair) {
 		}
 	}
 	testing.expect(t, client.fin && server.fin, "transfer did not finish")
-	testing.expect_value(t, client.got, BULK_BYTES); testing.expect_value(t, server.got, BULK_BYTES)
+	testing.expect_value(t, client.got, BULK_BYTES)
+	testing.expect_value(t, server.got, BULK_BYTES)
 	testing.expect(t, dropped > 20 && delayed > 60 && duplicated > 10)
 	// One write took far more than the old 256-byte window.
 	testing.expect(t, client.largest_write > conn.STREAM_BYTES && server.largest_write > conn.STREAM_BYTES)
@@ -195,7 +232,8 @@ bulk_transfer :: proc(t: ^testing.T, p: ^Pair) {
 	for _ in 0 ..< 64 {
 		for c in ([2]^conn.Connection{p.client, p.server}) {
 			if n, e := conn.pump(c, i64(p.link.now), packet[:]); e == .None && n > 0 {
-				src, dst := endpoint(c, p); _ = sim.send(&p.link, src, dst, packet[:n], {})
+				src, dst := endpoint(c, p)
+				_ = sim.send(&p.link, src, dst, packet[:n], {})
 			}
 		}
 		testing.expect_value(t, deliver(p, i64(p.link.now) + 30), conn.Error.None)
@@ -209,7 +247,8 @@ bulk_transfer :: proc(t: ^testing.T, p: ^Pair) {
 
 @(private)
 adopt_from :: proc(p: ^Pair, windows: conn.Stream_Windows, recv_max_stream_data: u64) -> conn.Adopt_Config {
-	limits := wide_limits(); limits.recv_max_stream_data = recv_max_stream_data
+	limits := wide_limits()
+	limits.recv_max_stream_data = recv_max_stream_data
 	return {
 		role = .Client,
 		local_cid = p.client.local_cid[:p.client.local_cid_len],
@@ -222,27 +261,51 @@ adopt_from :: proc(p: ^Pair, windows: conn.Stream_Windows, recv_max_stream_data:
 
 @(test)
 conn_adoption_sizes_windows_from_config_and_default_allocates_nothing :: proc(t: ^testing.T) {
-	p := open_pair(t, wide_limits(), false); defer close_pair(p); settle(t, p)
-	candidate := new(conn.Connection); defer free(candidate)
-	wide := conn.Stream_Windows{send = BULK_WINDOW, recv = BULK_WINDOW}
+	p := open_pair(t, wide_limits(), false)
+	defer close_pair(p)
+	settle(t, p)
+	candidate := new(conn.Connection)
+	defer free(candidate)
+	wide := conn.Stream_Windows {
+		send = BULK_WINDOW,
+		recv = BULK_WINDOW,
+	}
 
 	// A window above the embedded one needs an allocator, and the advertised
 	// stream credit must fit the receive window. Neither failure moves the keys.
-	testing.expect_value(t, conn.adopt_established(candidate, &p.client.hs, adopt_from(p, wide, BULK_WINDOW)), conn.Error.Invalid)
+	testing.expect_value(
+		t,
+		conn.adopt_established(candidate, &p.client.hs, adopt_from(p, wide, BULK_WINDOW)),
+		conn.Error.Invalid,
+	)
 	wide.allocator = context.allocator
-	testing.expect_value(t, conn.adopt_established(candidate, &p.client.hs, adopt_from(p, wide, BULK_WINDOW + 1)), conn.Error.Invalid)
-	testing.expect_value(t, conn.adopt_established(candidate, &p.client.hs, adopt_from(p, {send_pool = 4096}, 256)), conn.Error.Invalid)
+	testing.expect_value(
+		t,
+		conn.adopt_established(candidate, &p.client.hs, adopt_from(p, wide, BULK_WINDOW + 1)),
+		conn.Error.Invalid,
+	)
+	testing.expect_value(
+		t,
+		conn.adopt_established(candidate, &p.client.hs, adopt_from(p, {send_pool = 4096}, 256)),
+		conn.Error.Invalid,
+	)
 	testing.expect(t, p.client.hs.have_one_rtt && !candidate.initialized)
 
 	// A shared pool smaller than every stream's full window: one stream can
 	// fill its window, the next is refused until bytes are acknowledged.
 	wide.send_pool = BULK_WINDOW
-	testing.expect_value(t, conn.adopt_established(candidate, &p.client.hs, adopt_from(p, wide, BULK_WINDOW)), conn.Error.None)
+	testing.expect_value(
+		t,
+		conn.adopt_established(candidate, &p.client.hs, adopt_from(p, wide, BULK_WINDOW)),
+		conn.Error.None,
+	)
 	testing.expect(t, !p.client.hs.have_one_rtt && candidate.streams.heap)
 	send, recv := conn.stream_windows(candidate)
 	testing.expect(t, send == BULK_WINDOW && recv == BULK_WINDOW)
-	previous := context.allocator; context.allocator = mem.panic_allocator()
-	data := make([]u8, BULK_WINDOW + 1, previous); defer delete(data, previous)
+	previous := context.allocator
+	context.allocator = mem.panic_allocator()
+	data := make([]u8, BULK_WINDOW + 1, previous)
+	defer delete(data, previous)
 	for &v, i in data {v = bulk_byte(3, i)}
 	testing.expect_value(t, conn.stream_send_room(candidate, 0), BULK_WINDOW)
 	n, e := conn.write(candidate, 0, data, false)
@@ -263,7 +326,9 @@ conn_adoption_sizes_windows_from_config_and_default_allocates_nothing :: proc(t:
 	conn.destroy(candidate)
 
 	// The default takes nothing from any allocator and keeps the old bound.
-	q := open_pair(t, wide_limits(), false); defer close_pair(q); settle(t, q)
+	q := open_pair(t, wide_limits(), false)
+	defer close_pair(q)
+	settle(t, q)
 	context.allocator = mem.panic_allocator()
 	testing.expect_value(t, conn.adopt_established(candidate, &q.client.hs, adopt_from(q, {}, 256)), conn.Error.None)
 	send, recv = conn.stream_windows(candidate)

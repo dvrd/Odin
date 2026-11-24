@@ -97,7 +97,7 @@ pto_duration :: proc(m: ^Model, space: Space) -> i64 {
 	return duration
 }
 
-loss_detection_timer :: proc(m: ^Model, now: i64,allow_application_pto:bool=true) -> Timer {
+loss_detection_timer :: proc(m: ^Model, now: i64, allow_application_pto: bool = true) -> Timer {
 	if m == nil || !m.initialized || m.closed {
 		return {}
 	}
@@ -128,12 +128,7 @@ loss_detection_timer :: proc(m: ^Model, now: i64,allow_application_pto:bool=true
 			kind = .Anti_Deadlock_Handshake
 			sp = .Handshake
 		}
-		return {
-			armed = true,
-			at = saturating_add(now, pto_duration(m, sp)),
-			space = sp,
-			kind = kind,
-		}
+		return {armed = true, at = saturating_add(now, pto_duration(m, sp)), space = sp, kind = kind}
 	}
 	best: i64
 	best_space: Space
@@ -144,7 +139,7 @@ loss_detection_timer :: proc(m: ^Model, now: i64,allow_application_pto:bool=true
 		if sp.ack_eliciting_flight <= 0 || sp.discarded {
 			continue
 		}
-		if s == .Application && (!m.handshake_confirmed||!allow_application_pto) {
+		if s == .Application && (!m.handshake_confirmed || !allow_application_pto) {
 			if !found {
 				return {}
 			}
@@ -185,7 +180,7 @@ loss_delay :: proc(m: ^Model) -> i64 {
 retire_packet :: proc(m: ^Model, space, index: int) -> Packet {
 	p := &m.packets[space][index]
 	copy := p^
-	if p.in_flight && p.path_epoch==m.path_epoch && p.path==m.path {
+	if p.in_flight && p.path_epoch == m.path_epoch && p.path == m.path {
 		m.bytes_in_flight -= p.sent_bytes
 		if m.bytes_in_flight < 0 {
 			m.bytes_in_flight = 0
@@ -259,8 +254,7 @@ detect_lost :: proc(m: ^Model, now: i64, space: int, lost_out: []u64) -> (n: int
 			continue
 		}
 		by_pn :=
-			p.number <= max(u64) - u64(K_PACKET_THRESHOLD) &&
-			sp.largest_acked >= p.number + u64(K_PACKET_THRESHOLD)
+			p.number <= max(u64) - u64(K_PACKET_THRESHOLD) && sp.largest_acked >= p.number + u64(K_PACKET_THRESHOLD)
 		by_time := p.sent_at <= lost_before
 		if by_pn || by_time {
 			lost[count] = i
@@ -347,13 +341,18 @@ acknowledge :: proc(
 			eliciting = true
 		}
 	}
-	if eliciting && acked[largest_i].number == largest && acked[largest_i].path_epoch==m.path_epoch && acked[largest_i].path==m.path {
+	if eliciting &&
+	   acked[largest_i].number == largest &&
+	   acked[largest_i].path_epoch == m.path_epoch &&
+	   acked[largest_i].path == m.path {
 		update_rtt(m, now, ack_delay, acked[largest_i].sent_at)
 	}
 	if has_ecn && (!m.has_ecn[si] || ecn_ce > m.ecn_ce[si]) {
 		m.has_ecn[si] = true
 		m.ecn_ce[si] = ecn_ce
-		if acked[largest_i].number == largest && acked[largest_i].path_epoch==m.path_epoch && acked[largest_i].path==m.path {
+		if acked[largest_i].number == largest &&
+		   acked[largest_i].path_epoch == m.path_epoch &&
+		   acked[largest_i].path == m.path {
 			on_congestion_event(m, now, acked[largest_i].sent_at)
 		}
 	}
@@ -362,7 +361,9 @@ acknowledge :: proc(
 		return lost_n, err
 	}
 	for i in 0 ..< acked_n {
-		if acked[i].path_epoch==m.path_epoch && acked[i].path==m.path {on_packet_acked_cc(m, acked[i].sent_at, acked[i].sent_bytes)}
+		if acked[i].path_epoch == m.path_epoch && acked[i].path == m.path {
+			on_packet_acked_cc(m, acked[i].sent_at, acked[i].sent_bytes)
+		}
 		retire_stream_ack(m, acked[i])
 	}
 	if peer_completed(m) {
@@ -375,13 +376,13 @@ on_timeout :: proc(
 	m: ^Model,
 	now: i64,
 	lost_out: []u64,
- allow_application_pto:bool=true,
+	allow_application_pto: bool = true,
 ) -> (
 	lost_n: int,
 	kind: Timer_Kind,
 	err: Error,
 ) {
-	timer := loss_detection_timer(m, now,allow_application_pto)
+	timer := loss_detection_timer(m, now, allow_application_pto)
 	if !timer.armed {
 		return 0, .None, .Invalid_State
 	}
@@ -457,10 +458,14 @@ reject_zero_rtt :: proc(m: ^Model) -> Error {
 }
 
 // The idle floor uses the current RTT-based PTO, independently of loss backoff.
-base_pto :: proc(m:^Model,space:Space=.Application)->i64 {
- if m==nil||!m.initialized {return 1000}
- varied:=max(m.granularity,4*min(m.rttvar,max(i64)/4))
- result:=saturating_add(m.smoothed_rtt,varied)
- if space==.Application {result=saturating_add(result,m.max_ack_delay)}
- return max(result,m.granularity)
+base_pto :: proc(m: ^Model, space: Space = .Application) -> i64 {
+	if m == nil || !m.initialized {
+		return 1000
+	}
+	varied := max(m.granularity, 4 * min(m.rttvar, max(i64) / 4))
+	result := saturating_add(m.smoothed_rtt, varied)
+	if space == .Application {
+		result = saturating_add(result, m.max_ack_delay)
+	}
+	return max(result, m.granularity)
 }

@@ -4,38 +4,49 @@ import "core:net/quic/harness"
 stop_sending_with_error :: proc(c: ^Connection, id, code: u64) -> Error {
 	if e := usable(c); e != .None {
 		return e
-	}; if code >= u64(1) << 62 {
+	}
+	if code >= u64(1) << 62 {
 		return .Invalid
 	}
 	// A closed stream has nothing left to stop.
 	if stream_closed(c, id) {
 		return .None
 	}
-	b := find_buf(c, id); if b == nil {
+	b := find_buf(c, id)
+	if b == nil {
 		return .Protocol
 	}
 	if b.want_stop {
 		if b.stop_error == code {
 			return .None
-		}; return .Protocol
+		}
+		return .Protocol
 	}
 	// The receive side may already have ended; then nothing else holds the record.
-	b.want_stop = true; b.stop_error = code; reap(c); return .None
+	b.want_stop = true
+	b.stop_error = code
+	reap(c)
+	return .None
 }
+
 receive_reset_error :: proc(c: ^Connection, id: u64) -> (u64, bool) {
 	if c != nil {
 		if b := find_buf(c, id); b != nil && b.recv_reset {
 			return b.recv_reset_error, true
 		}
-	}; return 0, false
+	}
+	return 0, false
 }
+
 receive_stop_error :: proc(c: ^Connection, id: u64) -> (u64, bool) {
 	if c != nil {
 		if b := find_buf(c, id); b != nil && b.stop {
 			return b.received_stop_error, true
 		}
-	}; return 0, false
+	}
+	return 0, false
 }
+
 @(private)
 send_stop_progress :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, bool) {
 	if !journal_room(c) {
@@ -45,7 +56,10 @@ send_stop_progress :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, 
 		if !b.used || !b.want_stop || b.stop_acked || b.stop_sent && !b.stop_retry {
 			continue
 		}
-		frame: [64]u8; frame[0] = 0x05; at, ok := put_varint(frame[:], 1, b.id); if ok {
+		frame: [64]u8
+		frame[0] = 0x05
+		at, ok := put_varint(frame[:], 1, b.id)
+		if ok {
 			at, ok = put_varint(frame[:], at, b.stop_error)
 		}
 		if !ok {
@@ -65,9 +79,12 @@ send_stop_progress :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, 
 		}
 		c.force_probe = false
 		if !record_tx(c, {pn = pn, id = b.id, stop = true}) {
-			fail(c, "stop retention"); return 0, .Failed, true
+			fail(c, "stop retention")
+			return 0, .Failed, true
 		}
-		b.stop_sent = true; b.stop_retry = false; return n, .None, true
+		b.stop_sent = true
+		b.stop_retry = false
+		return n, .None, true
 	}
 	return 0, .None, false
 }

@@ -31,6 +31,7 @@ import ecn "core:net/quic/ecn"
 import "core:time"
 
 STREAMS :: 32
+
 // Default per-stream window. Stream_Windows raises it for one connection.
 STREAM_BYTES :: 256
 PACKETS :: 64
@@ -56,8 +57,8 @@ Error :: enum {
 	Pending,
 	Partial,
 	Discarded,
- Stateless_Reset,
- Unsupported,
+	Stateless_Reset,
+	Unsupported,
 	// The caller opened one of its own streams out of order. Streams of one
 	// kind (the low two bits of the ID) must be opened lowest ID first, each
 	// exactly four above the last. The stream was not opened.
@@ -95,7 +96,7 @@ Config :: struct {
 }
 
 Timer :: struct {
- idle:bool,
+	idle:  bool,
 	armed: bool,
 	at:    i64,
 	kind:  harness.Timer_Kind,
@@ -103,49 +104,49 @@ Timer :: struct {
 }
 
 Buf :: struct {
-	used:                              bool,
-	id:                                u64,
-	n:                                 int,
+	used:                                                           bool,
+	id:                                                             u64,
+	n:                                                              int,
 	// Bytes accepted by the harness. A freed stream reports offset 0; this does not.
-	sent:                              int,
-	fin:                               bool,
-	fin_sent:                          bool,
-	reset:                             bool,
-	reset_sent:                        bool,
-	recv_n:                            int,
-	recv_fin:                          bool,
-	recv_reset:                        bool,
-	reset_final:                       u64,
- reset_error,recv_reset_error,received_stop_error,stop_error:u64,
- want_stop,stop_sent,stop_retry,stop_acked:bool,
-	stop:                              bool,
-	send_base:                         u64,
+	sent:                                                           int,
+	fin:                                                            bool,
+	fin_sent:                                                       bool,
+	reset:                                                          bool,
+	reset_sent:                                                     bool,
+	recv_n:                                                         int,
+	recv_fin:                                                       bool,
+	recv_reset:                                                     bool,
+	reset_final:                                                    u64,
+	reset_error, recv_reset_error, received_stop_error, stop_error: u64,
+	want_stop, stop_sent, stop_retry, stop_acked:                   bool,
+	stop:                                                           bool,
+	send_base:                                                      u64,
 	// Ring positions of the blocks that hold send_base and recv_base.
-	send_head, recv_head:              int,
+	send_head, recv_head:                                           int,
 	// Some retained byte may be marked for retransmission.
-	retry_pending:                     bool,
+	retry_pending:                                                  bool,
 	// Received bytes held at or above recv_base, in order or not.
-	recv_held:                         int,
-	fin_acked, fin_retry, reset_retry: bool,
- reset_acked:bool,
-	recv_base, recv_final:             u64,
-	send_limit:                        u64,
-	recv_credit:                       u64,
-	credit_dirty:                      bool,
+	recv_held:                                                      int,
+	fin_acked, fin_retry, reset_retry:                              bool,
+	reset_acked:                                                    bool,
+	recv_base, recv_final:                                          u64,
+	send_limit:                                                     u64,
+	recv_credit:                                                    u64,
+	credit_dirty:                                                   bool,
 	// The application has been handed the end of the receive side.
-	fin_read, reset_read:              bool,
+	fin_read, reset_read:                                           bool,
 }
 
 Connection :: struct {
- idle:idle.State,
- idle_expired:bool,
- idle_expiry_pto:i64,
- output_eliciting:bool,
- migration: Migration,
- post_handshake:Post_Handshake_State,
- stateless_reset:bool,
- early_state:Early_State,
- ecn:ECN_Transport,
+	idle:                                        idle.State,
+	idle_expired:                                bool,
+	idle_expiry_pto:                             i64,
+	output_eliciting:                            bool,
+	migration:                                   Migration,
+	post_handshake:                              Post_Handshake_State,
+	stateless_reset:                             bool,
+	early_state:                                 Early_State,
+	ecn:                                         ECN_Transport,
 	initialized:                                 bool,
 	role:                                        quic.Role,
 	phase:                                       Phase,
@@ -182,7 +183,8 @@ Connection :: struct {
 	noted_send:                                  bool,
 	noted_recv:                                  bool,
 	want_close:                                  bool,
- close_application:bool,close_error:u64,
+	close_application:                           bool,
+	close_error:                                 u64,
 	close_sent:                                  bool,
 	cancelled:                                   bool,
 	force_probe:                                 bool,
@@ -192,8 +194,9 @@ Connection :: struct {
 	await_update:                                bool,
 	udp_hold:                                    [MAX_DATAGRAM]u8,
 	udp_hold_len:                                int,
- udp_hold_eliciting:bool,
- udp_hold_peer:net.Endpoint, udp_hold_ecn:net.ECN_Codepoint,
+	udp_hold_eliciting:                          bool,
+	udp_hold_peer:                               net.Endpoint,
+	udp_hold_ecn:                                net.ECN_Codepoint,
 	tx:                                          [PACKETS]Tx_Packet,
 	path_response_pending:                       bool,
 	path_response_token:                         [8]u8,
@@ -307,8 +310,8 @@ destroy :: proc(c: ^Connection) {
 	if c == nil {
 		return
 	}
- migration_release_secrets(c)
- post_handshake_clear(c)
+	migration_release_secrets(c)
+	post_handshake_clear(c)
 	if c.initialized {
 		harness.destroy(&c.model)
 	}
@@ -321,7 +324,7 @@ destroy :: proc(c: ^Connection) {
 }
 
 established :: proc(c: ^Connection) -> bool {
-	return c != nil && c.initialized && c.phase == .Established&&!early(c)
+	return c != nil && c.initialized && c.phase == .Established && !early(c)
 }
 
 stats :: proc(c: ^Connection) -> harness.Stats {
@@ -397,7 +400,8 @@ write :: proc(c: ^Connection, id: u64, data: []u8, fin: bool) -> (int, Error) {
 		}
 		return 0, .Flow_Control
 	}
-	buf, e := open_local(c, id); if e != .None {
+	buf, e := open_local(c, id)
+	if e != .None {
 		return 0, e
 	}
 	if buf.reset || buf.fin || buf.stop {
@@ -409,7 +413,8 @@ write :: proc(c: ^Connection, id: u64, data: []u8, fin: bool) -> (int, Error) {
 	   win_missing(c, buf, .Send, end, end + u64(len(data))) > pool_room(c, .Send) {
 		if fresh {
 			unopen(c, buf)
-		}; return 0, .Capacity
+		}
+		return 0, .Capacity
 	}
 	if buf.send_limit > limit {
 		limit = buf.send_limit
@@ -419,13 +424,16 @@ write :: proc(c: ^Connection, id: u64, data: []u8, fin: bool) -> (int, Error) {
 		// caller's next stream of this kind is still in order.
 		if fresh && e != .Flow_Control {
 			unopen(c, buf)
-		}; return 0, map_harness(e)
+		}
+		return 0, map_harness(e)
 	}
 	buf.send_limit = limit
 	if !win_reserve(c, buf, .Send, end, end + u64(len(data))) {
-		fail(c, "stream send pool"); return 0, .Failed
+		fail(c, "stream send pool")
+		return 0, .Failed
 	}
-	win_write(c, buf, .Send, end, data); buf.n += len(data)
+	win_write(c, buf, .Send, end, data)
+	buf.n += len(data)
 	if fin {
 		buf.fin = true
 	}
@@ -442,11 +450,13 @@ read :: proc(c: ^Connection, id: u64, dst: []u8) -> (int, bool, Error) {
 	if c.phase == .Failed {
 		return 0, false, .Failed
 	}
-	buf := find_buf(c, id); if buf == nil {
+	buf := find_buf(c, id)
+	if buf == nil {
 		return 0, false, .None
 	}
 	if buf.recv_reset {
-		buf.reset_read = true; reap(c)
+		buf.reset_read = true
+		reap(c)
 		return 0, false, .Protocol
 	}
 	n := min(buf.recv_n, len(dst))
@@ -456,25 +466,31 @@ read :: proc(c: ^Connection, id: u64, dst: []u8) -> (int, bool, Error) {
 		}
 		win_read(c, buf, .Recv, buf.recv_base, dst[:n])
 		// The bytes after a contiguous prefix stay contiguous.
-		buf.recv_n -= n; buf.recv_held -= n
+		buf.recv_n -= n
+		buf.recv_held -= n
 		if buf.recv_held <= 0 {
 			win_clear(c, buf, .Recv)
 		} else {
 			win_advance(c, buf, .Recv, buf.recv_base + u64(n))
 		}
 		buf.recv_base += u64(n)
-		buf.recv_credit += u64(n); buf.credit_dirty = true
+		buf.recv_credit += u64(n)
+		buf.credit_dirty = true
 	}
 	fin := buf.recv_fin && buf.recv_base == buf.recv_final && buf.recv_n == 0
 	if fin {
-		buf.fin_read = true; reap(c)
+		buf.fin_read = true
+		reap(c)
 	}
 	return n, fin, .None
 }
 
-reset_stream :: proc(c:^Connection,id:u64)->Error {return reset_stream_with_error(c,id,0)}
-reset_stream_with_error :: proc(c: ^Connection, id,code: u64) -> Error {
- if code>=u64(1)<<62{return .Invalid}
+reset_stream :: proc(c: ^Connection, id: u64) -> Error {return reset_stream_with_error(c, id, 0)}
+
+reset_stream_with_error :: proc(c: ^Connection, id, code: u64) -> Error {
+	if code >= u64(1) << 62 {
+		return .Invalid
+	}
 	if e := usable(c); e != .None {
 		return e
 	}
@@ -490,7 +506,7 @@ reset_stream_with_error :: proc(c: ^Connection, id,code: u64) -> Error {
 		return .Protocol
 	}
 	buf.reset = true
- buf.reset_error=code
+	buf.reset_error = code
 	buf.reset_final = buf.send_base + u64(buf.n)
 	_ = harness.stream_send_reset(&c.model, id, buf.reset_final)
 	return .None
@@ -514,8 +530,8 @@ cancel :: proc(c: ^Connection) {
 	if c == nil || !c.initialized {
 		return
 	}
- migration_release_secrets(c)
- post_handshake_clear(c)
+	migration_release_secrets(c)
+	post_handshake_clear(c)
 	c.cancelled = true
 	c.phase = .Closed
 	c.model.closed = true
@@ -535,9 +551,13 @@ timer :: proc(c: ^Connection, now: i64) -> Timer {
 	if c.phase == .Draining {
 		return {armed = now < c.draining_until, at = c.draining_until}
 	}
-	if idle_tick(c,now) {return {}}
-	got := harness.loss_detection_timer(&c.model, now,application_pto_confirmed(c))
- if at,armed:=idle.deadline(&c.idle,harness.base_pto(&c.model));armed&&(!got.armed||at<got.at) {return {armed=true,at=at,idle=true}}
+	if idle_tick(c, now) {
+		return {}
+	}
+	got := harness.loss_detection_timer(&c.model, now, application_pto_confirmed(c))
+	if at, armed := idle.deadline(&c.idle, harness.base_pto(&c.model)); armed && (!got.armed || at < got.at) {
+		return {armed = true, at = at, idle = true}
+	}
 	return {armed = got.armed, at = got.at, kind = got.kind, space = got.space}
 }
 
@@ -560,10 +580,12 @@ on_timeout :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 		}
 		return 0, .None
 	}
-	if idle_tick(c,now) {return 0,.Closed}
-	due := harness.loss_detection_timer(&c.model, now,application_pto_confirmed(c))
+	if idle_tick(c, now) {
+		return 0, .Closed
+	}
+	due := harness.loss_detection_timer(&c.model, now, application_pto_confirmed(c))
 	lost: [PACKETS]u64
-	_, _, err := harness.on_timeout(&c.model, now, lost[:],application_pto_confirmed(c))
+	_, _, err := harness.on_timeout(&c.model, now, lost[:], application_pto_confirmed(c))
 	if err == .Invalid_Input || err == .Invalid_State {
 		return 0, .Not_Ready
 	}
@@ -572,7 +594,8 @@ on_timeout :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 	}
 	sync_tx(c)
 	if due.space == .Application {
-		retry_oldest(c); if c.role == .Client && !c.seen_done {
+		retry_oldest(c)
+		if c.role == .Client && !c.seen_done {
 			c.fin_off = 0
 		}
 	}
@@ -582,7 +605,9 @@ on_timeout :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 }
 
 ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
- if idle_tick(c,now) {return .Closed}
+	if idle_tick(c, now) {
+		return .Closed
+	}
 	if c == nil || !c.initialized {
 		return .Invalid
 	}
@@ -604,50 +629,52 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 	}
 	inv, ierr := quic.invariant_decode(datagram, c.local_cid_len)
 	if ierr != .None {
-		return discard_reset(c,datagram)
+		return discard_reset(c, datagram)
 	}
 	if !accepts_destination_id(c, inv.destination_id) {
-        if inv.long_header&&inv.version==1&&(inv.first_byte>>4)&3==1&&c.hs.have_zero_rtt {return early_ingest(c,now,path,datagram)}
-		return discard_reset(c,datagram)
+		if inv.long_header && inv.version == 1 && (inv.first_byte >> 4) & 3 == 1 && c.hs.have_zero_rtt {
+			return early_ingest(c, now, path, datagram)
+		}
+		return discard_reset(c, datagram)
 	}
 	if inv.long_header && (inv.version == 0 || inv.version != 1) {
 		note_unparsed(c, path, len(datagram))
 		c.reason = "version negotiation not implemented" if inv.version == 0 else c.reason
-		return discard_reset(c,datagram)
+		return discard_reset(c, datagram)
 	}
 	view, consumed, derr := quic.packet_decode_v1(datagram, c.local_cid_len)
 	if derr != .None {
 		note_unparsed(c, path, len(datagram))
-		return discard_reset(c,datagram)
+		return discard_reset(c, datagram)
 	}
-    if view.kind==.Zero_RTT {return early_ingest(c,now,path,datagram)}
-    if early(c){return .Discarded}
+	if view.kind == .Zero_RTT {
+		return early_ingest(c, now, path, datagram)
+	}
+	if early(c) {
+		return .Discarded
+	}
 	if consumed != len(datagram) ||
 	   view.kind == .Retry ||
 	   view.kind == .Version_Negotiation ||
 	   view.kind == .Zero_RTT {
 		note_unparsed(c, path, len(datagram))
-		return discard_reset(c,datagram)
+		return discard_reset(c, datagram)
 	}
 	level := level_of(view.kind)
 	if c.model.spaces[int(space_of(level))].discarded {
-		return discard_reset(c,datagram)
+		return discard_reset(c, datagram)
 	}
 	packet: [MAX_DATAGRAM]u8
 	copy(packet[:], datagram)
-	if quic.handshake_header_protection_remove(&c.hs, packet[:consumed], level, c.local_cid_len) !=
-	   .None {
+	if quic.handshake_header_protection_remove(&c.hs, packet[:consumed], level, c.local_cid_len) != .None {
 		note_unparsed(c, path, len(datagram))
 		c.reason = "header protection"
-		return discard_reset(c,datagram)
+		return discard_reset(c, datagram)
 	}
-	fields, ferr := quic.unprotected_fields_decode(
-		view_from(packet[:consumed], c.local_cid_len),
-		packet[:consumed],
-	)
+	fields, ferr := quic.unprotected_fields_decode(view_from(packet[:consumed], c.local_cid_len), packet[:consumed])
 	if ferr != .None {
 		note_unparsed(c, path, len(datagram))
-		return discard_reset(c,datagram)
+		return discard_reset(c, datagram)
 	}
 	space := space_of(level)
 	sp := c.model.spaces[int(space)]
@@ -657,20 +684,15 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 		u64(fields.packet_number),
 		fields.packet_number_length * 8,
 	)
-	hf, he := quic.handshake_reconstruct_pn(
-		&c.hs,
-		level,
-		u64(fields.packet_number),
-		fields.packet_number_length * 8,
-	)
+	hf, he := quic.handshake_reconstruct_pn(&c.hs, level, u64(fields.packet_number), fields.packet_number_length * 8)
 	if !pok || he != .None || hf != full {
 		note_unparsed(c, path, len(datagram))
 		c.reason = "packet number"
-		return discard_reset(c,datagram)
+		return discard_reset(c, datagram)
 	}
 	header_end := fields_header_end(packet[:consumed], c.local_cid_len)
 	if header_end <= 0 || header_end >= consumed {
-		return discard_reset(c,datagram)
+		return discard_reset(c, datagram)
 	}
 	plain: [MAX_DATAGRAM]u8
 	pn, oerr := quic.handshake_payload_open(
@@ -682,51 +704,81 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 		full,
 	)
 	if oerr != .None {
-        if oerr==.Invalid_Header&&fields.reserved_bits!=0 {fail(c,"authenticated reserved bits");return .Protocol}
+		if oerr == .Invalid_Header && fields.reserved_bits != 0 {
+			fail(c, "authenticated reserved bits")
+			return .Protocol
+		}
 		note_unparsed(c, path, len(datagram))
 		c.reason = "decrypt"
-		return discard_reset(c,datagram)
+		return discard_reset(c, datagram)
 	}
-    if fields.reserved_bits!=0 {fail(c,"authenticated reserved bits");return .Protocol}
+	if fields.reserved_bits != 0 {
+		fail(c, "authenticated reserved bits")
+		return .Protocol
+	}
 	parsed, ok := parse_frames(plain[:pn])
 	if !ok {
 		fail(c, "frame")
 		return .Protocol
 	}
-    if level==.One_RTT&&!early_ack_valid(c,parsed){fail(c,"ACK rejected 0RTT");return .Protocol}
+	if level == .One_RTT && !early_ack_valid(c, parsed) {
+		fail(c, "ACK rejected 0RTT")
+		return .Protocol
+	}
 	if parsed.ack && parsed.ack_largest >= sp.next_send {
-		fail(c, "ACK of unsent packet"); return .Protocol
+		fail(c, "ACK of unsent packet")
+		return .Protocol
 	}
 	if level != .One_RTT &&
-	   (parsed.new_id_n>0 || parsed.retire_id_n>0 || parsed.path_n>0 || parsed.stream ||
+	   (parsed.new_id_n > 0 ||
+			   parsed.retire_id_n > 0 ||
+			   parsed.path_n > 0 ||
+			   parsed.stream ||
 			   parsed.reset ||
 			   parsed.stop ||
 			   parsed.max_data ||
 			   parsed.max_stream_data ||
 			   parsed.max_streams_bidi ||
 			   parsed.max_streams_uni) {
-		fail(c, "application frame before 1-RTT"); return .Protocol
+		fail(c, "application frame before 1-RTT")
+		return .Protocol
 	}
 	recv_blocks := 0
 	for si in 0 ..< parsed.stream_n {
-		f := parsed.streams[si]; p := Parsed {
+		f := parsed.streams[si]
+		p := Parsed {
 			stream_id   = f.id,
 			stream_off  = f.offset,
 			stream_data = f.data,
-		}; if !stream_fits_recv(c, p, &recv_blocks) {
+		}
+		if !stream_fits_recv(c, p, &recv_blocks) {
 			return .Discarded
 		}
 	}
 	dup := already_received(sp, full)
- if !dup {if e:=migration_receive(c,now,path,level,full,parsed,inv.destination_id);e!=.None{return e}}
- if c.migration.enabled {p:=&c.migration.paths[c.migration.receiving];if p.used {p.received+=len(datagram)}}
- received_before:=c.model.path_received
- model_path:=path
- if c.migration.enabled {model_path=c.model.path}
+	if !dup {
+		if e := migration_receive(c, now, path, level, full, parsed, inv.destination_id); e != .None {
+			return e
+		}
+	}
+	if c.migration.enabled {
+		p := &c.migration.paths[c.migration.receiving]
+		if p.used {
+			p.received += len(datagram)
+		}
+	}
+	received_before := c.model.path_received
+	model_path := path
+	if c.migration.enabled {
+		model_path = c.model.path
+	}
 	req := shadow_from_parsed(parsed)
 	// Payload ownership is accounted once by the real stream owner, not by a
 	// shadow packet or every retransmission.
-	req.stream = false; req.reset = false; req.stop_sending = false; req.max_data = false
+	req.stream = false
+	req.reset = false
+	req.stop_sending = false
+	req.max_data = false
 	req.attach_ack = false
 	req.ping =
 		req.ping ||
@@ -752,8 +804,7 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 		fail(c, "shadow")
 		return .Protocol
 	}
-	if err := harness.receive(&c.model, now, model_path, shadow[:len(datagram)]);
-	   err != .None && err != .Closed {
+	if err := harness.receive(&c.model, now, model_path, shadow[:len(datagram)]); err != .None && err != .Closed {
 		if err == .Discarded {
 			return .None
 		}
@@ -762,12 +813,17 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 	} else if err == .Closed {
 		enter_drain(c, now)
 	}
-	if c.migration.enabled && c.migration.receiving != c.migration.active {c.model.path_received=received_before}
+	if c.migration.enabled && c.migration.receiving != c.migration.active {
+		c.model.path_received = received_before
+	}
 	if !dup {
-        idle.received(&c.idle,now)
-        ecn_received(c,int(space))
-        ecn_ack(c,now,int(space),parsed)
-        if level==.One_RTT {post_handshake_ack(c,parsed);migration_ack(c,parsed)}
+		idle.received(&c.idle, now)
+		ecn_received(c, int(space))
+		ecn_ack(c, now, int(space), parsed)
+		if level == .One_RTT {
+			post_handshake_ack(c, parsed)
+			migration_ack(c, parsed)
+		}
 		acknowledge_tx(c, parsed)
 		// Retire lower acknowledged ranges before the largest ACK can detect
 		// loss in intervening packet numbers.
@@ -814,7 +870,9 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 }
 
 pump :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
- if idle_tick(c,now) {return 0,.Closed}
+	if idle_tick(c, now) {
+		return 0, .Closed
+	}
 	if c == nil || !c.initialized {
 		return 0, .Invalid
 	}
@@ -833,10 +891,16 @@ pump :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 		}
 		return 0, .None
 	}
- if c.ecn.sender.state==.Testing&&now-c.ecn.started>=9*max(c.model.smoothed_rtt,i64(333)) {ecn.timeout(&c.ecn.sender)}
- early_tick(c,now)
- if c.phase==.Failed {return 0,.Protocol}
- if early(c){return early_pump(c,now,dst)}
+	if c.ecn.sender.state == .Testing && now - c.ecn.started >= 9 * max(c.model.smoothed_rtt, i64(333)) {
+		ecn.timeout(&c.ecn.sender)
+	}
+	early_tick(c, now)
+	if c.phase == .Failed {
+		return 0, .Protocol
+	}
+	if early(c) {
+		return early_pump(c, now, dst)
+	}
 	if c.want_close && !c.close_sent {
 		return send_close(c, now, dst)
 	}
@@ -853,15 +917,11 @@ pump :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 		return send_crypto(c, now, dst, .Handshake, c.material.server_flight, &c.flight_off)
 	}
 	if c.role == .Client && c.authed && c.fin_off < c.hs.client_finished_len {
-		flight,e:=quic.handshake_client_finished(&c.hs);if e!=.None {return 0,.Handshake}
-		return send_crypto(
-			c,
-			now,
-			dst,
-			.Handshake,
-			flight,
-			&c.fin_off,
-		)
+		flight, e := quic.handshake_client_finished(&c.hs)
+		if e != .None {
+			return 0, .Handshake
+		}
+		return send_crypto(c, now, dst, .Handshake, flight, &c.fin_off)
 	}
 	// A PTO with nothing left to rewind still has to send an ack-eliciting probe.
 	// Before confirmation that probe is Initial (1200 bytes) or Handshake.
@@ -875,13 +935,21 @@ pump :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 		if !c.migration.enabled && c.path_response_pending {
 			return send_path_response(c, now, dst)
 		}
-		if n,e,sent:=migration_control(c,now,dst);sent {return n,e}
+		if n, e, sent := migration_control(c, now, dst); sent {
+			return n, e
+		}
 		if c.role == .Server && !c.done_sent {
 			return send_done(c, now, dst)
 		}
-        if n,e,sent:=post_handshake_pump(c,now,dst);sent{return n,e}
-        if n,e,sent:=send_connection_limits(c,now,dst);sent{return n,e}
-        if n,e,sent:=send_stop_progress(c,now,dst);sent{return n,e}
+		if n, e, sent := post_handshake_pump(c, now, dst); sent {
+			return n, e
+		}
+		if n, e, sent := send_connection_limits(c, now, dst); sent {
+			return n, e
+		}
+		if n, e, sent := send_stop_progress(c, now, dst); sent {
+			return n, e
+		}
 		if n, err, sent := send_stream_progress(c, now, dst); sent {
 			return n, err
 		}
@@ -914,8 +982,8 @@ usable :: proc(c: ^Connection) -> Error {
 
 @(private)
 fail :: proc(c: ^Connection, reason: string) {
- migration_release_secrets(c)
- post_handshake_clear(c)
+	migration_release_secrets(c)
+	post_handshake_clear(c)
 	c.phase = .Failed
 	c.reason = reason
 	c.model.closed = true
@@ -1015,15 +1083,18 @@ peer_record :: proc(c: ^Connection, id: u64) -> (buf: ^Buf, closed: bool, err: E
 	if id >= u64(1) << 62 {
 		return nil, false, .Protocol
 	}
-	index := id >> 2; next := c.opened[id & 3]
+	index := id >> 2
+	next := c.opened[id & 3]
 	if index < next {
 		return nil, true, .None
 	}
 	if id % 2 == u64(c.role) {
-		c.reason = "frame for an unopened local stream"; return nil, false, .Protocol
+		c.reason = "frame for an unopened local stream"
+		return nil, false, .Protocol
 	}
 	if index >= c.recv_streams[id >> 1 & 1] {
-		c.reason = "stream limit"; return nil, false, .Flow_Control
+		c.reason = "stream limit"
+		return nil, false, .Flow_Control
 	}
 	if index - next >= u64(free_records(c)) {
 		return nil, false, .Capacity
@@ -1044,7 +1115,8 @@ reap :: proc(c: ^Connection) {
 		if !b.used {
 			continue
 		}
-		local := b.id % 2 == u64(c.role); uni := b.id & 2 != 0
+		local := b.id % 2 == u64(c.role)
+		uni := b.id & 2 != 0
 		if !uni || local {
 			if b.fin && b.fin_acked {
 				compact_send(c, &b)
@@ -1067,10 +1139,12 @@ reap :: proc(c: ^Connection) {
 		// A closed peer stream makes room for one more of its kind, so the
 		// peer always has the configured number available at once.
 		if kind := b.id >> 1 & 1; c.raise_stream_limits && !local && c.recv_streams[kind] < u64(1) << 60 {
-			c.recv_streams[kind] += 1; c.max_streams_dirty[kind] = true
+			c.recv_streams[kind] += 1
+			c.max_streams_dirty[kind] = true
 			c.model.max_streams_recv = max(c.recv_streams[0], c.recv_streams[1])
 		}
-		win_clear(c, &b, .Send); win_clear(c, &b, .Recv)
+		win_clear(c, &b, .Send)
+		win_clear(c, &b, .Recv)
 		b = {}
 	}
 }
@@ -1113,12 +1187,7 @@ map_harness :: proc(err: harness.Error) -> Error {
 		return .Allocation
 	case .Discarded:
 		return .Discarded
-	case .Invalid_State,
-	     .Invalid_Input,
-	     .Datagram_Too_Small,
-	     .Protocol,
-	     .Destination_Undersized,
-	     .Overlap:
+	case .Invalid_State, .Invalid_Input, .Datagram_Too_Small, .Protocol, .Destination_Undersized, .Overlap:
 		return .Protocol
 	}
 	return .Protocol
@@ -1159,7 +1228,9 @@ cid_equal :: proc(a, b: []u8) -> bool {
 
 @(private)
 note_unparsed :: proc(c: ^Connection, path: u32, n: int) {
-	if c.migration.enabled {return}
+	if c.migration.enabled {
+		return
+	}
 	m := &c.model
 	if !m.has_path || path != m.path {
 		m.has_path = true
@@ -1220,7 +1291,7 @@ rewind :: proc(c: ^Connection, space: harness.Space) {
 			c.fin_off = 0
 		}
 	case .Application:
-        post_handshake_rewind(c)
+		post_handshake_rewind(c)
 	}
 }
 
@@ -1301,12 +1372,7 @@ advance_crypto :: proc(c: ^Connection) -> Error {
 install_server_keys :: proc(c: ^Connection) -> Error {
 	shared := c.shared
 	defer crypto.zero_explicit(&shared, size_of(shared))
-	hs, he := tls.quic_handshake_secrets(
-		shared,
-		c.material.client_hello,
-		c.material.server_hello,
-		c.material.params,
-	)
+	hs, he := tls.quic_handshake_secrets(shared, c.material.client_hello, c.material.server_hello, c.material.params)
 	defer tls.quic_handshake_keys_clear(&hs)
 	if he.kind != .None {
 		fail(c, "server handshake secrets")
@@ -1420,7 +1486,8 @@ stream_fits_recv :: proc(c: ^Connection, p: Parsed, need: ^int) -> bool {
 	if u64(len(p.stream_data)) > max(u64) - p.stream_off {
 		return false
 	}
-	buf := find_buf(c, p.stream_id); base: u64
+	buf := find_buf(c, p.stream_id)
+	base: u64
 	if buf != nil {
 		base = buf.recv_base
 	}
@@ -1448,11 +1515,13 @@ apply_parsed :: proc(c: ^Connection, level: quic.Encryption_Level, parsed: Parse
 		if e := receive_stream(c, p); e != .None {
 			if c.reason == "" {
 				c.reason = "receive stream"
-			}; return e
+			}
+			return e
 		}
 	}
 	if parsed.path_challenge {
-		c.path_response_pending = true; c.path_response_token = parsed.path_token
+		c.path_response_pending = true
+		c.path_response_token = parsed.path_token
 	}
 	if parsed.max_data {
 		c.model.max_data = max(c.model.max_data, parsed.max_data_v)
@@ -1461,17 +1530,23 @@ apply_parsed :: proc(c: ^Connection, level: quic.Encryption_Level, parsed: Parse
 		credit := parsed.credits[ci]
 		if b := find_buf(c, credit.id); b != nil {
 			if !send_direction(c, b.id) {
-				c.reason = "MAX_STREAM_DATA direction existing"; return .Protocol
-			}; b.send_limit = max(b.send_limit, credit.value)
+				c.reason = "MAX_STREAM_DATA direction existing"
+				return .Protocol
+			}
+			b.send_limit = max(b.send_limit, credit.value)
 		} else {
 			// Stale for a closed stream. Credit for a local stream that is not
 			// open yet waits in a record until the application opens it.
 			if !stream_closed(c, credit.id) {
 				if !send_direction(c, credit.id) {
-					c.reason = "MAX_STREAM_DATA direction new"; return .Protocol
-				}; new_buf := new_record(c, credit.id); if new_buf == nil {
+					c.reason = "MAX_STREAM_DATA direction new"
+					return .Protocol
+				}
+				new_buf := new_record(c, credit.id)
+				if new_buf == nil {
 					return .Capacity
-				}; new_buf.send_limit = credit.value
+				}
+				new_buf.send_limit = credit.value
 			}
 		}
 	}
@@ -1482,13 +1557,16 @@ apply_parsed :: proc(c: ^Connection, level: quic.Encryption_Level, parsed: Parse
 		c.peer_uni_streams = max(c.peer_uni_streams, parsed.max_streams_uni_value)
 	}
 	if parsed.crypto {
-        if level==.One_RTT {if e:=post_handshake_received(c,parsed);e!=.None{return e}} else {
-		if quic.handshake_ingest_crypto(&c.hs, level, parsed.crypto_off, parsed.crypto_data) !=
-		   .None {
-			fail(c, "crypto")
-			return .Handshake
+		if level == .One_RTT {
+			if e := post_handshake_received(c, parsed); e != .None {
+				return e
+			}
+		} else {
+			if quic.handshake_ingest_crypto(&c.hs, level, parsed.crypto_off, parsed.crypto_data) != .None {
+				fail(c, "crypto")
+				return .Handshake
+			}
 		}
-        }
 	}
 
 	if parsed.reset {
@@ -1498,21 +1576,28 @@ apply_parsed :: proc(c: ^Connection, level: quic.Encryption_Level, parsed: Parse
 			return err
 		}
 		if !closed {
-			if e := harness.stream_receive_reset(&c.model, parsed.reset_id, parsed.reset_final);
-			   e != .None {
+			if e := harness.stream_receive_reset(&c.model, parsed.reset_id, parsed.reset_final); e != .None {
 				return map_harness(e)
 			}
-			buf.recv_reset = true;buf.recv_reset_error=parsed.reset_error; buf.recv_final = parsed.reset_final
-			buf.recv_n = 0; buf.recv_held = 0; win_clear(c, buf, .Recv)
+			buf.recv_reset = true
+			buf.recv_reset_error = parsed.reset_error
+			buf.recv_final = parsed.reset_final
+			buf.recv_n = 0
+			buf.recv_held = 0
+			win_clear(c, buf, .Recv)
 		}
 	}
 	if parsed.stop && !stream_closed(c, parsed.stop_id) {
 		if !send_direction(c, parsed.stop_id) || find_buf(c, parsed.stop_id) == nil {
-			c.reason = "STOP_SENDING direction"; return .Protocol
+			c.reason = "STOP_SENDING direction"
+			return .Protocol
 		}
 		if buf := find_buf(c, parsed.stop_id); buf != nil {
-			buf.stop = true;buf.received_stop_error=parsed.stop_error
-            if !buf.reset {buf.reset_error=parsed.stop_error}
+			buf.stop = true
+			buf.received_stop_error = parsed.stop_error
+			if !buf.reset {
+				buf.reset_error = parsed.stop_error
+			}
 			buf.reset = true
 			buf.reset_final = buf.send_base + u64(buf.n)
 			_ = harness.stream_send_reset(&c.model, buf.id, buf.reset_final)
@@ -1520,7 +1605,8 @@ apply_parsed :: proc(c: ^Connection, level: quic.Encryption_Level, parsed: Parse
 	}
 	if parsed.handshake_done {
 		if c.role != .Client {
-			c.reason = "HANDSHAKE_DONE direction"; return .Protocol
+			c.reason = "HANDSHAKE_DONE direction"
+			return .Protocol
 		}
 		// The peer has authenticated the entire client flight. Stop pending
 		// CRYPTO replay before discarding its packet space, otherwise a large
@@ -1589,7 +1675,7 @@ send_crypto :: proc(
 	frame: [MAX_DATAGRAM]u8
 	at := 0
 	aok: bool
-	at, aok = encode_ack_if(c,frame[:], at, req)
+	at, aok = encode_ack_if(c, frame[:], at, req)
 	if !aok {
 		return 0, .Protocol
 	}
@@ -1632,7 +1718,7 @@ send_done :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 	}
 	attach_ack(c, &req, .Application)
 	frame: [64]u8
-	at, ok := encode_ack_if(c,frame[:], 0, req)
+	at, ok := encode_ack_if(c, frame[:], 0, req)
 	if !ok {
 		return 0, .Protocol
 	}
@@ -1646,7 +1732,8 @@ send_done :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 		return 0, err
 	}
 	if !record_tx(c, {pn = pn, done = true}) {
-		fail(c, "retention journal full"); return 0, .Failed
+		fail(c, "retention journal full")
+		return 0, .Failed
 	}
 	c.done_sent = true
 	c.force_probe = false
@@ -1680,7 +1767,7 @@ send_ping_in :: proc(c: ^Connection, now: i64, dst: []u8, space: harness.Space) 
 	}
 	attach_ack(c, &req, space)
 	frame: [64]u8
-	at, ok := encode_ack_if(c,frame[:], 0, req)
+	at, ok := encode_ack_if(c, frame[:], 0, req)
 	if !ok {
 		return 0, .Protocol
 	}
@@ -1702,7 +1789,7 @@ send_ping_in :: proc(c: ^Connection, now: i64, dst: []u8, space: harness.Space) 
 @(private)
 send_close :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 	space := harness.Space.Initial
-	if c.close_application||c.model.handshake_confirmed {
+	if c.close_application || c.model.handshake_confirmed {
 		space = .Application
 	} else if c.model.handshake_armed {
 		space = .Handshake
@@ -1713,7 +1800,13 @@ send_close :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error) {
 	}
 	frame: [32]u8
 	at, ok := encode_close(frame[:], 0)
- if c.close_application {frame[0]=0x1d;at,ok=put_varint(frame[:],1,c.close_error);if ok {at,ok=put_varint(frame[:],at,0)}}
+	if c.close_application {
+		frame[0] = 0x1d
+		at, ok = put_varint(frame[:], 1, c.close_error)
+		if ok {
+			at, ok = put_varint(frame[:], at, 0)
+		}
+	}
 	if !ok {
 		return 0, .Protocol
 	}
@@ -1747,7 +1840,7 @@ send_ack_only :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, bool)
 			ack_smallest = lo,
 		}
 		frame: [64]u8
-		at, ok := encode_transport_ack(c,frame[:],0,int(space),hi,lo)
+		at, ok := encode_transport_ack(c, frame[:], 0, int(space), hi, lo)
 		if !ok {
 			return 0, .Protocol, true
 		}
@@ -1774,11 +1867,11 @@ attach_ack :: proc(c: ^Connection, req: ^harness.Emit, space: harness.Space) {
 }
 
 @(private)
-encode_ack_if :: proc(c:^Connection,dst: []u8, at: int, req: harness.Emit) -> (int, bool) {
+encode_ack_if :: proc(c: ^Connection, dst: []u8, at: int, req: harness.Emit) -> (int, bool) {
 	if !req.attach_ack {
 		return at, true
 	}
-	return encode_transport_ack(c,dst,at,int(req.space),req.ack_largest,req.ack_smallest)
+	return encode_transport_ack(c, dst, at, int(req.space), req.ack_largest, req.ack_smallest)
 }
 
 @(private)
@@ -1793,8 +1886,12 @@ seal_and_emit :: proc(
 	int,
 	Error,
 ) {
- if early(c){return early_seal_and_emit(c,now,dst,req,content)}
- if req.space==.Application&&c.migration.enabled&&c.migration.peer_blocked&&!c.migration.peer_override {return 0,.Not_Ready}
+	if early(c) {
+		return early_seal_and_emit(c, now, dst, req, content)
+	}
+	if req.space == .Application && c.migration.enabled && c.migration.peer_blocked && !c.migration.peer_override {
+		return 0, .Not_Ready
+	}
 	if c.model.spaces[int(req.space)].discarded {
 		return 0, .Discarded
 	}
@@ -1847,11 +1944,7 @@ seal_and_emit :: proc(
 		}
 		plain_len = next
 	}
-	if !fitted ||
-	   total != goal ||
-	   total > c.max_datagram ||
-	   total > len(dst) ||
-	   total > MAX_DATAGRAM {
+	if !fitted || total != goal || total > c.max_datagram || total > len(dst) || total > MAX_DATAGRAM {
 		if total > c.max_datagram || total > len(dst) || total > MAX_DATAGRAM {
 			return 0, .Capacity
 		}
@@ -1917,8 +2010,7 @@ seal_and_emit :: proc(
 	if serr != .None || sealed != plain_len + 16 {
 		return 0, .Handshake
 	}
-	if quic.handshake_header_protection_apply(&c.hs, packet[:total], level, c.peer_cid_len) !=
-	   .None {
+	if quic.handshake_header_protection_apply(&c.hs, packet[:total], level, c.peer_cid_len) != .None {
 		return 0, .Handshake
 	}
 	sent := req
@@ -1927,17 +2019,31 @@ seal_and_emit :: proc(
 	n, err := harness.emit(&c.model, now, discard[:], sent)
 	if err != .None {
 		c.reason = "harness emit"
-		#partial switch err {case .Congestion_Limited:c.reason="harness congestion";case .Datagram_Too_Small:c.reason="harness datagram size";case .Invalid_Input:c.reason="harness invalid input";case .Protocol:c.reason="harness protocol"}
+		#partial switch err {case .Congestion_Limited:
+			c.reason = "harness congestion"
+			case .Datagram_Too_Small:
+			c.reason = "harness datagram size"
+			case .Invalid_Input:
+			c.reason = "harness invalid input"
+			case .Protocol:
+			c.reason = "harness protocol"
+		}
 		return 0, map_harness(err)
 	}
 	if n != total {
 		fail(c, "size")
 		return 0, .Protocol
 	}
-	c.ecn.output=ecn.mark(&c.ecn.sender)
- ecn.sent(&c.ecn.sender,int(req.space),c.ecn.output)
- c.output_eliciting=false
- for &p in c.model.packets[int(req.space)] {if p.active&&p.number==full {p.ecn_mark=u8(c.ecn.output);c.output_eliciting=p.ack_eliciting;break}}
+	c.ecn.output = ecn.mark(&c.ecn.sender)
+	ecn.sent(&c.ecn.sender, int(req.space), c.ecn.output)
+	c.output_eliciting = false
+	for &p in c.model.packets[int(req.space)] {
+		if p.active && p.number == full {
+			p.ecn_mark = u8(c.ecn.output)
+			c.output_eliciting = p.ack_eliciting
+			break
+		}
+	}
 	copy(dst[:total], packet[:total])
 	_ = stream_off
 	return total, .None

@@ -13,6 +13,7 @@ Metadata :: struct {
 	query:                      ^budget.Scope,
 	attempts, fail_at, queries: int,
 }
+
 metadata_allocator :: proc(
 	data: rawptr,
 	mode: mem.Allocator_Mode,
@@ -26,22 +27,15 @@ metadata_allocator :: proc(
 ) {
 	state := cast(^Metadata)data
 	if state.query != nil {
-		_, error := budget.snapshot(state.query^); assert(error == .None)
+		_, error := budget.snapshot(state.query^)
+		assert(error == .None)
 		state.queries += 1
 	}
 	if size > 0 && (mode == .Alloc || mode == .Alloc_Non_Zeroed) {
 		state.attempts += 1
 		if state.attempts == state.fail_at do return nil, .Out_Of_Memory
 	}
-	return state.backing.procedure(
-		state.backing.data,
-		mode,
-		size,
-		alignment,
-		old_memory,
-		old_size,
-		location,
-	)
+	return state.backing.procedure(state.backing.data, mode, size, alignment, old_memory, old_size, location)
 }
 
 @(test)
@@ -59,13 +53,16 @@ metadata_failure_rolls_back_and_backing_callbacks_can_query_the_hierarchy :: pro
 	testing.expect_value(t, failed, .Allocation_Failed)
 	testing.expect_value(t, track.current_memory_allocated, i64(0))
 	state.fail_at = 0
-	root, error := budget.create_root({10, 1, 1}, allocator); assert(error == .None)
-	state.query = &root; state.fail_at = state.attempts + 1
+	root, error := budget.create_root({10, 1, 1}, allocator)
+	assert(error == .None)
+	state.query = &root
+	state.fail_at = state.attempts + 1
 	_, child_failed := budget.create_child(root, {10, 1, 1})
 	testing.expect_value(t, child_failed, .Allocation_Failed)
 	testing.expect_value(t, view(root).scope_nodes, u64(1))
 	state.fail_at = 0
-	child, created := budget.create_child(root, {10, 1, 1}); assert(created == .None)
+	child, created := budget.create_child(root, {10, 1, 1})
+	assert(created == .None)
 	testing.expect_value(t, view(root).scope_nodes, u64(2))
 	budget.release_scope(&child)
 	assert(budget.close(root) == .None)
@@ -83,6 +80,7 @@ Concurrent :: struct {
 	scope: budget.Scope,
 	done:  ^int,
 }
+
 concurrent_charges :: proc(state: ^Concurrent) {
 	for _ in 0 ..< 1000 {
 		lease, error := budget.reserve(state.scope, {4, 1, 1}, .Queued)
@@ -103,9 +101,12 @@ concurrent_resource_vectors_and_job_phases_remain_consistent :: proc(t: ^testing
 	defer mem.tracking_allocator_destroy(&track)
 	root, error := budget.create_root({16, 4, 4}, mem.tracking_allocator(&track))
 	assert(error == .None)
-	states: [4]Concurrent; workers: [4]^thread.Thread; done: int
+	states: [4]Concurrent
+	workers: [4]^thread.Thread
+	done: int
 	for &state, i in states {
-		child, created := budget.create_child(root, {4, 1, 1}); assert(created == .None)
+		child, created := budget.create_child(root, {4, 1, 1})
+		assert(created == .None)
 		state.scope, state.done = child, &done
 		workers[i] = thread.create_and_start_with_poly_data(&states[i], concurrent_charges)
 		assert(workers[i] != nil)
@@ -131,6 +132,7 @@ Rebinding :: struct {
 	lease:         budget.Lease,
 	done:          ^int,
 }
+
 rebind_between_siblings :: proc(state: ^Rebinding) {
 	assert(budget.set_job_phase(&state.lease, .Running) == .None)
 	for _ in 0 ..< 1000 {
@@ -147,16 +149,22 @@ rebind_between_siblings :: proc(state: ^Rebinding) {
 @(test)
 opposite_sibling_rebinds_keep_common_ancestor_charges_exact :: proc(t: ^testing.T) {
 	testing.set_fail_timeout(t, 10 * time.Second)
-	root, e := budget.create_root({8, 2, 2}); assert(e == .None)
-	first, e1 := budget.create_child(root, {8, 2, 2}); assert(e1 == .None)
-	second, e2 := budget.create_child(root, {8, 2, 2}); assert(e2 == .None)
-	states: [2]Rebinding; workers: [2]^thread.Thread; done: int
+	root, e := budget.create_root({8, 2, 2})
+	assert(e == .None)
+	first, e1 := budget.create_child(root, {8, 2, 2})
+	assert(e1 == .None)
+	second, e2 := budget.create_child(root, {8, 2, 2})
+	assert(e2 == .None)
+	states: [2]Rebinding
+	workers: [2]^thread.Thread
+	done: int
 	for &state, i in states {
 		state.first, state.second, state.done = first, second, &done
 		initial := first if i == 0 else second
 		lease, accepted := budget.reserve(initial, {4, 1, 1}, .Queued)
 		assert(accepted == .None)
-		state.lease = lease; lease = {}
+		state.lease = lease
+		lease = {}
 	}
 	for i in 0 ..< len(states) {
 		workers[i] = thread.create_and_start_with_poly_data(&states[i], rebind_between_siblings)
@@ -172,5 +180,7 @@ opposite_sibling_rebinds_keep_common_ancestor_charges_exact :: proc(t: ^testing.
 	for worker in workers {thread.join(worker); thread.destroy(worker)}
 	testing.expect_value(t, view(root).used, budget.Usage{})
 	testing.expect_value(t, view(root).peak.bytes, u64(8))
-	budget.release_scope(&first); budget.release_scope(&second); budget.release_scope(&root)
+	budget.release_scope(&first)
+	budget.release_scope(&second)
+	budget.release_scope(&root)
 }

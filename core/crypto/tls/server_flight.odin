@@ -28,6 +28,7 @@ Server_Flight_Stage :: enum {
 	Application_Read,
 	End,
 }
+
 Server_Flight :: struct {
 	stage:                                   Server_Flight_Stage,
 	store:                                   ^credential_store.Store,
@@ -40,9 +41,9 @@ Server_Flight :: struct {
 	// Sized by the suite's hash. The client secret stays through its Finished.
 	client_handshake_secret:                 [MAX_TRANSCRIPT_HASH_SIZE]u8,
 	server_handshake_secret:                 [MAX_TRANSCRIPT_HASH_SIZE]u8,
-	using transient: struct #raw_union {
+	using transient:                         struct #raw_union {
 		application: Server_Application_Secrets,
-		retry: Server_Retry,
+		retry:       Server_Retry,
 	},
 }
 
@@ -67,68 +68,100 @@ server_handshake_start_flight :: proc(
 	if !server_handshake_valid(owner) {
 		return .Invalid_Owner
 	}
-	if owner._phase != .Await_Flight ||
-	   owner._event.kind != .None ||
-	   owner._flight.stage != .None {
+	if owner._phase != .Await_Flight || owner._event.kind != .None || owner._flight.stage != .None {
 		return .Invalid_State
 	}
 	if !owner._parameters.selected {
 		e := server_parameters_select(owner, {})
-		if e != .None {server_handshake_fail(owner, e); return e}
+		if e != .None {
+			server_handshake_fail(owner, e)
+			return e
+		}
 	}
 	lease, error := credential_store.acquire(store)
 	if error.kind != .None {
-		server_handshake_fail(owner, .Credential_Failed); return .Credential_Failed
+		server_handshake_fail(owner, .Credential_Failed)
+		return .Credential_Failed
 	}
 	owner._flight.store, owner._flight.lease = store, lease
 	if credential_store.check_server_leaf(store, lease, now).kind != .None {
-		server_handshake_fail(owner, .Credential_Failed); return .Credential_Failed
+		server_handshake_fail(owner, .Credential_Failed)
+		return .Credential_Failed
 	}
-	if re:=server_resumption_prepare(owner,now);re!=.None {server_handshake_fail(owner,re);return re}
- if owner._resumed {owner._flight.stage=.Hello;return .None}
- scheme,se:=credential_store.signature_scheme(store,lease)
-	if se.kind!=.None || scheme==.None {server_handshake_fail(owner,.Credential_Failed);return .Credential_Failed}
-	if !server_hello_offer_contains(owner._hello.signature_algorithms,u16(scheme)) {server_handshake_fail(owner,.Unsupported);return .Unsupported}
-	owner._selection.signature=cast(Signature_Scheme)u16(scheme)
+	if re := server_resumption_prepare(owner, now); re != .None {
+		server_handshake_fail(owner, re)
+		return re
+	}
+	if owner._resumed {
+		owner._flight.stage = .Hello
+		return .None
+	}
+	scheme, se := credential_store.signature_scheme(store, lease)
+	if se.kind != .None || scheme == .None {
+		server_handshake_fail(owner, .Credential_Failed)
+		return .Credential_Failed
+	}
+	if !server_hello_offer_contains(owner._hello.signature_algorithms, u16(scheme)) {
+		server_handshake_fail(owner, .Unsupported)
+		return .Unsupported
+	}
+	owner._selection.signature = cast(Signature_Scheme)u16(scheme)
 	offers := owner._hello.signature_algorithms_cert
 	if len(offers) == 0 {
 		offers = owner._hello.signature_algorithms
 	}
 	count, ce := credential_store.certificate_count(store, lease)
 	if ce.kind != .None || count < 1 || count > 16 {
-		server_handshake_fail(owner, .Credential_Failed); return .Credential_Failed
+		server_handshake_fail(owner, .Credential_Failed)
+		return .Credential_Failed
 	}
 	total := 0
 	for index in 0 ..< count {
 		der, de := credential_store.certificate_der(store, lease, index)
 		metadata, me := credential_store.certificate_algorithms(store, lease, index)
 		if de.kind != .None || me.kind != .None {
-			server_handshake_fail(owner, .Credential_Failed); return .Credential_Failed
+			server_handshake_fail(owner, .Credential_Failed)
+			return .Credential_Failed
 		}
 		// Conservative chain profile: RSA PKCS1 SHA256/384/512, PSS SHA256
 		// with an RSAE issuer, or ECDSA SHA256/P-256. Signature policy is separate
 		// from the leaf's CertificateVerify key. Even roots must match here.
 		scheme := server_flight_certificate_scheme(metadata.signature)
-		if metadata.signature==.ECDSA_SHA256 || metadata.signature==.RSA_PSS {
-			issuer_index:=min(index+1,count-1)
-			issuer,ie:=credential_store.certificate_algorithms(store,lease,issuer_index)
-			if ie.kind!=.None {server_handshake_fail(owner,.Credential_Failed);return .Credential_Failed}
-			if metadata.signature==.ECDSA_SHA256 {
-				if issuer.subject_key!=.ECDSA_P256 {server_handshake_fail(owner,.Unsupported);return .Unsupported}
-			} else {
-				parameters,pe:=credential_store.certificate_pss_parameters(store,lease,index)
-				if pe.kind!=.None {server_handshake_fail(owner,.Credential_Failed);return .Credential_Failed}
-				if issuer.subject_key!=.RSA || parameters.digest!=.SHA256 || parameters.mgf_digest!=.SHA256 || parameters.salt_length!=32 {
-					server_handshake_fail(owner,.Unsupported);return .Unsupported
+		if metadata.signature == .ECDSA_SHA256 || metadata.signature == .RSA_PSS {
+			issuer_index := min(index + 1, count - 1)
+			issuer, ie := credential_store.certificate_algorithms(store, lease, issuer_index)
+			if ie.kind != .None {
+				server_handshake_fail(owner, .Credential_Failed)
+				return .Credential_Failed
+			}
+			if metadata.signature == .ECDSA_SHA256 {
+				if issuer.subject_key != .ECDSA_P256 {
+					server_handshake_fail(owner, .Unsupported)
+					return .Unsupported
 				}
-				scheme=0x0804
+			} else {
+				parameters, pe := credential_store.certificate_pss_parameters(store, lease, index)
+				if pe.kind != .None {
+					server_handshake_fail(owner, .Credential_Failed)
+					return .Credential_Failed
+				}
+				if issuer.subject_key != .RSA ||
+				   parameters.digest != .SHA256 ||
+				   parameters.mgf_digest != .SHA256 ||
+				   parameters.salt_length != 32 {
+					server_handshake_fail(owner, .Unsupported)
+					return .Unsupported
+				}
+				scheme = 0x0804
 			}
 		}
 		if scheme == 0 || !server_hello_offer_contains(offers, scheme) {
-			server_handshake_fail(owner, .Unsupported); return .Unsupported
+			server_handshake_fail(owner, .Unsupported)
+			return .Unsupported
 		}
 		if len(der) == 0 || len(der) > 0xffffff - 5 || total > 0xffffff - 4 - 5 - len(der) {
-			server_handshake_fail(owner, .Limit); return .Limit
+			server_handshake_fail(owner, .Limit)
+			return .Limit
 		}
 		total += 5 + len(der)
 	}
@@ -136,6 +169,7 @@ server_handshake_start_flight :: proc(
 	owner._flight.stage = .Hello
 	return .None
 }
+
 server_flight_certificate_scheme :: proc(algorithm: x509.Signature_Algorithm) -> u16 {
 	#partial switch algorithm {
 	case .ECDSA_SHA256:
@@ -150,28 +184,30 @@ server_flight_certificate_scheme :: proc(algorithm: x509.Signature_Algorithm) ->
 		return 0
 	}
 }
+
 server_flight_cleanup :: proc(owner: ^Server_Handshake) {
-	if server_retry_active(owner) {server_retry_clear(owner)}
+	if server_retry_active(owner) {
+		server_retry_clear(owner)
+	}
 	if owner._flight.store != nil {
 		_ = credential_store.release(owner._flight.store, &owner._flight.lease)
 	}
 	crypto.zero_explicit(&owner._flight, size_of(owner._flight))
 }
+
 server_flight_put24 :: proc(dst: []u8, value: int) {
 	dst[0], dst[1], dst[2] = u8(value >> 16), u8(value >> 8), u8(value)
 }
+
 // Explicit pointer views at stack-backed call sites preserve the copy contract:
 // publish uses borrow_bytes=false and copies bytes before returning.
-server_flight_bytes :: proc(
-	owner: ^Server_Handshake,
-	bytes: []u8,
-	initial := false,
-) -> Server_Handshake_Error {
+server_flight_bytes :: proc(owner: ^Server_Handshake, bytes: []u8, initial := false) -> Server_Handshake_Error {
 	return server_handshake_publish(
 		owner,
 		{kind = .Handshake_Bytes, level = .Initial if initial else .Handshake, bytes = bytes},
 	)
 }
+
 server_flight_secret :: proc(
 	owner: ^Server_Handshake,
 	secret: []u8,
@@ -195,14 +231,23 @@ server_flight_secret :: proc(
 // exactly once in accept, so SH/CV/Finished snapshots include accepted bytes only.
 server_flight_next :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 	f := &owner._flight
- if owner._resumption!=nil&&owner._resumption.early_accepted&&!owner._resumption.early_event_sent {
-  state:=owner._resumption
-  if !server_handshake_id(owner) {return .Identity_Exhausted}
-  state.early_event_sent = true
-  owner._event = {id = owner._next_id, kind = .Early_Traffic_Secret, level = .Application, direction = .Read, cipher = .TLS_AES_128_GCM_SHA256, secret = state.early_secret[:]}
-  return .None
- }
- switch f.stage {
+	if owner._resumption != nil && owner._resumption.early_accepted && !owner._resumption.early_event_sent {
+		state := owner._resumption
+		if !server_handshake_id(owner) {
+			return .Identity_Exhausted
+		}
+		state.early_event_sent = true
+		owner._event = {
+			id        = owner._next_id,
+			kind      = .Early_Traffic_Secret,
+			level     = .Application,
+			direction = .Read,
+			cipher    = .TLS_AES_128_GCM_SHA256,
+			secret    = state.early_secret[:],
+		}
+		return .None
+	}
+	switch f.stage {
 	case .None, .Retry_Wait:
 		return .None
 	case .Hello:
@@ -230,43 +275,45 @@ server_flight_next :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 		return server_parameters_extensions(owner)
 	case .Certificate_Request:
 		f.stage = .Certificate_Header
-		if owner._config.client_auth == nil || owner._config.client_auth.mode == .Disabled {return server_flight_next(owner)}
-		wire := [?]u8{13,0,0,15,0,0,12,0,13,0,8,0,6,8,4,4,3,8,7}
-		return server_flight_bytes(owner,mem.slice_ptr(cast(^u8)(cast(rawptr)&wire),len(wire)))
+		if owner._config.client_auth == nil || owner._config.client_auth.mode == .Disabled {
+			return server_flight_next(owner)
+		}
+		wire := [?]u8{13, 0, 0, 15, 0, 0, 12, 0, 13, 0, 8, 0, 6, 8, 4, 4, 3, 8, 7}
+		return server_flight_bytes(owner, mem.slice_ptr(cast(^u8)(cast(rawptr)&wire), len(wire)))
 	case .Certificate_Header:
-		header: [8]u8; header[0] = 11
+		header: [8]u8
+		header[0] = 11
 		server_flight_put24(header[1:4], 4 + f.certificate_bytes)
 		server_flight_put24(header[5:8], f.certificate_bytes)
 		f.stage = .Certificate_Entry
-		return server_flight_bytes(owner, mem.slice_ptr(cast(^u8)(cast(rawptr)&header),len(header)))
+		return server_flight_bytes(owner, mem.slice_ptr(cast(^u8)(cast(rawptr)&header), len(header)))
 	case .Certificate_Entry:
 		der, e := credential_store.certificate_der(f.store, f.lease, f.index)
 		if e.kind != .None {
 			return .Credential_Failed
 		}
-		header: [3]u8; server_flight_put24(header[:], len(der))
-		f.offset = 0; f.stage = .Certificate_DER
-		return server_flight_bytes(owner, mem.slice_ptr(cast(^u8)(cast(rawptr)&header),len(header)))
+		header: [3]u8
+		server_flight_put24(header[:], len(der))
+		f.offset = 0
+		f.stage = .Certificate_DER
+		return server_flight_bytes(owner, mem.slice_ptr(cast(^u8)(cast(rawptr)&header), len(header)))
 	case .Certificate_DER:
 		der, e := credential_store.certificate_der(f.store, f.lease, f.index)
 		if e.kind != .None {
 			return .Credential_Failed
 		}
 		end := min(len(der), f.offset + SERVER_HANDSHAKE_OUTPUT_CAP)
-		chunk := der[f.offset:end]; f.offset = end
+		chunk := der[f.offset:end]
+		f.offset = end
 		if end == len(der) {
 			f.stage = .Certificate_Extensions
 		}
-		return server_handshake_publish(
-			owner,
-			{kind = .Handshake_Bytes, level = .Handshake, bytes = chunk},
-			true,
-		)
+		return server_handshake_publish(owner, {kind = .Handshake_Bytes, level = .Handshake, bytes = chunk}, true)
 	case .Certificate_Extensions:
 		f.index += 1
 		f.stage = .Verify if f.index == f.count else .Certificate_Entry
 		wire: [2]u8
-		return server_flight_bytes(owner, mem.slice_ptr(cast(^u8)(cast(rawptr)&wire),len(wire)))
+		return server_flight_bytes(owner, mem.slice_ptr(cast(^u8)(cast(rawptr)&wire), len(wire)))
 	case .Verify:
 		wire: [520]u8
 		defer crypto.zero_explicit(&wire, size_of(wire))
@@ -277,16 +324,19 @@ server_flight_next :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 		signed := certificate_verify_content(signed_storage[:], digest, true)
 		// Hello views/selection were erased after ServerHello. The live lease
 		// identifies the same admitted generation even after store rotation.
-		scheme,se:=credential_store.signature_scheme(f.store,f.lease)
-		if se.kind!=.None {return .Signing_Failed}
+		scheme, se := credential_store.signature_scheme(f.store, f.lease)
+		if se.kind != .None {
+			return .Signing_Failed
+		}
 		n, e := credential_store.sign_sha256(f.store, f.lease, scheme, signed, wire[8:])
 		if e.kind != .None {
 			return .Signing_Failed
 		}
-		wire[0] = 15; server_flight_put24(wire[1:4], 4 + n)
-		wire[4], wire[5], wire[6], wire[7] = u8(u16(scheme)>>8), u8(scheme), u8(n >> 8), u8(n)
+		wire[0] = 15
+		server_flight_put24(wire[1:4], 4 + n)
+		wire[4], wire[5], wire[6], wire[7] = u8(u16(scheme) >> 8), u8(scheme), u8(n >> 8), u8(n)
 		f.stage = .Finished
-		return server_flight_bytes(owner, mem.slice_ptr(cast(^u8)(cast(rawptr)&wire),8 + n))
+		return server_flight_bytes(owner, mem.slice_ptr(cast(^u8)(cast(rawptr)&wire), 8 + n))
 	case .Finished:
 		wire: [MAX_FINISHED_MESSAGE_SIZE]u8
 		defer crypto.zero_explicit(&wire, size_of(wire))
@@ -320,21 +370,29 @@ server_flight_next :: proc(owner: ^Server_Handshake) -> Server_Handshake_Error {
 		return server_flight_secret(owner, f.application.server_traffic_secret[:size], .Write, true)
 	case .Application_Read:
 		f.stage = .End
-		return server_flight_secret(owner, f.application.client_traffic_secret[:server_flight_secret_size(f)], .Read, true)
+		return server_flight_secret(
+			owner,
+			f.application.client_traffic_secret[:server_flight_secret_size(f)],
+			.Read,
+			true,
+		)
 	case .End:
 		// Keep the admitted generation pinned through client Finished. Shared
 		// cleanup releases it on verified completion or any terminal failure.
 		crypto.zero_explicit(&f.application, size_of(f.application))
-		f.stage = .None; owner._phase = .Await_Client_Finished
+		f.stage = .None
+		owner._phase = .Await_Client_Finished
 		return .None
 	}
 	unreachable()
 }
+
 // Keep the X25519 wrapper used by deterministic fixtures.
 server_flight_hello :: proc(dst: []u8, session: []u8, public, random: [32]u8) -> int {
-	pub:=public
+	pub := public
 	return server_flight_group_hello(dst, session, .X25519, pub[:], random)
 }
+
 server_flight_group_hello :: proc(
 	dst: []u8,
 	session: []u8,
@@ -345,17 +403,26 @@ server_flight_group_hello :: proc(
 ) -> int {
 	at := 4
 	hello_put_u16(dst, &at, 0x0303)
-	for b,i in random {dst[at+i]=b}; at += 32
-	dst[at] = u8(len(session)); at += 1; copy(dst[at:], session); at += len(session)
+	for b, i in random {dst[at + i] = b}; at += 32
+	dst[at] = u8(len(session))
+	at += 1
+	copy(dst[at:], session)
+	at += len(session)
 	hello_put_u16(dst, &at, u16(cipher))
 	dst[at] = 0
 	at += 1
-	hello_put_u16(dst, &at, u16(14+len(public)))
-	hello_put_u16(dst, &at, 43); hello_put_u16(dst, &at, 2); hello_put_u16(dst, &at, 0x0304)
-	hello_put_u16(dst, &at, 51); hello_put_u16(dst, &at, u16(4+len(public))); hello_put_u16(dst, &at, u16(group))
+	hello_put_u16(dst, &at, u16(14 + len(public)))
+	hello_put_u16(dst, &at, 43)
+	hello_put_u16(dst, &at, 2)
+	hello_put_u16(dst, &at, 0x0304)
+	hello_put_u16(dst, &at, 51)
+	hello_put_u16(dst, &at, u16(4 + len(public)))
+	hello_put_u16(dst, &at, u16(group))
 	hello_put_u16(dst, &at, u16(len(public)))
-	copy(dst[at:],public); at += len(public)
-	dst[0] = 2; server_flight_put24(dst[1:4], at - 4)
+	copy(dst[at:], public)
+	at += len(public)
+	dst[0] = 2
+	server_flight_put24(dst[1:4], at - 4)
 	return at
 }
 
@@ -416,7 +483,12 @@ server_flight_key_exchange :: proc(
 		classical_peer = peer_share[kem_key_size:]
 		classical_share = share[kem_ciphertext_size:]
 
-		if !mlkem.encaps(.ML_KEM_768, peer_share[:kem_key_size], secret[:mlkem.SHARED_SECRET_SIZE], share[:kem_ciphertext_size]) {
+		if !mlkem.encaps(
+			.ML_KEM_768,
+			peer_share[:kem_key_size],
+			secret[:mlkem.SHARED_SECRET_SIZE],
+			share[:kem_ciphertext_size],
+		) {
 			return nil, nil, false
 		}
 	}
@@ -434,7 +506,11 @@ server_flight_key_exchange :: proc(
 
 // Emits ServerHello for the selected suite and group, then runs upstream's
 // schedule to the handshake traffic secrets over the transcript through it.
-server_flight_prepare_ecdh :: proc(owner: ^Server_Handshake, private: ^ecdh.Private_Key, random: [32]u8) -> Server_Handshake_Error {
+server_flight_prepare_ecdh :: proc(
+	owner: ^Server_Handshake,
+	private: ^ecdh.Private_Key,
+	random: [32]u8,
+) -> Server_Handshake_Error {
 	f := &owner._flight
 	group, cipher := owner._selection.group, owner._selection.cipher
 	algorithm := CIPHER_SUITE_HASH[cipher]
@@ -444,7 +520,13 @@ server_flight_prepare_ecdh :: proc(owner: ^Server_Handshake, private: ^ecdh.Priv
 	defer crypto.zero_explicit(&shared_storage, size_of(shared_storage))
 
 	share_storage: [MAX_KEY_SHARE_SIZE]u8
-	share, shared, agreed := server_flight_key_exchange(group, private, owner._selection.peer_key_share, share_storage[:], shared_storage[:])
+	share, shared, agreed := server_flight_key_exchange(
+		group,
+		private,
+		owner._selection.peer_key_share,
+		share_storage[:],
+		shared_storage[:],
+	)
 	if !agreed {
 		return .Malformed
 	}

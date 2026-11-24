@@ -7,7 +7,10 @@ import "core:testing"
 
 @(private)
 layout_test_hello :: proc(conn: ^Conn, extended: bool) -> int {
-	hello := Client_Hello {server_name = "fixture.example", alpn_protocols = {"http/1.1"}}
+	hello := Client_Hello {
+		server_name    = "fixture.example",
+		alpn_protocols = {"http/1.1"},
+	}
 	for &value, i in hello.random {value = byte(i)}
 	size, error := client_hello_encode(conn.client_hello[:], hello)
 	assert(error == .None)
@@ -30,22 +33,29 @@ layout_test_retry :: proc(dst: []byte, cookie: []byte) -> []byte {
 	at := 4
 	hello_put_u16(dst, &at, 0x0303)
 	for value, i in HELLO_RETRY_REQUEST_RANDOM {dst[at + i] = value}; at += 32
-	dst[at] = 0; at += 1
+	dst[at] = 0
+	at += 1
 	hello_put_u16(dst, &at, 0x1301)
-	dst[at] = 0; at += 1
+	dst[at] = 0
+	at += 1
 	hello_put_u16(dst, &at, u16(12 + len(cookie)))
-	hello_put_u16(dst, &at, 43); hello_put_u16(dst, &at, 2)
+	hello_put_u16(dst, &at, 43)
+	hello_put_u16(dst, &at, 2)
 	hello_put_u16(dst, &at, 0x0304)
-	hello_put_u16(dst, &at, 44); hello_put_u16(dst, &at, u16(2 + len(cookie)))
+	hello_put_u16(dst, &at, 44)
+	hello_put_u16(dst, &at, u16(2 + len(cookie)))
 	hello_put_u16(dst, &at, u16(len(cookie)))
-	copy(dst[at:], cookie); at += len(cookie)
-	dst[0] = 2; retry_put_u24(dst, 1, at - 4)
+	copy(dst[at:], cookie)
+	at += len(cookie)
+	dst[0] = 2
+	retry_put_u24(dst, 1, at - 4)
 	return dst[:at]
 }
 
 @(private)
 layout_test_prepare :: proc(t: ^testing.T, extended: bool) {
-	conn := new(Conn); defer free(conn)
+	conn := new(Conn)
+	defer free(conn)
 	size := layout_test_hello(conn, extended)
 	first := conn.client_hello
 	cookie := []byte{1, 2, 3, 4}
@@ -53,7 +63,8 @@ layout_test_prepare :: proc(t: ^testing.T, extended: bool) {
 	retry := layout_test_retry(retry_storage[:], cookie)
 	parsed_cookie, decode := hello_retry_request_decode(retry)
 	assert(decode == .None)
-	previous := context.allocator; context.allocator = mem.panic_allocator()
+	previous := context.allocator
+	context.allocator = mem.panic_allocator()
 	result := client_hello_retry_prepare(conn, retry, parsed_cookie)
 	context.allocator = previous
 	testing.expect_value(t, result, .None)
@@ -66,11 +77,15 @@ layout_test_prepare :: proc(t: ^testing.T, extended: bool) {
 	retry_put_u24(expected[:], 1, size + 6 + len(cookie) - 4)
 	retry_put_u16(expected[:], length_at, retry_u16(first[:], length_at) + u16(6 + len(cookie)))
 	testing.expect(t, bytes.equal(conn.retry_client_hello[:size], expected[:size]))
-	testing.expect(t, bytes.equal(conn.retry_client_hello[size:conn.retry_client_hello_size],
-		[]byte{0, 44, 0, 6, 0, 4, 1, 2, 3, 4}))
+	testing.expect(
+		t,
+		bytes.equal(conn.retry_client_hello[size:conn.retry_client_hello_size], []byte{0, 44, 0, 6, 0, 4, 1, 2, 3, 4}),
+	)
 	hash: [32]byte
 	digest: sha2.Context_256
-	sha2.init_256(&digest); sha2.update(&digest, first[:size]); sha2.final(&digest, hash[:])
+	sha2.init_256(&digest)
+	sha2.update(&digest, first[:size])
+	sha2.final(&digest, hash[:])
 	testing.expect_value(t, conn.retry_transcript_size, 36 + len(retry))
 	testing.expect(t, bytes.equal(conn.retry_transcript[:4], []byte{254, 0, 0, 32}))
 	testing.expect(t, bytes.equal(conn.retry_transcript[4:36], hash[:]))
@@ -95,14 +110,13 @@ layout_test_outputs_seed :: proc(conn: ^Conn) {
 }
 
 @(private)
-layout_test_reject_preserves :: proc(
-	t: ^testing.T, conn: ^Conn, retry, cookie: []byte, expected: Server_Hello_Error,
-) {
+layout_test_reject_preserves :: proc(t: ^testing.T, conn: ^Conn, retry, cookie: []byte, expected: Server_Hello_Error) {
 	first := conn.client_hello
 	hello_output, transcript_output := conn.retry_client_hello, conn.retry_transcript
 	hello_size, transcript_size := conn.retry_client_hello_size, conn.retry_transcript_size
 	phase := conn.phase
-	previous := context.allocator; context.allocator = mem.panic_allocator()
+	previous := context.allocator
+	context.allocator = mem.panic_allocator()
 	result := client_hello_retry_prepare(conn, retry, cookie)
 	context.allocator = previous
 	testing.expect_value(t, result, expected)
@@ -116,7 +130,8 @@ layout_test_reject_preserves :: proc(
 
 @(test)
 client_hello_layout_checks_all_prefixes_and_variable_vectors :: proc(t: ^testing.T) {
-	conn := new(Conn); defer free(conn)
+	conn := new(Conn)
+	defer free(conn)
 	for extended in ([2]bool{false, true}) {
 		size := layout_test_hello(conn, extended)
 		before := conn.client_hello
@@ -135,7 +150,8 @@ client_hello_layout_checks_all_prefixes_and_variable_vectors :: proc(t: ^testing
 	size := layout_test_hello(conn, false)
 	copy(conn.client_hello[40:size + 1], conn.client_hello[39:size])
 	conn.client_hello[38], conn.client_hello[39] = 1, 0x7e
-	size += 1; retry_put_u24(conn.client_hello[:], 1, size - 4)
+	size += 1
+	retry_put_u24(conn.client_hello[:], 1, size - 4)
 	conn.client_hello_size = size
 	layout, valid := client_hello_layout_decode(conn.client_hello[:size])
 	testing.expect(t, valid)
@@ -147,18 +163,33 @@ client_hello_layout_checks_all_prefixes_and_variable_vectors :: proc(t: ^testing
 
 @(test)
 client_hello_retry_rejects_malformed_layout_without_writing :: proc(t: ^testing.T) {
-	conn := new(Conn); defer free(conn)
-	for fault in ([]struct{at: int, value: byte}{
-		{0, 2}, {4, 2}, {38, 33}, {39, 0xff}, {40, 0}, {40, 1},
-		{43, 0}, {43, 2}, {44, 1}, {45, 0xff}, {46, 0}, {49, 0xff},
-	}) {
+	conn := new(Conn)
+	defer free(conn)
+	for fault in ([]struct {
+			at:    int,
+			value: byte,
+		} {
+			{0, 2},
+			{4, 2},
+			{38, 33},
+			{39, 0xff},
+			{40, 0},
+			{40, 1},
+			{43, 0},
+			{43, 2},
+			{44, 1},
+			{45, 0xff},
+			{46, 0},
+			{49, 0xff},
+		}) {
 		layout_test_hello(conn, false)
 		conn.client_hello[fault.at] = fault.value
 		layout_test_outputs_seed(conn)
 		layout_test_reject_preserves(t, conn, nil, []byte{1}, .Invalid_Retry_Client_Hello)
 	}
 	for invalid_size in ([3]int{-1, 0, MAX_CLIENT_HELLO_SIZE + 1}) {
-		layout_test_hello(conn, false); conn.client_hello_size = invalid_size
+		layout_test_hello(conn, false)
+		conn.client_hello_size = invalid_size
 		layout_test_outputs_seed(conn)
 		layout_test_reject_preserves(t, conn, nil, []byte{1}, .Invalid_Retry_Client_Hello)
 	}
@@ -176,7 +207,8 @@ layout_test_append_extension :: proc(conn: ^Conn, extension: []byte) {
 
 @(test)
 client_hello_retry_rejects_duplicate_truncated_and_existing_cookie_extensions :: proc(t: ^testing.T) {
-	conn := new(Conn); defer free(conn)
+	conn := new(Conn)
+	defer free(conn)
 	layout_test_hello(conn, false)
 	// Duplicate an entire existing SNI extension at a different offset.
 	first_size := 4 + int(hello_u16(conn.client_hello[:], 49))
@@ -197,8 +229,10 @@ client_hello_retry_rejects_duplicate_truncated_and_existing_cookie_extensions ::
 
 @(test)
 client_hello_retry_cookie_limits_and_repeated_retry_preserve_outputs :: proc(t: ^testing.T) {
-	conn := new(Conn); defer free(conn)
-	layout_test_hello(conn, false); layout_test_outputs_seed(conn)
+	conn := new(Conn)
+	defer free(conn)
+	layout_test_hello(conn, false)
+	layout_test_outputs_seed(conn)
 	layout_test_reject_preserves(t, conn, nil, nil, .Invalid_Retry_Cookie)
 	large_cookie: [MAX_RETRY_COOKIE_SIZE + 1]byte
 	layout_test_reject_preserves(t, conn, nil, large_cookie[:], .Invalid_Retry_Cookie)
@@ -213,10 +247,12 @@ client_hello_retry_cookie_limits_and_repeated_retry_preserve_outputs :: proc(t: 
 
 @(test)
 client_hello_retry_rejects_input_output_aliases_and_accepts_read_only_aliases :: proc(t: ^testing.T) {
-	conn := new(Conn); defer free(conn)
+	conn := new(Conn)
+	defer free(conn)
 	for destination in 0 ..< 2 {
 		for offset in ([2]int{0, 3}) {
-			layout_test_hello(conn, false); layout_test_outputs_seed(conn)
+			layout_test_hello(conn, false)
+			layout_test_outputs_seed(conn)
 			output := conn.retry_client_hello[:]
 			if destination == 1 do output = conn.retry_transcript[:]
 			layout_test_reject_preserves(t, conn, nil, output[offset:offset + 2], .Invalid_Retry_Client_Hello)

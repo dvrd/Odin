@@ -35,10 +35,13 @@ create_child :: proc(parent: Scope, limits: Limits) -> (Scope, Error) {
 		result = .Overflow
 	}
 	if result != .None {
-		sync.unlock(&root.mu); free(node, root.allocator); return {}, result
+		sync.unlock(&root.mu)
+		free(node, root.allocator)
+		return {}, result
 	}
 	source.references += 1
-	root.scope_nodes += 1; root.scope_metadata_bytes += size_of(Node)
+	root.scope_nodes += 1
+	root.scope_metadata_bytes += size_of(Node)
 	sync.unlock(&root.mu)
 	return {node}, .None
 }
@@ -47,7 +50,8 @@ retain_scope :: proc(source: Scope) -> (Scope, Error) {
 	node := source._node
 	if node == nil do return {}, .Invalid_Handle
 	root := node.root
-	sync.lock(&root.mu); defer sync.unlock(&root.mu)
+	sync.lock(&root.mu)
+	defer sync.unlock(&root.mu)
 	if node.references == max(u64) do return {}, .Overflow
 	node.references += 1
 	return source, .None
@@ -57,18 +61,22 @@ retain_scope :: proc(source: Scope) -> (Scope, Error) {
 // destructor executes under the hierarchy lock, including cascading parents.
 release_scope :: proc(owner: ^Scope) {
 	if owner == nil do return
-	node := owner._node; owner^ = {}
+	node := owner._node
+	owner^ = {}
 	if node == nil do return
 	root := node.root
-	retired: [MAX_DEPTH]^Node; count := 0
+	retired: [MAX_DEPTH]^Node
+	count := 0
 	sync.lock(&root.mu)
 	for node != nil {
 		assert(node.references > 0)
 		node.references -= 1
 		if node.references != 0 do break
 		assert(node.used == (Usage{}))
-		retired[count] = node; count += 1
-		root.scope_nodes -= 1; root.scope_metadata_bytes -= size_of(Node)
+		retired[count] = node
+		count += 1
+		root.scope_nodes -= 1
+		root.scope_metadata_bytes -= size_of(Node)
 		node = node.parent
 	}
 	sync.unlock(&root.mu)
@@ -78,7 +86,9 @@ release_scope :: proc(owner: ^Scope) {
 close :: proc(scope: Scope) -> Error {
 	node := scope._node
 	if node == nil do return .Invalid_Handle
-	sync.lock(&node.root.mu); node.closed = true; sync.unlock(&node.root.mu)
+	sync.lock(&node.root.mu)
+	node.closed = true
+	sync.unlock(&node.root.mu)
 	return .None
 }
 
@@ -86,7 +96,8 @@ snapshot :: proc(scope: Scope) -> (Snapshot, Error) {
 	node := scope._node
 	if node == nil do return {}, .Invalid_Handle
 	root := node.root
-	sync.lock(&root.mu); defer sync.unlock(&root.mu)
+	sync.lock(&root.mu)
+	defer sync.unlock(&root.mu)
 	return {
 			limits = node.limits,
 			used = node.used,
@@ -101,9 +112,11 @@ snapshot :: proc(scope: Scope) -> (Snapshot, Error) {
 }
 
 same_scope :: proc(a, b: Scope) -> bool {return a._node != nil && a._node == b._node}
+
 same_root :: proc(a, b: Scope) -> bool {
 	return a._node != nil && b._node != nil && a._node.root == b._node.root
 }
+
 // True only when required is charged itself or an ancestor of charged. Merely
 // sharing a root is insufficient: sibling/descendant admission requires rebind.
 covers :: proc(charged, required: Scope) -> bool {
@@ -119,6 +132,7 @@ in_path :: proc(needle, start: ^Node) -> bool {
 	}
 	return false
 }
+
 @(private)
 path_closed :: proc(start: ^Node) -> bool {
 	node := start

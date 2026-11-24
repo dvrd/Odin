@@ -3,14 +3,7 @@ package net
 import "core:sys/posix"
 
 @(private)
-_begin_tcp_connect :: proc(
-	endpoint: Endpoint,
-	options: TCP_Options,
-) -> (
-	TCP_Socket,
-	bool,
-	Network_Error,
-) {
+_begin_tcp_connect :: proc(endpoint: Endpoint, options: TCP_Options) -> (TCP_Socket, bool, Network_Error) {
 	any_socket, create_error := create_socket(family_from_endpoint(endpoint), .TCP)
 	if create_error != .None {
 		return 0, false, create_error
@@ -25,17 +18,14 @@ _begin_tcp_connect :: proc(
 	}
 	_ = set_option(socket, .TCP_Nodelay, options.no_delay)
 	address := _endpoint_to_sockaddr(endpoint)
-	if posix.connect(
-		   posix.FD(socket),
-		   cast(^posix.sockaddr)&address,
-		   posix.socklen_t(address.ss_len),
-	   ) ==
-	   .OK {
-		success = true; return socket, true, nil
+	if posix.connect(posix.FD(socket), cast(^posix.sockaddr)&address, posix.socklen_t(address.ss_len)) == .OK {
+		success = true
+		return socket, true, nil
 	}
 	cause := posix.errno()
 	if cause == .EINPROGRESS || cause == .EINTR || cause == .EALREADY {
-		success = true; return socket, false, nil
+		success = true
+		return socket, false, nil
 	}
 	return 0, false, _dial_error()
 }
@@ -65,7 +55,8 @@ _poll_tcp_connect :: proc(socket: TCP_Socket) -> (bool, Network_Error) {
 		return false, nil
 	}
 	if pending != .NONE {
-		posix.errno(pending); return false, _dial_error()
+		posix.errno(pending)
+		return false, _dial_error()
 	}
 	return true, nil
 }

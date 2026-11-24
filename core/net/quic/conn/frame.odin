@@ -10,20 +10,30 @@ Stream_Frame :: struct {
 	data:       []u8,
 	fin:        bool,
 }
+
 Credit_Frame :: struct {
 	id, value: u64,
 }
+
 CID_Frame :: struct {
- sequence, retire_prior_to:u64,
- id:[]u8,
- token:[16]u8,
+	sequence, retire_prior_to: u64,
+	id:                        []u8,
+	token:                     [16]u8,
 }
-Path_Frame :: struct { response:bool, token:[8]u8 }
+
+Path_Frame :: struct {
+	response: bool,
+	token:    [8]u8,
+}
+
 Parsed :: struct {
- new_token:bool,
- new_ids:[16]CID_Frame, new_id_n:int,
- retire_ids:[16]u64, retire_id_n:int,
- paths:[16]Path_Frame, path_n:int,
+	new_token:                                     bool,
+	new_ids:                                       [16]CID_Frame,
+	new_id_n:                                      int,
+	retire_ids:                                    [16]u64,
+	retire_id_n:                                   int,
+	paths:                                         [16]Path_Frame,
+	path_n:                                        int,
 	streams:                                       [32]Stream_Frame,
 	stream_n:                                      int,
 	credits:                                       [32]Credit_Frame,
@@ -32,7 +42,8 @@ Parsed :: struct {
 	path_challenge:                                bool,
 	path_token:                                    [8]u8,
 	ack:                                           bool,
- ack_ecn:bool, ecn_counts:ecn.Counts,
+	ack_ecn:                                       bool,
+	ecn_counts:                                    ecn.Counts,
 	ack_largest, ack_smallest:                     u64,
 	ack_ranges:                                    [65][2]u64,
 	ack_n:                                         int,
@@ -48,9 +59,9 @@ Parsed :: struct {
 	stream_data:                                   []u8,
 	fin:                                           bool,
 	reset:                                         bool,
-	reset_id, reset_final,reset_error:                         u64,
+	reset_id, reset_final, reset_error:            u64,
 	stop:                                          bool,
-	stop_id,stop_error:                                       u64,
+	stop_id, stop_error:                           u64,
 	max_data:                                      bool,
 	max_data_v:                                    u64,
 	close:                                         bool,
@@ -123,16 +134,7 @@ encode_crypto :: proc(dst: []u8, start: int, offset: u64, data: []u8) -> (int, b
 	return at + len(data), true
 }
 
-encode_stream :: proc(
-	dst: []u8,
-	start: int,
-	id, offset: u64,
-	data: []u8,
-	fin: bool,
-) -> (
-	int,
-	bool,
-) {
+encode_stream :: proc(dst: []u8, start: int, id, offset: u64, data: []u8, fin: bool) -> (int, bool) {
 	at := start
 	if at >= len(dst) {
 		return at, false
@@ -160,7 +162,7 @@ encode_stream :: proc(
 	return at + len(data), true
 }
 
-encode_reset :: proc(dst: []u8, start: int, id, final_size: u64,code:u64=0) -> (int, bool) {
+encode_reset :: proc(dst: []u8, start: int, id, final_size: u64, code: u64 = 0) -> (int, bool) {
 	at := start
 	if at >= len(dst) {
 		return at, false
@@ -246,25 +248,39 @@ parse_frames :: proc(src: []u8) -> (parsed: Parsed, ok: bool) {
 			if !ok || first > largest {
 				return {}, false
 			}
-			parsed.ack_ranges[0] = {largest - first, largest}; parsed.ack_n = 1
+			parsed.ack_ranges[0] = {largest - first, largest}
+			parsed.ack_n = 1
 			low := largest - first
 			for _ in 0 ..< count {
 				gap, span: u64
-				gap, at, ok = take_varint(src, at); if !ok || low < 2 || gap > low - 2 {
+				gap, at, ok = take_varint(src, at)
+				if !ok || low < 2 || gap > low - 2 {
 					return {}, false
 				}
 				hi := low - gap - 2
-				span, at, ok = take_varint(src, at); if !ok || span > hi {
+				span, at, ok = take_varint(src, at)
+				if !ok || span > hi {
 					return {}, false
 				}
-				low = hi - span; parsed.ack_ranges[parsed.ack_n] = {low, hi}; parsed.ack_n += 1
+				low = hi - span
+				parsed.ack_ranges[parsed.ack_n] = {low, hi}
+				parsed.ack_n += 1
 			}
-            if kind==0x03 {
-             parsed.ack_ecn=true
-             parsed.ecn_counts.ect0,at,ok=take_varint(src,at);if !ok{return {},false}
-             parsed.ecn_counts.ect1,at,ok=take_varint(src,at);if !ok{return {},false}
-             parsed.ecn_counts.ce,at,ok=take_varint(src,at);if !ok{return {},false}
-            }
+			if kind == 0x03 {
+				parsed.ack_ecn = true
+				parsed.ecn_counts.ect0, at, ok = take_varint(src, at)
+				if !ok {
+					return {}, false
+				}
+				parsed.ecn_counts.ect1, at, ok = take_varint(src, at)
+				if !ok {
+					return {}, false
+				}
+				parsed.ecn_counts.ce, at, ok = take_varint(src, at)
+				if !ok {
+					return {}, false
+				}
+			}
 			_ = delay
 			if parsed.ack {
 				return {}, false
@@ -289,7 +305,8 @@ parse_frames :: proc(src: []u8) -> (parsed: Parsed, ok: bool) {
 			}
 			_ = app
 			parsed.reset = true
-			parsed.reset_id = id;parsed.reset_error=app
+			parsed.reset_id = id
+			parsed.reset_error = app
 			parsed.reset_final = final
 		case 0x05:
 			at += 1
@@ -304,7 +321,8 @@ parse_frames :: proc(src: []u8) -> (parsed: Parsed, ok: bool) {
 			}
 			_ = app
 			parsed.stop = true
-			parsed.stop_id = id;parsed.stop_error=app
+			parsed.stop_id = id
+			parsed.stop_error = app
 		case 0x06:
 			at += 1
 			off, n: u64
@@ -351,9 +369,12 @@ parse_frames :: proc(src: []u8) -> (parsed: Parsed, ok: bool) {
 			if parsed.stream_n == len(parsed.streams) {
 				return {}, false
 			}
-			parsed.streams[parsed.stream_n] = {id, off, data, fin}; parsed.stream_n += 1
+			parsed.streams[parsed.stream_n] = {id, off, data, fin}
+			parsed.stream_n += 1
 			if !parsed.stream {
-				parsed.stream_id = id; parsed.stream_off = off; parsed.stream_data = data
+				parsed.stream_id = id
+				parsed.stream_off = off
+				parsed.stream_data = data
 				parsed.fin = fin
 			}
 			parsed.stream = true
@@ -367,68 +388,116 @@ parse_frames :: proc(src: []u8) -> (parsed: Parsed, ok: bool) {
 			parsed.max_data = true
 			parsed.max_data_v = value
 		case 0x07:
-            parsed.new_token=true
+			parsed.new_token = true
 			// NEW_TOKEN is opaque and optional for subsequent connections.
-			at += 1; n: u64; n, at, ok = take_varint(src, at); if !ok || n > u64(len(src) - at) {
+			at += 1
+			n: u64
+			n, at, ok = take_varint(src, at)
+			if !ok || n > u64(len(src) - at) {
 				return {}, false
-			}; at += int(n); parsed.control_eliciting = true
+			}
+			at += int(n)
+			parsed.control_eliciting = true
 		case 0x14, 0x16, 0x17:
 			// advisory BLOCKED / retired locally issued CID
-			at += 1; _, at, ok = take_varint(src, at); if !ok {
+			at += 1
+			_, at, ok = take_varint(src, at)
+			if !ok {
 				return {}, false
-			}; parsed.control_eliciting = true
+			}
+			parsed.control_eliciting = true
 		case 0x15:
-			at += 1; _, at, ok = take_varint(src, at); if !ok {
+			at += 1
+			_, at, ok = take_varint(src, at)
+			if !ok {
 				return {}, false
-			}; _, at, ok = take_varint(src, at); if !ok {
+			}
+			_, at, ok = take_varint(src, at)
+			if !ok {
 				return {}, false
-			}; parsed.control_eliciting = true
+			}
+			parsed.control_eliciting = true
 		case 0x18:
-			at += 1; seq, prior: u64
-			seq, at, ok = take_varint(src, at); if !ok {
+			at += 1
+			seq, prior: u64
+			seq, at, ok = take_varint(src, at)
+			if !ok {
 				return {}, false
-			}; prior, at, ok = take_varint(src, at)
+			}
+			prior, at, ok = take_varint(src, at)
 			if !ok || prior > seq || at >= len(src) {
 				return {}, false
 			}
-			n := int(src[at]); at += 1; if n == 0 || n > 20 || n + 16 > len(src) - at {
+			n := int(src[at])
+			at += 1
+			if n == 0 || n > 20 || n + 16 > len(src) - at {
 				return {}, false
 			}
-            if parsed.new_id_n == len(parsed.new_ids) {return {},false}
-            f:=&parsed.new_ids[parsed.new_id_n]; parsed.new_id_n+=1
-            f.sequence=seq; f.retire_prior_to=prior; f.id=src[at:at+n]; copy(f.token[:],src[at+n:at+n+16])
-            at+=n+16; parsed.control_eliciting=true
-        case 0x19:
-            at+=1; seq:u64; seq,at,ok=take_varint(src,at)
-            if !ok || parsed.retire_id_n==len(parsed.retire_ids) {return {},false}
-            parsed.retire_ids[parsed.retire_id_n]=seq; parsed.retire_id_n+=1; parsed.control_eliciting=true
-        case 0x1a, 0x1b:
-            at+=1
-            if len(src)-at<8 || parsed.path_n==len(parsed.paths) {return {},false}
-            f:=&parsed.paths[parsed.path_n]; parsed.path_n+=1
-            f.response=kind==0x1b; copy(f.token[:],src[at:at+8]);
-            if !f.response {parsed.path_challenge=true;parsed.path_token=f.token}; at+=8; parsed.control_eliciting=true
+			if parsed.new_id_n == len(parsed.new_ids) {
+				return {}, false
+			}
+			f := &parsed.new_ids[parsed.new_id_n]
+			parsed.new_id_n += 1
+			f.sequence = seq
+			f.retire_prior_to = prior
+			f.id = src[at:at + n]
+			copy(f.token[:], src[at + n:at + n + 16])
+			at += n + 16
+			parsed.control_eliciting = true
+		case 0x19:
+			at += 1
+			seq: u64
+			seq, at, ok = take_varint(src, at)
+			if !ok || parsed.retire_id_n == len(parsed.retire_ids) {
+				return {}, false
+			}
+			parsed.retire_ids[parsed.retire_id_n] = seq
+			parsed.retire_id_n += 1
+			parsed.control_eliciting = true
+		case 0x1a, 0x1b:
+			at += 1
+			if len(src) - at < 8 || parsed.path_n == len(parsed.paths) {
+				return {}, false
+			}
+			f := &parsed.paths[parsed.path_n]
+			parsed.path_n += 1
+			f.response = kind == 0x1b
+			copy(f.token[:], src[at:at + 8])
+			if !f.response {
+				parsed.path_challenge = true
+				parsed.path_token = f.token
+			}
+			at += 8
+			parsed.control_eliciting = true
 		case 0x11:
-			at += 1; id, value: u64
-			id, at, ok = take_varint(src, at); if !ok {
+			at += 1
+			id, value: u64
+			id, at, ok = take_varint(src, at)
+			if !ok {
 				return {}, false
 			}
 			value, at, ok = take_varint(src, at)
 			if !ok || parsed.credit_n == len(parsed.credits) {
 				return {}, false
 			}
-			parsed.credits[parsed.credit_n] = {id, value}; parsed.credit_n += 1
-			parsed.max_stream_data = true; parsed.max_stream_id = id
+			parsed.credits[parsed.credit_n] = {id, value}
+			parsed.credit_n += 1
+			parsed.max_stream_data = true
+			parsed.max_stream_id = id
 			parsed.max_stream_value = value
 		case 0x12, 0x13:
-			at += 1; value: u64; value, at, ok = take_varint(src, at)
+			at += 1
+			value: u64
+			value, at, ok = take_varint(src, at)
 			if !ok || value > u64(1) << 60 {
 				return {}, false
 			}
 			if kind == 0x12 {
-				parsed.max_streams_bidi = true; parsed.max_streams_bidi_value = value
+				parsed.max_streams_bidi = true
+				parsed.max_streams_bidi_value = value
 			} else {
-				parsed.max_streams_uni = true; parsed.max_streams_uni_value = value
+				parsed.max_streams_uni = true
+				parsed.max_streams_uni_value = value
 			}
 		case 0x1c, 0x1d:
 			at += 1
@@ -463,13 +532,21 @@ parse_frames :: proc(src: []u8) -> (parsed: Parsed, ok: bool) {
 }
 
 encode_credit :: proc(dst: []u8, at: int, id, stream_limit, data_limit: u64) -> (int, bool) {
-	p := at; if p >= len(dst) {
-		return p, false
-	}; dst[p] = 0x10; p += 1
-	ok: bool; p, ok = put_varint(dst, p, data_limit); if !ok || p >= len(dst) {
+	p := at
+	if p >= len(dst) {
 		return p, false
 	}
-	dst[p] = 0x11; p += 1; p, ok = put_varint(dst, p, id); if !ok {
+	dst[p] = 0x10
+	p += 1
+	ok: bool
+	p, ok = put_varint(dst, p, data_limit)
+	if !ok || p >= len(dst) {
+		return p, false
+	}
+	dst[p] = 0x11
+	p += 1
+	p, ok = put_varint(dst, p, id)
+	if !ok {
 		return p, false
 	}
 	return put_varint(dst, p, stream_limit)

@@ -11,6 +11,7 @@ wipe_grant :: proc(allocator: mem.Allocator, grant: []u8, alignment: int) {
 	crypto.zero_explicit(raw_data(grant), len(grant))
 	_, _ = allocator.procedure(allocator.data, .Free, 0, alignment, raw_data(grant), len(grant))
 }
+
 @(private)
 release :: proc(owner: ^Owner, a: ^Allocation) {
 	wipe_grant(owner.backing, (cast([^]u8)a.pointer)[:a.size], a.alignment)
@@ -49,7 +50,9 @@ budget_proc :: proc(
 		info := cast(^mem.Allocator_Query_Info)old
 		for a in owner.allocations {
 			if a.pointer == info.pointer && a.pointer != nil {
-				info.size = a.size; info.alignment = a.alignment; return nil, .None
+				info.size = a.size
+				info.alignment = a.alignment
+				return nil, .None
 			}
 		}
 		return nil, .Invalid_Pointer
@@ -61,7 +64,8 @@ budget_proc :: proc(
 		}
 		for &a in owner.allocations {
 			if a.pointer == old {
-				release(owner, &a); return nil, .None
+				release(owner, &a)
+				return nil, .None
 			}
 		}
 		return nil, .Invalid_Pointer
@@ -74,7 +78,8 @@ budget_proc :: proc(
 			if old != nil {
 				for &a in owner.allocations {
 					if a.pointer == old {
-						prior = &a; break
+						prior = &a
+						break
 					}
 				}
 				if prior == nil {
@@ -85,29 +90,25 @@ budget_proc :: proc(
 		if size == 0 {
 			if prior != nil {
 				release(owner, prior)
-			}; return nil, .None
+			}
+			return nil, .None
 		}
 		if size > owner.limits.max_storage_bytes - owner.used {
-			owner.limit_hit = true; return nil, .Out_Of_Memory
+			owner.limit_hit = true
+			return nil, .Out_Of_Memory
 		}
 		slot: ^Allocation
 		for &a in owner.allocations {
 			if a.pointer == nil {
-				slot = &a; break
+				slot = &a
+				break
 			}
 		}
 		if slot == nil {
-			owner.limit_hit = true; return nil, .Out_Of_Memory
+			owner.limit_hit = true
+			return nil, .Out_Of_Memory
 		}
-		allocated, error := owner.backing.procedure(
-			owner.backing.data,
-			.Alloc,
-			size,
-			alignment,
-			nil,
-			0,
-			loc,
-		)
+		allocated, error := owner.backing.procedure(owner.backing.data, .Alloc, size, alignment, nil, 0, loc)
 		if error != nil || len(allocated) != size || raw_data(allocated) == nil {
 			wipe_grant(owner.backing, allocated, alignment)
 			owner.allocation_failed = true
@@ -115,7 +116,8 @@ budget_proc :: proc(
 		}
 		for &b in allocated {b = 0}
 		slot^ = {raw_data(allocated), size, alignment}
-		owner.used += size; owner.peak = max(owner.peak, owner.used)
+		owner.used += size
+		owner.peak = max(owner.peak, owner.used)
 		if prior != nil {
 			copy(allocated, (cast([^]u8)prior.pointer)[:min(prior.size, size)])
 			release(owner, prior)

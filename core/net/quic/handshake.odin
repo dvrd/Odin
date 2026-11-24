@@ -14,11 +14,13 @@ Role :: enum {
 	Client,
 	Server,
 }
+
 Encryption_Level :: enum {
 	Initial,
 	Handshake,
 	One_RTT,
 }
+
 Session_Error :: enum {
 	None,
 	Invalid_State,
@@ -31,37 +33,37 @@ Session_Error :: enum {
 // Bounded CRYPTO buffers are caller-owned. Failure and level changes zero
 // keys. 1-RTT open/seal waits until the client Finished is marked sent.
 Handshake :: struct {
-	role:                 Role,
-	failed:               bool,
-	peer_authenticated:   bool,
-	handshake_complete:   bool,
-	initial_discarded:    bool,
-	handshake_discarded:  bool,
-	have_initial:         bool,
-	have_handshake:       bool,
-	have_one_rtt:         bool,
-	initial:              Initial_Key_Pair,
-	handshake_read:       Packet_Keys,
-	handshake_write:      Packet_Keys,
-	one_rtt_read:         Packet_Keys,
-	one_rtt_write:        Packet_Keys,
-	zero_rtt_write:       Packet_Keys,
- zero_rtt_read:Packet_Keys,
- resumption_master:[32]u8,
- have_resumption_master:bool,
- early_accepted:bool,
- resumed:bool,
-	have_zero_rtt:        bool,
-	handshake_secret:     [32]u8,
-	client_finished:      [tls.FINISHED_MESSAGE_SIZE]u8,
-	client_finished_len:  int,
+	role:                   Role,
+	failed:                 bool,
+	peer_authenticated:     bool,
+	handshake_complete:     bool,
+	initial_discarded:      bool,
+	handshake_discarded:    bool,
+	have_initial:           bool,
+	have_handshake:         bool,
+	have_one_rtt:           bool,
+	initial:                Initial_Key_Pair,
+	handshake_read:         Packet_Keys,
+	handshake_write:        Packet_Keys,
+	one_rtt_read:           Packet_Keys,
+	one_rtt_write:          Packet_Keys,
+	zero_rtt_write:         Packet_Keys,
+	zero_rtt_read:          Packet_Keys,
+	resumption_master:      [32]u8,
+	have_resumption_master: bool,
+	early_accepted:         bool,
+	resumed:                bool,
+	have_zero_rtt:          bool,
+	handshake_secret:       [32]u8,
+	client_finished:        [tls.FINISHED_MESSAGE_SIZE]u8,
+	client_finished_len:    int,
 	// Owned only for a mutual-auth flight; the legacy Finished stays inline.
-	client_auth_flight: []u8,
-	client_auth_allocator: mem.Allocator,
-	crypto:               [3]Crypto_Reassembly,
-	largest_pn:           [3]u64,
-	have_largest:         [3]bool,
-	local_parameters:     []u8,
+	client_auth_flight:     []u8,
+	client_auth_allocator:  mem.Allocator,
+	crypto:                 [3]Crypto_Reassembly,
+	largest_pn:             [3]u64,
+	have_largest:           [3]bool,
+	local_parameters:       []u8,
 }
 
 handshake_init :: proc(
@@ -69,7 +71,7 @@ handshake_init :: proc(
 	role: Role,
 	alpn: []string,
 	initial_crypto, handshake_crypto, one_rtt_crypto: []u8,
- coverage:[3][]u8={},
+	coverage: [3][]u8 = {},
 ) -> Session_Error {
 	if h == nil {
 		return .Invalid_State
@@ -83,9 +85,9 @@ handshake_init :: proc(
 	if tls.alpn_transport_offers(.QUIC, alpn) != .None {
 		return .Invalid_ALPN
 	}
-	if crypto_reassembly_init(&h.crypto[0], initial_crypto,coverage[0]) != .None ||
-	   crypto_reassembly_init(&h.crypto[1], handshake_crypto,coverage[1]) != .None ||
-	   crypto_reassembly_init(&h.crypto[2], one_rtt_crypto,coverage[2]) != .None {
+	if crypto_reassembly_init(&h.crypto[0], initial_crypto, coverage[0]) != .None ||
+	   crypto_reassembly_init(&h.crypto[1], handshake_crypto, coverage[1]) != .None ||
+	   crypto_reassembly_init(&h.crypto[2], one_rtt_crypto, coverage[2]) != .None {
 		return .Invalid_State
 	}
 	h.role = role
@@ -103,9 +105,12 @@ handshake_fail :: proc(h: ^Handshake) {
 	packet_keys_clear(&h.one_rtt_read)
 	packet_keys_clear(&h.one_rtt_write)
 	packet_keys_clear(&h.zero_rtt_write)
- packet_keys_clear(&h.zero_rtt_read)
- crypto.zero_explicit(&h.resumption_master,size_of(h.resumption_master));h.have_resumption_master=false
-	h.have_zero_rtt = false;h.early_accepted=false;h.resumed=false
+	packet_keys_clear(&h.zero_rtt_read)
+	crypto.zero_explicit(&h.resumption_master, size_of(h.resumption_master))
+	h.have_resumption_master = false
+	h.have_zero_rtt = false
+	h.early_accepted = false
+	h.resumed = false
 	crypto.zero_explicit(&h.handshake_secret, size_of(h.handshake_secret))
 	handshake_release_client_flight(h)
 	crypto.zero_explicit(&h.client_finished, size_of(h.client_finished))
@@ -156,7 +161,7 @@ handshake_install_zero_rtt :: proc(
 		packet_keys_clear(&h.zero_rtt_write)
 		return .Invalid_State
 	}
-	h.zero_rtt_write.zero_rtt=true
+	h.zero_rtt_write.zero_rtt = true
 	h.have_zero_rtt = true
 	return .None
 }
@@ -183,21 +188,38 @@ handshake_accept_client_hello :: proc(
 	h: ^Handshake,
 	shared_secret: [32]u8,
 	client_hello, server_hello, local_parameters: []u8,
- session:^tls.Session=nil,early_allowed:bool=false,
+	session: ^tls.Session = nil,
+	early_allowed: bool = false,
 ) -> tls.Quic_Secret_Error {
 	shared := shared_secret
 	defer crypto.zero_explicit(&shared, size_of(shared))
 	if h == nil || h.role != .Client || h.failed || h.have_handshake {
 		return {kind = .Invalid_Input}
 	}
-	keys, e := tls.quic_handshake_secrets(shared, client_hello, server_hello, local_parameters,session,early_allowed)
+	keys, e := tls.quic_handshake_secrets(shared, client_hello, server_hello, local_parameters, session, early_allowed)
 	defer tls.quic_handshake_keys_clear(&keys)
 	if e.kind != .None {
 		handshake_fail(h)
 		return e
 	}
-	if packet_keys_set_aes(&h.handshake_write, keys.client.key[:], keys.client.iv[:], keys.client.hp[:], keys.client.secret[:], false) != .None ||
-	   packet_keys_set_aes(&h.handshake_read, keys.server.key[:], keys.server.iv[:], keys.server.hp[:], keys.server.secret[:], false) != .None {
+	if packet_keys_set_aes(
+		   &h.handshake_write,
+		   keys.client.key[:],
+		   keys.client.iv[:],
+		   keys.client.hp[:],
+		   keys.client.secret[:],
+		   false,
+	   ) !=
+		   .None ||
+	   packet_keys_set_aes(
+		   &h.handshake_read,
+		   keys.server.key[:],
+		   keys.server.iv[:],
+		   keys.server.hp[:],
+		   keys.server.secret[:],
+		   false,
+	   ) !=
+		   .None {
 		handshake_fail(h)
 		return {kind = .Derivation_Failed}
 	}
@@ -216,10 +238,11 @@ handshake_authenticate_server :: proc(
 	roots: []^x509.Certificate,
 	now: time.Time,
 	peer_parameters: []u8,
-	identity:^credential_store.Store=nil,
-	allocator:mem.Allocator=context.allocator,
-	identity_lease:^credential_store.Lease=nil,
- session:^tls.Session=nil,early_allowed:bool=false,
+	identity: ^credential_store.Store = nil,
+	allocator: mem.Allocator = context.allocator,
+	identity_lease: ^credential_store.Lease = nil,
+	session: ^tls.Session = nil,
+	early_allowed: bool = false,
 ) -> tls.Quic_Secret_Error {
 	if h == nil || h.role != .Client || h.failed || !h.have_handshake || h.peer_authenticated {
 		return {kind = .Invalid_Input}
@@ -233,24 +256,54 @@ handshake_authenticate_server :: proc(
 		roots,
 		now,
 		h.local_parameters,
-		peer_parameters,identity,allocator,identity_lease,session,early_allowed,
+		peer_parameters,
+		identity,
+		allocator,
+		identity_lease,
+		session,
+		early_allowed,
 	)
 	defer tls.quic_application_keys_clear(&keys)
-	h.resumed=session!=nil&&len(handshake_messages)>=4&&quic_server_resumed(server_hello)
- h.resumption_master=keys.resumption_master;h.have_resumption_master=e.kind==.None;h.early_accepted=keys.early_accepted
- retained:=false
-	defer if !retained && raw_data(finished)!=nil {crypto.zero_explicit(raw_data(finished),len(finished));delete(finished,allocator)}
+	h.resumed = session != nil && len(handshake_messages) >= 4 && quic_server_resumed(server_hello)
+	h.resumption_master = keys.resumption_master
+	h.have_resumption_master = e.kind == .None
+	h.early_accepted = keys.early_accepted
+	retained := false
+	defer if !retained && raw_data(finished) != nil {
+		crypto.zero_explicit(raw_data(finished), len(finished))
+		delete(finished, allocator)
+	}
 	if e.kind != .None {
 		handshake_fail(h)
 		return e
 	}
-	if packet_keys_set_aes(&h.one_rtt_write, keys.client.key[:], keys.client.iv[:], keys.client.hp[:], keys.client.secret[:], true) != .None ||
-	   packet_keys_set_aes(&h.one_rtt_read, keys.server.key[:], keys.server.iv[:], keys.server.hp[:], keys.server.secret[:], true) != .None {
+	if packet_keys_set_aes(
+		   &h.one_rtt_write,
+		   keys.client.key[:],
+		   keys.client.iv[:],
+		   keys.client.hp[:],
+		   keys.client.secret[:],
+		   true,
+	   ) !=
+		   .None ||
+	   packet_keys_set_aes(
+		   &h.one_rtt_read,
+		   keys.server.key[:],
+		   keys.server.iv[:],
+		   keys.server.hp[:],
+		   keys.server.secret[:],
+		   true,
+	   ) !=
+		   .None {
 		handshake_fail(h)
 		return {kind = .Derivation_Failed}
 	}
-	if len(finished)==tls.FINISHED_MESSAGE_SIZE {copy(h.client_finished[:],finished)} else {
-		h.client_auth_flight=finished;h.client_auth_allocator=allocator;retained=true
+	if len(finished) == tls.FINISHED_MESSAGE_SIZE {
+		copy(h.client_finished[:], finished)
+	} else {
+		h.client_auth_flight = finished
+		h.client_auth_allocator = allocator
+		retained = true
 	}
 	h.client_finished_len = len(finished)
 	h.have_one_rtt = true
@@ -262,9 +315,11 @@ handshake_client_finished :: proc(h: ^Handshake) -> ([]u8, Session_Error) {
 	if h == nil || h.failed || !h.peer_authenticated || h.client_finished_len < tls.FINISHED_MESSAGE_SIZE {
 		return nil, .Unauthenticated
 	}
-	if h.client_finished_len>tls.FINISHED_MESSAGE_SIZE {
-		if len(h.client_auth_flight)!=h.client_finished_len {return nil,.Unauthenticated}
-		return h.client_auth_flight,.None
+	if h.client_finished_len > tls.FINISHED_MESSAGE_SIZE {
+		if len(h.client_auth_flight) != h.client_finished_len {
+			return nil, .Unauthenticated
+		}
+		return h.client_auth_flight, .None
 	}
 	return h.client_finished[:h.client_finished_len], .None
 }
@@ -320,15 +375,24 @@ handshake_discard_handshake_keys :: proc(h: ^Handshake) -> Session_Error {
 	h.largest_pn[int(Encryption_Level.Handshake)] = 0
 	h.have_largest[int(Encryption_Level.Handshake)] = false
 	h.local_parameters = nil
-	if len(h.client_auth_flight)>0 {handshake_release_client_flight(h);h.client_finished_len=0}
+	if len(h.client_auth_flight) > 0 {
+		handshake_release_client_flight(h)
+		h.client_finished_len = 0
+	}
 	return .None
 }
 
 @(private)
-handshake_release_client_flight :: proc(h:^Handshake) {
- if h==nil {return}
- if raw_data(h.client_auth_flight)!=nil {crypto.zero_explicit(raw_data(h.client_auth_flight),len(h.client_auth_flight));delete(h.client_auth_flight,h.client_auth_allocator)}
- h.client_auth_flight=nil;h.client_auth_allocator={}
+handshake_release_client_flight :: proc(h: ^Handshake) {
+	if h == nil {
+		return
+	}
+	if raw_data(h.client_auth_flight) != nil {
+		crypto.zero_explicit(raw_data(h.client_auth_flight), len(h.client_auth_flight))
+		delete(h.client_auth_flight, h.client_auth_allocator)
+	}
+	h.client_auth_flight = nil
+	h.client_auth_allocator = {}
 }
 
 // Sender advances the 1-RTT write secret one phase. The read generation changes
@@ -381,12 +445,7 @@ handshake_confirm :: proc(h: ^Handshake) -> Session_Error {
 	return handshake_discard_handshake_keys(h)
 }
 
-handshake_ingest_crypto :: proc(
-	h: ^Handshake,
-	level: Encryption_Level,
-	offset: u64,
-	data: []u8,
-) -> Crypto_Error {
+handshake_ingest_crypto :: proc(h: ^Handshake, level: Encryption_Level, offset: u64, data: []u8) -> Crypto_Error {
 	if h == nil || h.failed {
 		return .Discarded
 	}
@@ -402,11 +461,7 @@ handshake_ingest_crypto :: proc(
 
 // Records a packet number only after AEAD success. Reconstruction uses that
 // space's largest; before any success the expected number is 0.
-handshake_note_authenticated_pn :: proc(
-	h: ^Handshake,
-	level: Encryption_Level,
-	full: u64,
-) -> Protection_Error {
+handshake_note_authenticated_pn :: proc(h: ^Handshake, level: Encryption_Level, full: u64) -> Protection_Error {
 	if h == nil || h.failed {
 		return .Invalid_Keys
 	}
@@ -587,4 +642,7 @@ handshake_header_protection :: proc(
 }
 
 @(private)
-quic_server_resumed :: proc(hello:[]u8)->bool {parameters,e:=tls.server_hello_decode(hello,true);return e==.None&&parameters.psk_selected}
+quic_server_resumed :: proc(hello: []u8) -> bool {
+	parameters, e := tls.server_hello_decode(hello, true)
+	return e == .None && parameters.psk_selected
+}

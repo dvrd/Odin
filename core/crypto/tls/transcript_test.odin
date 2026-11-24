@@ -17,6 +17,7 @@ transcript_test_decode :: proc(s: string) -> []u8 {
 	assert(err == nil)
 	return bytes
 }
+
 transcript_test_hash :: proc(s: string) -> (hash: [32]u8) {
 	bytes := transcript_test_decode(s)
 	assert(len(bytes) == 32)
@@ -27,9 +28,12 @@ transcript_test_hash :: proc(s: string) -> (hash: [32]u8) {
 
 @(test)
 transcript_rfc8448_and_partitions :: proc(t: ^testing.T) {
-	ch := transcript_test_decode(TRANSCRIPT_TEST_CH); defer delete(ch)
-	sh := transcript_test_decode(TRANSCRIPT_TEST_SH); defer delete(sh)
-	flight := transcript_test_decode(TRANSCRIPT_TEST_FLIGHT); defer delete(flight)
+	ch := transcript_test_decode(TRANSCRIPT_TEST_CH)
+	defer delete(ch)
+	sh := transcript_test_decode(TRANSCRIPT_TEST_SH)
+	defer delete(sh)
+	flight := transcript_test_decode(TRANSCRIPT_TEST_FLIGHT)
+	defer delete(flight)
 	expected_hello := transcript_test_hash("860c06edc07858ee8e78f0e7428c58edd6b43f2ca3e6e95f02ed063cf0e1cad8")
 	expected_finished := transcript_test_hash("9608102a0f1ccc6db6250b7b7e417b1a000eaada3daae4777a7686c9ff83df13")
 	base: Handshake_Transcript
@@ -70,48 +74,106 @@ transcript_rfc8448_secrets_and_finished :: proc(t: ^testing.T) {
 	server_finished_hash := transcript_test_hash("9608102a0f1ccc6db6250b7b7e417b1a000eaada3daae4777a7686c9ff83df13")
 	hs, err := handshake_secrets_derive_from_hash(shared, hello_hash)
 	testing.expect_value(t, err, .None)
-	testing.expect_value(t, hs.handshake_secret, transcript_test_hash("1dc826e93606aa6fdc0aadc12f741b01046aa6b99f691ed221a9f0ca043fbeac"))
-	testing.expect_value(t, hs.client_traffic_secret, transcript_test_hash("b3eddb126e067f35a780b3abf45e2d8f3b1a950738f52e9600746a0e27a55a21"))
-	testing.expect_value(t, hs.server_traffic_secret, transcript_test_hash("b67b7d690cc16c4e75e54213cb2d37b4e9c912bcded9105d42befd59d391ad38"))
-	ch := transcript_test_decode(TRANSCRIPT_TEST_CH); defer delete(ch)
-	sh := transcript_test_decode(TRANSCRIPT_TEST_SH); defer delete(sh)
+	testing.expect_value(
+		t,
+		hs.handshake_secret,
+		transcript_test_hash("1dc826e93606aa6fdc0aadc12f741b01046aa6b99f691ed221a9f0ca043fbeac"),
+	)
+	testing.expect_value(
+		t,
+		hs.client_traffic_secret,
+		transcript_test_hash("b3eddb126e067f35a780b3abf45e2d8f3b1a950738f52e9600746a0e27a55a21"),
+	)
+	testing.expect_value(
+		t,
+		hs.server_traffic_secret,
+		transcript_test_hash("b67b7d690cc16c4e75e54213cb2d37b4e9c912bcded9105d42befd59d391ad38"),
+	)
+	ch := transcript_test_decode(TRANSCRIPT_TEST_CH)
+	defer delete(ch)
+	sh := transcript_test_decode(TRANSCRIPT_TEST_SH)
+	defer delete(sh)
 	wrapped, wrapped_error := handshake_secrets_derive(shared, ch, sh)
 	testing.expect_value(t, wrapped_error, .None)
 	testing.expect_value(t, wrapped, hs)
 	app := application_secrets_derive(hs.handshake_secret, server_finished_hash)
-	testing.expect_value(t, app.master_secret, transcript_test_hash("18df06843d13a08bf2a449844c5f8a478001bc4d4c627984d5a41da8d0402919"))
-	testing.expect_value(t, app.client_traffic_secret, transcript_test_hash("9e40646ce79a7f9dc05af8889bce6552875afa0b06df0087f792ebb7c17504a5"))
-	testing.expect_value(t, app.server_traffic_secret, transcript_test_hash("a11af9f05531f856ad47116b45a950328204b4f44bfb6b3a4b4f1f3fcb631643"))
-	flight := transcript_test_decode(TRANSCRIPT_TEST_FLIGHT); defer delete(flight)
+	testing.expect_value(
+		t,
+		app.master_secret,
+		transcript_test_hash("18df06843d13a08bf2a449844c5f8a478001bc4d4c627984d5a41da8d0402919"),
+	)
+	testing.expect_value(
+		t,
+		app.client_traffic_secret,
+		transcript_test_hash("9e40646ce79a7f9dc05af8889bce6552875afa0b06df0087f792ebb7c17504a5"),
+	)
+	testing.expect_value(
+		t,
+		app.server_traffic_secret,
+		transcript_test_hash("a11af9f05531f856ad47116b45a950328204b4f44bfb6b3a4b4f1f3fcb631643"),
+	)
+	flight := transcript_test_decode(TRANSCRIPT_TEST_FLIGHT)
+	defer delete(flight)
 	tr: Handshake_Transcript
-	transcript_init(&tr); transcript_update(&tr, ch); transcript_update(&tr, sh)
-	transcript_update(&tr, flight[:len(flight)-36])
-	testing.expect_value(t, finished_verify(flight[len(flight)-36:], hs.server_traffic_secret, transcript_snapshot(&tr)), .None)
-	testing.expect_value(t, finished_verify(flight[len(flight)-36:], hs.client_traffic_secret, transcript_snapshot(&tr)), .Verification_Failed)
-	testing.expect_value(t, finished_verify_data(hs.client_traffic_secret, server_finished_hash), transcript_test_hash("a8ec436d677634ae525ac1fcebe11a039ec17694fac6e98527b642f2edd5ce61"))
+	transcript_init(&tr)
+	transcript_update(&tr, ch)
+	transcript_update(&tr, sh)
+	transcript_update(&tr, flight[:len(flight) - 36])
+	testing.expect_value(
+		t,
+		finished_verify(flight[len(flight) - 36:], hs.server_traffic_secret, transcript_snapshot(&tr)),
+		.None,
+	)
+	testing.expect_value(
+		t,
+		finished_verify(flight[len(flight) - 36:], hs.client_traffic_secret, transcript_snapshot(&tr)),
+		.Verification_Failed,
+	)
+	testing.expect_value(
+		t,
+		finished_verify_data(hs.client_traffic_secret, server_finished_hash),
+		transcript_test_hash("a8ec436d677634ae525ac1fcebe11a039ec17694fac6e98527b642f2edd5ce61"),
+	)
 	testing.expect(t, application_secrets_derive(hs.handshake_secret, hello_hash) != app)
 }
 
 @(test)
 transcript_retry_context_and_allocator_independence :: proc(t: ^testing.T) {
-	ch := transcript_test_decode(TRANSCRIPT_TEST_CH); defer delete(ch)
-	sh := transcript_test_decode(TRANSCRIPT_TEST_SH); defer delete(sh)
-	hrr := transcript_test_decode("020000340303cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c00130100000c002b00020304003300020017"); defer delete(hrr)
+	ch := transcript_test_decode(TRANSCRIPT_TEST_CH)
+	defer delete(ch)
+	sh := transcript_test_decode(TRANSCRIPT_TEST_SH)
+	defer delete(sh)
+	hrr := transcript_test_decode(
+		"020000340303cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c00130100000c002b00020304003300020017",
+	); defer delete(hrr)
 	tr: Handshake_Transcript
-	transcript_init(&tr); transcript_update(&tr, ch)
+	transcript_init(&tr)
+	transcript_update(&tr, ch)
 	first_hash := transcript_snapshot(&tr)
 	message := transcript_message_hash(first_hash)
 	testing.expect(t, message[0] == 254 && message[1] == 0 && message[2] == 0 && message[3] == 32)
 	transcript_retry(&tr)
 	// Independent SHA invocation over the explicit RFC synthetic framing.
 	independent: sha2.Context_256
-	sha2.init_256(&independent); sha2.update(&independent, message[:]); sha2.update(&independent, hrr); sha2.update(&independent, ch); sha2.update(&independent, sh)
-	expected: [32]u8; sha2.final(&independent, expected[:])
-	transcript_update(&tr, hrr); transcript_update(&tr, ch); transcript_update(&tr, sh)
+	sha2.init_256(&independent)
+	sha2.update(&independent, message[:])
+	sha2.update(&independent, hrr)
+	sha2.update(&independent, ch)
+	sha2.update(&independent, sh)
+	expected: [32]u8
+	sha2.final(&independent, expected[:])
+	transcript_update(&tr, hrr)
+	transcript_update(&tr, ch)
+	transcript_update(&tr, sh)
 	testing.expect_value(t, transcript_snapshot(&tr), expected)
-	testing.expect_value(t, expected, transcript_test_hash("eccd5e0a0b1a57121913d6038c1ab437ad7d702c6176219807f6ab670c266a12"))
+	testing.expect_value(
+		t,
+		expected,
+		transcript_test_hash("eccd5e0a0b1a57121913d6038c1ab437ad7d702c6176219807f6ab670c266a12"),
+	)
 	prefix: [92]u8
-	copy(prefix[:36], message[:]); copy(prefix[36:], hrr)
+	copy(prefix[:36], message[:])
+	copy(prefix[36:], hrr)
 	wrapped, wrap_error := handshake_secrets_derive(first_hash, ch, sh, prefix[:])
 	from_hash, hash_error := handshake_secrets_derive_from_hash(first_hash, expected)
 	testing.expect_value(t, wrap_error, .None)
@@ -125,7 +187,11 @@ transcript_retry_context_and_allocator_independence :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(server[98:]), string(first_hash[:]))
 	testing.expect(t, server != client)
 	server_digest := certificate_verify_digest(first_hash, true)
-	testing.expect_value(t, server_digest, transcript_test_hash("831def041e65ba4b71c1b4307f4cce819d2e774a414812cb83031fefa5b629fb"))
+	testing.expect_value(
+		t,
+		server_digest,
+		transcript_test_hash("831def041e65ba4b71c1b4307f4cce819d2e774a414812cb83031fefa5b629fb"),
+	)
 	testing.expect(t, server_digest != certificate_verify_digest(first_hash, false))
 	// These helpers cannot depend on an allocation succeeding, including HKDF.
 	before := transcript_snapshot(&tr)
@@ -153,12 +219,18 @@ transcript_retry_context_and_allocator_independence :: proc(t: ^testing.T) {
 		_ = finished_verify_data(hs.client_traffic_secret, before)
 		_ = app
 	}
-	fmt.printf("TLS transcript size=%d, handshake secrets=%d, application secrets=%d bytes\n", size_of(Handshake_Transcript), size_of(Handshake_Secrets), size_of(Application_Secrets))
+	fmt.printf(
+		"TLS transcript size=%d, handshake secrets=%d, application secrets=%d bytes\n",
+		size_of(Handshake_Transcript),
+		size_of(Handshake_Secrets),
+		size_of(Application_Secrets),
+	)
 }
 
 @(test)
 transcript_public_validation_order :: proc(t: ^testing.T) {
-	ch := []u8{1, 0, 0, 0}; sh := []u8{2, 0, 0, 0}
+	ch := []u8{1, 0, 0, 0}
+	sh := []u8{2, 0, 0, 0}
 	_, err := handshake_secrets_derive({}, nil, nil)
 	testing.expect_value(t, err, .Invalid_Client_Hello)
 	_, err = handshake_secrets_derive({}, ch, nil)

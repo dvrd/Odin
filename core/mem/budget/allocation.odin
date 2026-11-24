@@ -19,55 +19,38 @@ allocation_cost :: proc(size, alignment: int) -> (u64, Error) {
 	return u64(size + overhead), {}
 }
 
-allocate :: proc(
-	source: Binding,
-	size: int,
-	alignment: int = mem.DEFAULT_ALIGNMENT,
-) -> (
-	[]u8,
-	Error,
-) {
+allocate :: proc(source: Binding, size: int, alignment: int = mem.DEFAULT_ALIGNMENT) -> ([]u8, Error) {
 	if source._state == nil do return nil, {kind = .Invalid_Handle}
 	return allocate_in_scope(source._state, source._state.default_scope, size, alignment, true)
 }
 
 @(private)
-allocate_in_scope :: proc(
-	state: ^State,
-	scope: scopes.Scope,
-	size, alignment: int,
-	zeroed: bool,
-) -> (
-	[]u8,
-	Error,
-) {
+allocate_in_scope :: proc(state: ^State, scope: scopes.Scope, size, alignment: int, zeroed: bool) -> ([]u8, Error) {
 	cost, validation := allocation_cost(size, alignment)
 	if validation.kind != .None || cost == 0 do return nil, validation
 	if !retain_state(state) do return nil, {kind = .Overflow}
 	lease, admission := scopes.reserve(scope, {bytes = cost})
 	if admission != .None {
-		record_failure(state, false); release_state(state)
+		record_failure(state, false)
+		release_state(state)
 		return nil, {kind = .Budget_Rejected, budget = admission}
 	}
-	storage, ae := mem.alloc_bytes_non_zeroed(
-		int(cost),
-		max(alignment, align_of(Header)),
-		state.backing,
-	)
-	if ae != nil || len(storage) != int(cost) || raw_data(storage) == nil ||
+	storage, ae := mem.alloc_bytes_non_zeroed(int(cost), max(alignment, align_of(Header)), state.backing)
+	if ae != nil ||
+	   len(storage) != int(cost) ||
+	   raw_data(storage) == nil ||
 	   uintptr(raw_data(storage)) % uintptr(max(alignment, align_of(Header))) != 0 {
 		// An error does not transfer disposal responsibility back to the
 		// allocator. Release every reported grant before dropping its charge.
 		if raw_data(storage) != nil do delete(storage, state.backing)
 		if ae == nil do ae = .Out_Of_Memory
-		scopes.release(&lease); record_failure(state, true); release_state(state)
+		scopes.release(&lease)
+		record_failure(state, true)
+		release_state(state)
 		return nil, {kind = .Allocation_Failed, allocation = ae}
 	}
 	header := cast(^Header)raw_data(storage)
-	data := mem.align_forward(
-		rawptr(uintptr(raw_data(storage)) + size_of(Header)),
-		uintptr(alignment),
-	)
+	data := mem.align_forward(rawptr(uintptr(raw_data(storage)) + size_of(Header)), uintptr(alignment))
 	header^ = {
 		binding   = state,
 		storage   = storage,
@@ -84,17 +67,22 @@ allocate_in_scope :: proc(
 
 @(private)
 register_header :: proc(state: ^State, header: ^Header, cost: u64) {
-	sync.lock(&state.mu); defer sync.unlock(&state.mu)
+	sync.lock(&state.mu)
+	defer sync.unlock(&state.mu)
 	assert(state.registered < max(int))
 	header.next = state.first
 	if state.first != nil do state.first.previous = header
-	state.first = header; state.registered += 1
-	state.stats.allocations += 1; state.stats.backing_bytes += cost
+	state.first = header
+	state.registered += 1
+	state.stats.allocations += 1
+	state.stats.backing_bytes += cost
 	state.stats.peak_backing_bytes = max(state.stats.peak_backing_bytes, state.stats.backing_bytes)
 }
+
 @(private)
 record_failure :: proc(state: ^State, allocation: bool) {
-	sync.lock(&state.mu); defer sync.unlock(&state.mu)
+	sync.lock(&state.mu)
+	defer sync.unlock(&state.mu)
 	if allocation {
 		if state.stats.allocation_failures < max(u64) do state.stats.allocation_failures += 1
 	} else if state.stats.rejected < max(u64) {
@@ -126,7 +114,8 @@ free_header :: proc(state: ^State, header: ^Header) -> Error {
 		return {kind = .Backing_Failed, allocation = error}
 	}
 	sync.lock(&state.mu)
-	state.stats.allocations -= 1; state.stats.backing_bytes -= cost
+	state.stats.allocations -= 1
+	state.stats.backing_bytes -= cost
 	sync.unlock(&state.mu)
 	scopes.release(&lease)
 	release_state(state)
@@ -135,32 +124,28 @@ free_header :: proc(state: ^State, header: ^Header) -> Error {
 
 @(private)
 unregister_header :: proc(state: ^State, header: ^Header) {
-	sync.lock(&state.mu); defer sync.unlock(&state.mu)
+	sync.lock(&state.mu)
+	defer sync.unlock(&state.mu)
 	if header.previous != nil do header.previous.next = header.next
 	else do state.first = header.next
 	if header.next != nil do header.next.previous = header.previous
 	header.previous, header.next = nil, nil
 	state.registered -= 1
 }
+
 @(private)
 reregister_header :: proc(state: ^State, header: ^Header) {
-	sync.lock(&state.mu); defer sync.unlock(&state.mu)
+	sync.lock(&state.mu)
+	defer sync.unlock(&state.mu)
 	header.next = state.first
 	if state.first != nil do state.first.previous = header
-	state.first = header; state.registered += 1
+	state.first = header
+	state.registered += 1
 }
 
 // Resizing uses allocate/copy/free, charging the complete temporary overlap.
 // Failed admission/allocation preserves the original bytes, owner and scope.
-resize :: proc(
-	source: Binding,
-	previous: []u8,
-	size: int,
-	alignment: int = mem.DEFAULT_ALIGNMENT,
-) -> (
-	[]u8,
-	Error,
-) {
+resize :: proc(source: Binding, previous: []u8, size: int, alignment: int = mem.DEFAULT_ALIGNMENT) -> ([]u8, Error) {
 	if source._state == nil do return nil, {kind = .Invalid_Handle}
 	if raw_data(previous) == nil {
 		if len(previous) != 0 do return nil, {kind = .Invalid_Argument}
@@ -173,25 +158,11 @@ resize :: proc(
 }
 
 @(private)
-resize_header :: proc(
-	state: ^State,
-	header: ^Header,
-	size, alignment: int,
-	zeroed: bool,
-) -> (
-	[]u8,
-	Error,
-) {
+resize_header :: proc(state: ^State, header: ^Header, size, alignment: int, zeroed: bool) -> ([]u8, Error) {
 	_, validation := allocation_cost(size, alignment)
 	if validation.kind != .None do return nil, validation
 	if size == 0 do return nil, free_header(state, header)
-	result, error := allocate_in_scope(
-		state,
-		scopes.scope_of(header.lease),
-		size,
-		alignment,
-		zeroed,
-	)
+	result, error := allocate_in_scope(state, scopes.scope_of(header.lease), size, alignment, zeroed)
 	if error.kind != .None do return nil, error
 	copy(result, (cast([^]u8)header.data)[:header.size])
 	freed := free_header(state, header)

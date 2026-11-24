@@ -72,7 +72,7 @@ note_persistent :: proc(m: ^Model, lost: []Packet) {
 	oldest, newest: i64
 	count := 0
 	for p in lost {
-		if p.path_epoch!=m.path_epoch || p.path!=m.path || !p.ack_eliciting || p.sent_at <= m.first_rtt_sample {
+		if p.path_epoch != m.path_epoch || p.path != m.path || !p.ack_eliciting || p.sent_at <= m.first_rtt_sample {
 			continue
 		}
 		if count == 0 || p.sent_at < oldest {
@@ -96,7 +96,7 @@ note_persistent :: proc(m: ^Model, lost: []Packet) {
 on_packets_lost_cc :: proc(m: ^Model, now: i64, lost: []Packet) {
 	last := i64(-1)
 	for p in lost {
-		if p.path_epoch==m.path_epoch && p.path==m.path && p.in_flight && p.sent_at > last {
+		if p.path_epoch == m.path_epoch && p.path == m.path && p.in_flight && p.sent_at > last {
 			last = p.sent_at
 		}
 	}

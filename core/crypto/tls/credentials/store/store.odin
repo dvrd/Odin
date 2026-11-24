@@ -9,10 +9,13 @@ import "core:sync"
 import "core:time"
 
 Store :: struct {}
+
 Config :: struct {
 	max_generations, max_leases, max_retained_bytes: int,
 }
+
 DEFAULT_CONFIG :: Config{4, 1024, 16 << 20}
+
 Error_Kind :: enum {
 	None,
 	Invalid_Config,
@@ -27,6 +30,7 @@ Error_Kind :: enum {
 	Identity_Exhausted,
 	Credential_Failed,
 }
+
 Error :: struct {
 	kind:       Error_Kind,
 	credential: credentials.Error,
@@ -39,6 +43,7 @@ Lease :: struct {
 	_epoch, _id, _generation: u64,
 	_slot:                    int,
 }
+
 Stats :: struct {
 	config:                                                                  Config,
 	closed:                                                                  bool,
@@ -54,6 +59,7 @@ Generation_State :: enum u8 {
 	Retired,
 	Destroying,
 }
+
 @(private)
 Generation :: struct {
 	owner:         ^credentials.Credential,
@@ -61,32 +67,27 @@ Generation :: struct {
 	leases, bytes: int,
 	state:         Generation_State,
 }
+
 @(private)
 Lease_Record :: struct {
 	id, generation: u64,
 	index:          int,
 	active:         bool,
 }
+
 @(private)
 Owner :: struct {
-	mutex:          sync.Mutex,
-	allocator:      mem.Allocator,
-	config:         Config,
-	epoch,
-	next_generation,
-	next_lease:     u64,
-	generations:    []Generation,
-	leases:         []Lease_Record,
-	current,
-	free_lease:     int,
-	closed:         bool,
-	generation_count,
-	retired_count,
-	destroying_count,
-	lease_count,
-	retained_bytes,
-	metadata_bytes: int,
+	mutex:                                                                                          sync.Mutex,
+	allocator:                                                                                      mem.Allocator,
+	config:                                                                                         Config,
+	epoch, next_generation, next_lease:                                                             u64,
+	generations:                                                                                    []Generation,
+	leases:                                                                                         []Lease_Record,
+	current, free_lease:                                                                            int,
+	closed:                                                                                         bool,
+	generation_count, retired_count, destroying_count, lease_count, retained_bytes, metadata_bytes: int,
 }
+
 @(private)
 _next_store_epoch: u64
 
@@ -105,6 +106,7 @@ next_identity :: proc(counter: ^u64) -> (u64, bool) {
 		}
 	}
 }
+
 @(private)
 next_local_identity :: proc(counter: ^u64) -> (u64, bool) {
 	if counter^ == max(u64) {
@@ -113,6 +115,7 @@ next_local_identity :: proc(counter: ^u64) -> (u64, bool) {
 	counter^ += 1
 	return counter^, true
 }
+
 @(private)
 normalize :: proc(config: Config) -> (Config, bool) {
 	out := config
@@ -134,6 +137,7 @@ normalize :: proc(config: Config) -> (Config, bool) {
 	remaining := max(int) - size_of(Owner) - out.max_generations * size_of(Generation)
 	return out, out.max_leases <= remaining / size_of(Lease_Record)
 }
+
 @(private)
 wipe_free :: proc(allocator: mem.Allocator, data: []u8, alignment: int) {
 	if raw_data(data) == nil {
@@ -142,6 +146,7 @@ wipe_free :: proc(allocator: mem.Allocator, data: []u8, alignment: int) {
 	crypto.zero_explicit(raw_data(data), len(data))
 	_, _ = allocator.procedure(allocator.data, .Free, 0, alignment, raw_data(data), len(data))
 }
+
 @(private)
 allocate :: proc(allocator: mem.Allocator, size, alignment: int) -> ([]u8, mem.Allocator_Error) {
 	data, error := allocator.procedure(allocator.data, .Alloc, size, alignment, nil, 0)
@@ -165,7 +170,9 @@ create :: proc(config: Config, allocator: mem.Allocator) -> (^Store, Error) {
 		return nil, {kind = .Allocation_Failed, allocation = allocation}
 	}
 	owner := cast(^Owner)raw_data(storage)
-	owner.allocator = allocator; owner.config = normalized; owner.current = -1
+	owner.allocator = allocator
+	owner.config = normalized
+	owner.current = -1
 	success := false
 	defer if !success {
 		wipe_free(allocator, mem.slice_data_cast([]u8, owner.generations), align_of(Generation))
@@ -181,11 +188,7 @@ create :: proc(config: Config, allocator: mem.Allocator) -> (^Store, Error) {
 		return nil, {kind = .Allocation_Failed, allocation = ge}
 	}
 	owner.generations = mem.slice_data_cast([]Generation, generation_storage)
-	lease_storage, le := allocate(
-		allocator,
-		normalized.max_leases * size_of(Lease_Record),
-		align_of(Lease_Record),
-	)
+	lease_storage, le := allocate(allocator, normalized.max_leases * size_of(Lease_Record), align_of(Lease_Record))
 	if le != nil {
 		return nil, {kind = .Allocation_Failed, allocation = le}
 	}
@@ -206,7 +209,8 @@ stats :: proc(store: ^Store) -> (Stats, Error) {
 		return {}, {kind = .Invalid_Store}
 	}
 	owner := cast(^Owner)store
-	sync.mutex_lock(&owner.mutex); defer sync.mutex_unlock(&owner.mutex)
+	sync.mutex_lock(&owner.mutex)
+	defer sync.mutex_unlock(&owner.mutex)
 	current: u64
 	if owner.current >= 0 {
 		current = owner.generations[owner.current].id
@@ -231,8 +235,10 @@ mark_destroying :: proc(owner: ^Owner, index: int) {
 	generation := &owner.generations[index]
 	assert(generation.state == .Retired && generation.leases == 0)
 	generation.state = .Destroying
-	owner.retired_count -= 1; owner.destroying_count += 1
+	owner.retired_count -= 1
+	owner.destroying_count += 1
 }
+
 @(private)
 finish_destroy :: proc(owner: ^Owner, index: int) {
 	generation := &owner.generations[index]
@@ -242,7 +248,8 @@ finish_destroy :: proc(owner: ^Owner, index: int) {
 	sync.mutex_lock(&owner.mutex)
 	assert(generation.state == .Destroying && generation.leases == 0)
 	owner.retained_bytes -= generation.bytes
-	owner.generation_count -= 1; owner.destroying_count -= 1
+	owner.generation_count -= 1
+	owner.destroying_count -= 1
 	generation^ = {}
 	sync.mutex_unlock(&owner.mutex)
 }
@@ -261,23 +268,27 @@ replace :: proc(store: ^Store, candidate: ^^credentials.Credential) -> Error {
 	usage := credentials.storage_usage(incoming)
 	sync.mutex_lock(&owner.mutex)
 	if owner.closed {
-		sync.mutex_unlock(&owner.mutex); return {kind = .Closed}
+		sync.mutex_unlock(&owner.mutex)
+		return {kind = .Closed}
 	}
 	slot := -1
 	for generation, index in owner.generations {
 		if generation.state != .Free && generation.owner == incoming {
-			sync.mutex_unlock(&owner.mutex); return {kind = .Invalid_Input}
+			sync.mutex_unlock(&owner.mutex)
+			return {kind = .Invalid_Input}
 		}
 		if generation.state == .Free && slot < 0 {
 			slot = index
 		}
 	}
 	if slot < 0 || usage.retained_bytes > owner.config.max_retained_bytes - owner.retained_bytes {
-		sync.mutex_unlock(&owner.mutex); return {kind = .Capacity}
+		sync.mutex_unlock(&owner.mutex)
+		return {kind = .Capacity}
 	}
 	identity, available := next_local_identity(&owner.next_generation)
 	if !available {
-		sync.mutex_unlock(&owner.mutex); return {kind = .Identity_Exhausted}
+		sync.mutex_unlock(&owner.mutex)
+		return {kind = .Identity_Exhausted}
 	}
 	prior := owner.current
 	owner.generations[slot] = {
@@ -286,13 +297,17 @@ replace :: proc(store: ^Store, candidate: ^^credentials.Credential) -> Error {
 		bytes = usage.retained_bytes,
 		state = .Current,
 	}
-	owner.current = slot; owner.generation_count += 1; owner.retained_bytes += usage.retained_bytes
+	owner.current = slot
+	owner.generation_count += 1
+	owner.retained_bytes += usage.retained_bytes
 	candidate^ = nil
 	dispose := -1
 	if prior >= 0 {
-		owner.generations[prior].state = .Retired; owner.retired_count += 1
+		owner.generations[prior].state = .Retired
+		owner.retired_count += 1
 		if owner.generations[prior].leases == 0 {
-			mark_destroying(owner, prior); dispose = prior
+			mark_destroying(owner, prior)
+			dispose = prior
 		}
 	}
 	sync.mutex_unlock(&owner.mutex)
@@ -307,7 +322,8 @@ acquire :: proc(store: ^Store) -> (Lease, Error) {
 		return {}, {kind = .Invalid_Store}
 	}
 	owner := cast(^Owner)store
-	sync.mutex_lock(&owner.mutex); defer sync.mutex_unlock(&owner.mutex)
+	sync.mutex_lock(&owner.mutex)
+	defer sync.mutex_unlock(&owner.mutex)
 	if owner.closed {
 		return {}, {kind = .Closed}
 	}
@@ -324,7 +340,8 @@ acquire :: proc(store: ^Store) -> (Lease, Error) {
 	}
 	owner.free_lease = owner.leases[slot].index
 	generation := &owner.generations[owner.current]
-	generation.leases += 1; owner.lease_count += 1
+	generation.leases += 1
+	owner.lease_count += 1
 	owner.leases[slot] = {
 		id         = identity,
 		generation = generation.id,
@@ -336,10 +353,7 @@ acquire :: proc(store: ^Store) -> (Lease, Error) {
 
 @(private)
 lookup_lease :: proc(owner: ^Owner, lease: Lease) -> (int, Error) {
-	if lease._epoch != owner.epoch ||
-	   lease._id == 0 ||
-	   lease._slot < 0 ||
-	   lease._slot >= len(owner.leases) {
+	if lease._epoch != owner.epoch || lease._id == 0 || lease._slot < 0 || lease._slot >= len(owner.leases) {
 		return -1, {kind = .Invalid_Lease}
 	}
 	record := owner.leases[lease._slot]
@@ -347,8 +361,7 @@ lookup_lease :: proc(owner: ^Owner, lease: Lease) -> (int, Error) {
 		return -1, {kind = .Invalid_Lease}
 	}
 	generation := &owner.generations[record.index]
-	if generation.id != lease._generation ||
-	   (generation.state != .Current && generation.state != .Retired) {
+	if generation.id != lease._generation || (generation.state != .Current && generation.state != .Retired) {
 		return -1, {kind = .Invalid_Lease}
 	}
 	return record.index, {}
@@ -370,15 +383,18 @@ release :: proc(store: ^Store, lease: ^Lease) -> Error {
 	sync.mutex_lock(&owner.mutex)
 	index, error := lookup_lease(owner, lease^)
 	if error.kind != .None {
-		sync.mutex_unlock(&owner.mutex); return error
+		sync.mutex_unlock(&owner.mutex)
+		return error
 	}
 	slot := lease._slot
 	owner.leases[slot] = {
 		index = owner.free_lease,
-	}; owner.free_lease = slot
+	}
+	owner.free_lease = slot
 	lease^ = {}
 	generation := &owner.generations[index]
-	generation.leases -= 1; owner.lease_count -= 1
+	generation.leases -= 1
+	owner.lease_count -= 1
 	dispose := generation.state == .Retired && generation.leases == 0
 	if dispose {
 		mark_destroying(owner, index)
@@ -400,7 +416,8 @@ close :: proc(store: ^Store) -> Error {
 	sync.mutex_lock(&owner.mutex)
 	owner.closed = true
 	if owner.current >= 0 {
-		owner.generations[owner.current].state = .Retired; owner.retired_count += 1
+		owner.generations[owner.current].state = .Retired
+		owner.retired_count += 1
 		owner.current = -1
 	}
 	sync.mutex_unlock(&owner.mutex)
@@ -409,7 +426,9 @@ close :: proc(store: ^Store) -> Error {
 		dispose := -1
 		for generation, index in owner.generations {
 			if generation.state == .Retired && generation.leases == 0 {
-				mark_destroying(owner, index); dispose = index; break
+				mark_destroying(owner, index)
+				dispose = index
+				break
 			}
 		}
 		sync.mutex_unlock(&owner.mutex)
@@ -441,7 +460,8 @@ destroy :: proc(store: ^^Store) -> Error {
 	}
 	assert(owner.generation_count == 0)
 	allocator := owner.allocator
-	generations := owner.generations; leases := owner.leases
+	generations := owner.generations
+	leases := owner.leases
 	store^ = nil
 	wipe_free(allocator, mem.slice_data_cast([]u8, generations), align_of(Generation))
 	wipe_free(allocator, mem.slice_data_cast([]u8, leases), align_of(Lease_Record))
@@ -457,13 +477,15 @@ borrow :: proc(store: ^Store, lease: Lease) -> (^credentials.Credential, Error) 
 		return nil, {kind = .Invalid_Store}
 	}
 	owner := cast(^Owner)store
-	sync.mutex_lock(&owner.mutex); defer sync.mutex_unlock(&owner.mutex)
+	sync.mutex_lock(&owner.mutex)
+	defer sync.mutex_unlock(&owner.mutex)
 	index, error := lookup_lease(owner, lease)
 	if error.kind != .None {
 		return nil, error
 	}
 	return owner.generations[index].owner, {}
 }
+
 certificate_count :: proc(store: ^Store, lease: Lease) -> (int, Error) {
 	credential, error := borrow(store, lease)
 	if error.kind != .None {
@@ -471,24 +493,25 @@ certificate_count :: proc(store: ^Store, lease: Lease) -> (int, Error) {
 	}
 	return credentials.certificate_count(credential), {}
 }
+
 certificate_der :: proc(store: ^Store, lease: Lease, index: int) -> ([]u8, Error) {
 	credential, error := borrow(store, lease)
 	if error.kind != .None {
 		return nil, error
 	}
 	data, cause := credentials.certificate_der(credential, index)
-	return data,
-		Error{} if cause == .None else Error{kind = .Credential_Failed, credential = cause}
+	return data, Error{} if cause == .None else Error{kind = .Credential_Failed, credential = cause}
 }
+
 fingerprint :: proc(store: ^Store, lease: Lease) -> ([32]u8, Error) {
 	credential, error := borrow(store, lease)
 	if error.kind != .None {
 		return {}, error
 	}
 	digest, cause := credentials.fingerprint(credential)
-	return digest,
-		Error{} if cause == .None else Error{kind = .Credential_Failed, credential = cause}
+	return digest, Error{} if cause == .None else Error{kind = .Credential_Failed, credential = cause}
 }
+
 check_server_leaf :: proc(store: ^Store, lease: Lease, now: time.Time) -> Error {
 	credential, error := borrow(store, lease)
 	if error.kind != .None {
@@ -497,20 +520,17 @@ check_server_leaf :: proc(store: ^Store, lease: Lease, now: time.Time) -> Error 
 	cause := credentials.check_server_leaf(credential, now)
 	return {} if cause == .None else Error{kind = .Credential_Failed, credential = cause}
 }
+
 check_client_leaf :: proc(store: ^Store, lease: Lease, now: time.Time) -> Error {
- credential,error:=borrow(store,lease);if error.kind!=.None {return error}
- cause:=credentials.check_client_leaf(credential,now)
- return {} if cause==.None else Error{kind=.Credential_Failed,credential=cause}
+	credential, error := borrow(store, lease)
+	if error.kind != .None {
+		return error
+	}
+	cause := credentials.check_client_leaf(credential, now)
+	return {} if cause == .None else Error{kind = .Credential_Failed, credential = cause}
 }
-sign_digest_pss_sha256 :: proc(
-	store: ^Store,
-	lease: Lease,
-	digest: [32]u8,
-	out: []u8,
-) -> (
-	int,
-	Error,
-) {
+
+sign_digest_pss_sha256 :: proc(store: ^Store, lease: Lease, digest: [32]u8, out: []u8) -> (int, Error) {
 	credential, error := borrow(store, lease)
 	if error.kind != .None {
 		return 0, error
@@ -519,29 +539,60 @@ sign_digest_pss_sha256 :: proc(
 	return n, Error{} if cause == .None else Error{kind = .Credential_Failed, credential = cause}
 }
 
-certificate_algorithms :: proc(store: ^Store, lease: Lease, index: int) -> (credentials.Certificate_Algorithms, Error) {
+certificate_algorithms :: proc(
+	store: ^Store,
+	lease: Lease,
+	index: int,
+) -> (
+	credentials.Certificate_Algorithms,
+	Error,
+) {
 	credential, error := borrow(store, lease)
-	if error.kind != .None {return {}, error}
+	if error.kind != .None {
+		return {}, error
+	}
 	metadata, cause := credentials.certificate_algorithms(credential, index)
-	return metadata, Error{} if cause == .None else Error{kind=.Credential_Failed, credential=cause}
+	return metadata, Error{} if cause == .None else Error{kind = .Credential_Failed, credential = cause}
 }
 
 // Scheme identity and signing are valid only while this owning lease is live.
-signature_scheme :: proc(store:^Store, lease:Lease) -> (credentials.Signature_Scheme,Error) {
-	credential,error:=borrow(store,lease)
-	if error.kind!=.None {return .None,error}
-	return credentials.signature_scheme(credential),{}
-}
-sign_sha256 :: proc(store:^Store, lease:Lease, scheme:credentials.Signature_Scheme, message,out:[]u8) -> (int,Error) {
-	credential,error:=borrow(store,lease)
-	if error.kind!=.None {return 0,error}
-	n,cause:=credentials.sign_sha256(credential,scheme,message,out)
-	return n, Error{} if cause==.None else Error{kind=.Credential_Failed,credential=cause}
+signature_scheme :: proc(store: ^Store, lease: Lease) -> (credentials.Signature_Scheme, Error) {
+	credential, error := borrow(store, lease)
+	if error.kind != .None {
+		return .None, error
+	}
+	return credentials.signature_scheme(credential), {}
 }
 
-certificate_pss_parameters :: proc(store:^Store, lease:Lease, index:int) -> (credentials.Certificate_PSS_Parameters,Error) {
-	credential,error:=borrow(store,lease)
-	if error.kind!=.None {return {},error}
-	metadata,cause:=credentials.certificate_pss_parameters(credential,index)
-	return metadata, Error{} if cause==.None else Error{kind=.Credential_Failed,credential=cause}
+sign_sha256 :: proc(
+	store: ^Store,
+	lease: Lease,
+	scheme: credentials.Signature_Scheme,
+	message, out: []u8,
+) -> (
+	int,
+	Error,
+) {
+	credential, error := borrow(store, lease)
+	if error.kind != .None {
+		return 0, error
+	}
+	n, cause := credentials.sign_sha256(credential, scheme, message, out)
+	return n, Error{} if cause == .None else Error{kind = .Credential_Failed, credential = cause}
+}
+
+certificate_pss_parameters :: proc(
+	store: ^Store,
+	lease: Lease,
+	index: int,
+) -> (
+	credentials.Certificate_PSS_Parameters,
+	Error,
+) {
+	credential, error := borrow(store, lease)
+	if error.kind != .None {
+		return {}, error
+	}
+	metadata, cause := credentials.certificate_pss_parameters(credential, index)
+	return metadata, Error{} if cause == .None else Error{kind = .Credential_Failed, credential = cause}
 }

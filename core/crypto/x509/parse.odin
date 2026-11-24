@@ -334,15 +334,19 @@ _hash_from_oid :: proc(oid: []byte) -> (hash.Algorithm, bool) {
 // Generic AlgorithmIdentifier parsing deliberately accepts arbitrary parameters;
 // PSS must validate their hash-specific semantics before publishing metadata.
 @(private)
-_pss_hash_algorithm :: proc(cursor:^asn1.Cursor) -> (hash.Algorithm,Error) {
-	oid,parameters,e:=_read_algorithm_identifier(cursor)
-	if e!=.None || asn1.done(cursor)!=.None {return .Invalid,.Malformed}
-	if len(parameters)!=0 {
-		value:=asn1.Cursor{data=parameters}
-		if asn1.read_null(&value)!=.None || asn1.done(&value)!=.None {return .Invalid,.Malformed}
+_pss_hash_algorithm :: proc(cursor: ^asn1.Cursor) -> (hash.Algorithm, Error) {
+	oid, parameters, e := _read_algorithm_identifier(cursor)
+	if e != .None || asn1.done(cursor) != .None {
+		return .Invalid, .Malformed
 	}
-	algorithm,_:=_hash_from_oid(oid)
-	return algorithm,.None
+	if len(parameters) != 0 {
+		value := asn1.Cursor{data = parameters}
+		if asn1.read_null(&value) != .None || asn1.done(&value) != .None {
+			return .Invalid, .Malformed
+		}
+	}
+	algorithm, _ := _hash_from_oid(oid)
+	return algorithm, .None
 }
 
 // _parse_pss_params decodes RSASSA-PSS-params (RFC 4055 section 3.1) from the

@@ -6,7 +6,15 @@ import "core:crypto/hash"
 // Reuse the now unborrowed output grant for at most 36 input bytes. No new
 // allocation or persistent owner storage is needed after draining the flight.
 @(private)
-server_handshake_finished_feed :: proc(owner: ^Server_Handshake, level: Server_Handshake_Level, input: []u8) -> (consumed: int, status: Server_Handshake_Status, error: Server_Handshake_Error) {
+server_handshake_finished_feed :: proc(
+	owner: ^Server_Handshake,
+	level: Server_Handshake_Level,
+	input: []u8,
+) -> (
+	consumed: int,
+	status: Server_Handshake_Status,
+	error: Server_Handshake_Error,
+) {
 	if level != .Handshake {
 		server_handshake_fail(owner, .Wrong_Level)
 		return 0, .Terminal, .Wrong_Level
@@ -20,20 +28,23 @@ server_handshake_finished_feed :: proc(owner: ^Server_Handshake, level: Server_H
 	}
 	for owner._received < 4 && consumed < len(input) {
 		owner._header[owner._received] = input[consumed]
-		owner._received += 1; consumed += 1
+		owner._received += 1
+		consumed += 1
 		if owner._header[0] != u8(Handshake_Type.Finished) {
 			server_handshake_fail(owner, .Malformed)
 			return consumed, .Terminal, .Malformed
 		}
 	}
-	if owner._received < 4 {return consumed, .Need_Input, .None}
+	if owner._received < 4 {
+		return consumed, .Need_Input, .None
+	}
 	if owner._header[1] != 0 || owner._header[2] != 0 || int(owner._header[3]) != digest_size {
 		server_handshake_fail(owner, .Malformed)
 		return consumed, .Terminal, .Malformed
 	}
 	copy(owner._output[:4], owner._header[:])
-	n := min(len(input)-consumed, finished_size-owner._received)
-	copy(owner._output[owner._received:finished_size], input[consumed:consumed+n])
+	n := min(len(input) - consumed, finished_size - owner._received)
+	copy(owner._output[owner._received:finished_size], input[consumed:consumed + n])
 	owner._received += n
 	consumed += n
 	if owner._received < finished_size {
@@ -51,11 +62,14 @@ server_handshake_finished_feed :: proc(owner: ^Server_Handshake, level: Server_H
 		return consumed, .Terminal, .Malformed
 	}
 	if owner._resumed {
-  owner._peer_identity={authenticated=owner._resumption.claims.authenticated,certificate_sha256=owner._resumption.claims.peer}
-  owner._peer_expires=owner._resumption.claims.peer_expires
- }
- ticket:=server_resumption_issue(owner,owner._output[:finished_size])
- // Final authenticated transcript has been consumed by ticket derivation. Wipe handshake
+		owner._peer_identity = {
+			authenticated      = owner._resumption.claims.authenticated,
+			certificate_sha256 = owner._resumption.claims.peer,
+		}
+		owner._peer_expires = owner._resumption.claims.peer_expires
+	}
+	ticket := server_resumption_issue(owner, owner._output[:finished_size])
+	// Final authenticated transcript has been consumed by ticket derivation. Wipe handshake
 	// transients before Complete; keep selected parameters until its acceptance.
 	server_handshake_cleanup(owner, true)
 	if !server_handshake_id(owner) {
@@ -63,8 +77,18 @@ server_handshake_finished_feed :: proc(owner: ^Server_Handshake, level: Server_H
 		return consumed, .Terminal, .Identity_Exhausted
 	}
 	owner._phase = .Complete
-	owner._event = {id=owner._next_id, kind=.Complete}
- if ticket {owner._event={id=owner._next_id,kind=.Handshake_Bytes,level=.Application,bytes=owner._resumption.wire[:owner._resumption.wire_size]}}
+	owner._event = {
+		id   = owner._next_id,
+		kind = .Complete,
+	}
+	if ticket {
+		owner._event = {
+			id    = owner._next_id,
+			kind  = .Handshake_Bytes,
+			level = .Application,
+			bytes = owner._resumption.wire[:owner._resumption.wire_size],
+		}
+	}
 	return consumed, .Need_Event_Drain, .None
 }
 

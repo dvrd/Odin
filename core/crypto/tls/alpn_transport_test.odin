@@ -5,32 +5,52 @@ import "core:net"
 import "core:testing"
 import "core:time"
 
-ALPN_Bind_Probe :: struct { writes: int }
+ALPN_Bind_Probe :: struct {
+	writes: int,
+}
 
 alpn_bind_read :: proc(data: rawptr, dst: []u8) -> (int, net.Connection_Error) {
-	_ = data; _ = dst
+	_ = data
+	_ = dst
 	return 0, {kind = .Peer_Closed}
 }
+
 alpn_bind_write :: proc(data: rawptr, src: []u8) -> (int, net.Connection_Error) {
 	_ = src
 	(cast(^ALPN_Bind_Probe)data).writes += 1
 	return 0, {kind = .Peer_Closed}
 }
+
 alpn_bind_close :: proc(data: rawptr) -> net.Connection_Error {
 	_ = data
 	return {}
 }
-alpn_bind_submit :: proc(data: rawptr, op: ^net.Async_Operation, kind: net.Async_Operation_Kind, buffer: []u8, deadline: time.Time) -> net.Connection_Error {
-	_ = op; _ = kind; _ = buffer; _ = deadline
+
+alpn_bind_submit :: proc(
+	data: rawptr,
+	op: ^net.Async_Operation,
+	kind: net.Async_Operation_Kind,
+	buffer: []u8,
+	deadline: time.Time,
+) -> net.Connection_Error {
+	_ = op
+	_ = kind
+	_ = buffer
+	_ = deadline
 	(cast(^ALPN_Bind_Probe)data).writes += 1
 	return {kind = .Invalid_Connection}
 }
+
 alpn_bind_cancel :: proc(data: rawptr, op: ^net.Async_Operation) -> net.Connection_Error {
-	_ = data; _ = op
+	_ = data
+	_ = op
 	return {}
 }
+
 alpn_bind_schedule :: proc(data: rawptr, callback: proc(rawptr), user_data: rawptr) {
-	_ = data; _ = callback; _ = user_data
+	_ = data
+	_ = callback
+	_ = user_data
 }
 
 @(test)
@@ -39,7 +59,15 @@ alpn_transport_tcp_and_quic_offers_do_not_share_a_stack :: proc(t: ^testing.T) {
 	for protocols in ([?][]string{{"http/1.1"}, {"h2"}, {"http/1.1", "h2"}, {"h2", "http/1.1"}}) {
 		testing.expect_value(t, alpn_transport_offers(.TCP, protocols), .None)
 	}
-	for protocols in ([?][]string{{"h3"}, {"http/1.1", "h3"}, {"h2", "h3"}, {""}, {"http/2"}, {"H3"}, {"private/client"}}) {
+	for protocols in ([?][]string {
+			{"h3"},
+			{"http/1.1", "h3"},
+			{"h2", "h3"},
+			{""},
+			{"http/2"},
+			{"H3"},
+			{"private/client"},
+		}) {
 		testing.expect_value(t, alpn_transport_offers(.TCP, protocols), .Invalid_ALPN)
 	}
 	h3 := [1]string{ALPN_H3}
@@ -55,14 +83,22 @@ alpn_transport_tcp_and_quic_offers_do_not_share_a_stack :: proc(t: ^testing.T) {
 	testing.expect(t, n > 0)
 
 	root: x509.Certificate
-	base := Config{server_name = "localhost", root_cas = {&root}}
+	base := Config {
+		server_name = "localhost",
+		root_cas    = {&root},
+	}
 	testing.expect_value(t, config_validate(base), .None)
 	h3_config := base
 	h3_config.alpn_protocols = h3[:]
 	testing.expect_value(t, config_validate(h3_config), .None)
 
 	probe: ALPN_Bind_Probe
-	transport := net.Connection{data = &probe, read = alpn_bind_read, write = alpn_bind_write, close = alpn_bind_close}
+	transport := net.Connection {
+		data  = &probe,
+		read  = alpn_bind_read,
+		write = alpn_bind_write,
+		close = alpn_bind_close,
+	}
 	conn := new(Conn)
 	defer free(conn)
 	testing.expect_value(t, client(conn, transport, h3_config), .Invalid_ALPN)
@@ -99,8 +135,14 @@ alpn_transport_tcp_and_quic_offers_do_not_share_a_stack :: proc(t: ^testing.T) {
 
 	async_conn := new(Async_Conn)
 	defer free(async_conn)
-	underlying := net.Async_Connection{data = &probe, submit = alpn_bind_submit, cancel = alpn_bind_cancel}
-	executor := net.Async_Executor{schedule = alpn_bind_schedule}
+	underlying := net.Async_Connection {
+		data   = &probe,
+		submit = alpn_bind_submit,
+		cancel = alpn_bind_cancel,
+	}
+	executor := net.Async_Executor {
+		schedule = alpn_bind_schedule,
+	}
 	testing.expect_value(t, async_client(async_conn, underlying, executor, h3_config), .Invalid_ALPN)
 	testing.expect_value(t, probe.writes, 0)
 	testing.expect(t, !async_conn.initialized)

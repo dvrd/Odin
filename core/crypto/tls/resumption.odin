@@ -14,6 +14,7 @@ SESSION_NONCE_MAX :: 255
 SESSION_CACHE_CAP :: 8
 RESUMPTION_BINDER_LEN :: 32
 RESUMPTION_BINDERS_TAIL :: 2 + 1 + RESUMPTION_BINDER_LEN
+
 // psk_key_exchange_modes plus one pre_shared_key identity and one SHA-256 binder.
 MAX_RESUMPTION_EXTENSION :: 6 + 4 + 2 + 2 + SESSION_TICKET_MAX + 4 + RESUMPTION_BINDERS_TAIL
 
@@ -23,29 +24,29 @@ EXTENSION_PSK_MODES :: u16(45)
 PSK_DHE_KE :: u8(1)
 
 Session :: struct {
-	usable:          bool,
- alpn:[255]u8,
- alpn_len:int,
- client_identity:[32]u8,
- roots_identity:[32]u8,
- is_quic:bool,
- quic_profile:[SERVER_EARLY_CONTEXT_MAX]u8,
- quic_profile_len:int,
- quic_port:u16,
- quic_local_profile:[32]u8,
- has_client_identity:bool,
-	name:            [MAX_SERVER_NAME_SIZE]u8,
-	name_len:        int,
-	ticket:          [SESSION_TICKET_MAX]u8,
-	ticket_len:      int,
-	nonce:           [SESSION_NONCE_MAX]u8,
-	nonce_len:       int,
-	psk:             [32]u8,
-	age_add:         u32,
-	lifetime_sec:    u32,
-	received:        time.Time,
-	saw_early_data:  bool,
-	early_data_max:  u32,
+	usable:              bool,
+	alpn:                [255]u8,
+	alpn_len:            int,
+	client_identity:     [32]u8,
+	roots_identity:      [32]u8,
+	is_quic:             bool,
+	quic_profile:        [SERVER_EARLY_CONTEXT_MAX]u8,
+	quic_profile_len:    int,
+	quic_port:           u16,
+	quic_local_profile:  [32]u8,
+	has_client_identity: bool,
+	name:                [MAX_SERVER_NAME_SIZE]u8,
+	name_len:            int,
+	ticket:              [SESSION_TICKET_MAX]u8,
+	ticket_len:          int,
+	nonce:               [SESSION_NONCE_MAX]u8,
+	nonce_len:           int,
+	psk:                 [32]u8,
+	age_add:             u32,
+	lifetime_sec:        u32,
+	received:            time.Time,
+	saw_early_data:      bool,
+	early_data_max:      u32,
 }
 
 // Caller-owned. Slots are copies, so clearing the source session does not
@@ -87,8 +88,13 @@ session_early_keys :: proc(
 	keys: Quic_Direction_Keys,
 	err: Quic_Secret_Error,
 ) {
-	if session == nil || !session.usable || !session.saw_early_data || session.early_data_max == 0 ||
-	   policy == nil || policy.allow == nil || len(client_hello) == 0 {
+	if session == nil ||
+	   !session.usable ||
+	   !session.saw_early_data ||
+	   session.early_data_max == 0 ||
+	   policy == nil ||
+	   policy.allow == nil ||
+	   len(client_hello) == 0 {
 		return quic_early_packet_keys({})
 	}
 	secret, ok := session_early_secret(session)
@@ -135,9 +141,12 @@ session_cache_put :: proc(cache: ^Session_Cache, session: ^Session) -> bool {
 	if cache == nil || session == nil || !session.usable {
 		return false
 	}
-	if session.name_len < 1 || session.name_len > len(session.name) ||
-	   session.ticket_len < 1 || session.ticket_len > SESSION_TICKET_MAX ||
-	   session.lifetime_sec == 0 || session.lifetime_sec > 7 * 24 * 60 * 60 {
+	if session.name_len < 1 ||
+	   session.name_len > len(session.name) ||
+	   session.ticket_len < 1 ||
+	   session.ticket_len > SESSION_TICKET_MAX ||
+	   session.lifetime_sec == 0 ||
+	   session.lifetime_sec > 7 * 24 * 60 * 60 {
 		return false
 	}
 	name := string(session.name[:session.name_len])
@@ -154,7 +163,8 @@ session_cache_put :: proc(cache: ^Session_Cache, session: ^Session) -> bool {
 			}
 			continue
 		}
-		same := cache.slots[i].name_len == session.name_len &&
+		same :=
+			cache.slots[i].name_len == session.name_len &&
 			string(cache.slots[i].name[:cache.slots[i].name_len]) == name
 		if same {
 			slot = i
@@ -219,8 +229,14 @@ session_cache_lookup :: proc(cache: ^Session_Cache, server_name: string, now: ti
 }
 
 session_offerable :: proc(session: ^Session, server_name: string, now: time.Time) -> bool {
-	if session == nil || !session.usable || session.ticket_len < 1 || session.ticket_len > SESSION_TICKET_MAX ||
- session.name_len<1||session.name_len>len(session.name)||session.alpn_len<0||session.alpn_len>len(session.alpn) {
+	if session == nil ||
+	   !session.usable ||
+	   session.ticket_len < 1 ||
+	   session.ticket_len > SESSION_TICKET_MAX ||
+	   session.name_len < 1 ||
+	   session.name_len > len(session.name) ||
+	   session.alpn_len < 0 ||
+	   session.alpn_len > len(session.alpn) {
 		return false
 	}
 	if session.lifetime_sec == 0 || session.lifetime_sec > 7 * 24 * 60 * 60 {
@@ -310,14 +326,14 @@ session_remember :: proc(
 	psk := session_psk(resumption_master, nonce)
 	defer crypto.zero_explicit(&psk, size_of(psk))
 	next := Session {
-		usable = true,
-		name_len = len(server_name),
-		ticket_len = ticket_len,
-		nonce_len = nonce_len,
-		psk = psk,
-		age_add = age_add,
-		lifetime_sec = lifetime,
-		received = now,
+		usable         = true,
+		name_len       = len(server_name),
+		ticket_len     = ticket_len,
+		nonce_len      = nonce_len,
+		psk            = psk,
+		age_add        = age_add,
+		lifetime_sec   = lifetime,
+		received       = now,
 		saw_early_data = saw_early,
 		early_data_max = early_max,
 	}
@@ -647,21 +663,27 @@ resumption_strip_extension :: proc(dst, src: []u8, kind: u16) -> (int, bool) {
 
 @(private)
 session_resume_candidate :: proc(conn: ^Conn, now: time.Time) -> ^Session {
- // Scope selection before any PSK is put onto the wire.
+	// Scope selection before any PSK is put onto the wire.
 
 	if conn == nil {
 		return nil
 	}
-	conn.session_roots_identity=resumption_roots_identity(conn)
- conn.session_identity,conn.session_identity_present,conn.session_identity_valid=resumption_client_identity(conn)
-	if session_offerable(conn.config.session, conn.config.server_name, now) && resumption_scope_matches(conn,conn.config.session) {
+	conn.session_roots_identity = resumption_roots_identity(conn)
+	conn.session_identity, conn.session_identity_present, conn.session_identity_valid = resumption_client_identity(
+		conn,
+	)
+	if session_offerable(conn.config.session, conn.config.server_name, now) &&
+	   resumption_scope_matches(conn, conn.config.session) {
 		return conn.config.session
 	}
 	if conn.config.session_cache == nil {
 		return nil
 	}
-	candidate:=session_cache_lookup(conn.config.session_cache, conn.config.server_name, now)
- if !resumption_scope_matches(conn,candidate) {return nil};return candidate
+	candidate := session_cache_lookup(conn.config.session_cache, conn.config.server_name, now)
+	if !resumption_scope_matches(conn, candidate) {
+		return nil
+	}
+	return candidate
 }
 
 @(private)
@@ -680,14 +702,8 @@ resumption_remember_ticket :: proc(conn: ^Conn, message: []u8) {
 
 	now := time.now()
 	if conn.config.session != nil {
-		_ = session_remember(
-			conn.config.session,
-			resumption_secret,
-			message,
-			conn.config.server_name,
-			now,
-		)
-		resumption_scope_bind(conn,conn.config.session)
+		_ = session_remember(conn.config.session, resumption_secret, message, conn.config.server_name, now)
+		resumption_scope_bind(conn, conn.config.session)
 		if conn.config.session.usable && conn.config.session_cache != nil {
 			_ = session_cache_put(conn.config.session_cache, conn.config.session)
 		}
@@ -699,15 +715,19 @@ resumption_remember_ticket :: proc(conn: ^Conn, message: []u8) {
 	temp: Session
 	defer session_clear(&temp)
 	if session_remember(&temp, resumption_secret, message, conn.config.server_name, now) {
-		resumption_scope_bind(conn,&temp)
+		resumption_scope_bind(conn, &temp)
 		_ = session_cache_put(conn.config.session_cache, &temp)
 	}
 }
 
 @(private)
 early_data_usable :: proc(conn: ^Conn, method: string) -> bool {
-	return conn != nil && conn.phase != .Failed && conn.phase != .Closed &&
-		len(method) > 0 && conn.config.early_data != nil && conn.config.early_data.allow != nil
+	return conn != nil &&
+		conn.phase != .Failed &&
+		conn.phase != .Closed &&
+		len(method) > 0 &&
+		conn.config.early_data != nil &&
+		conn.config.early_data.allow != nil
 }
 
 // One application effect for this handshake. Acceptance of a replay-safe method
@@ -767,39 +787,84 @@ connection_early_data_fallback :: proc(
 }
 
 @(private)
-resumption_client_identity :: proc(conn:^Conn)->(fingerprint:[32]u8,present,valid:bool) {
- if conn.config.client_credentials==nil {return {},false,true}
- owner:=conn.config.client_credentials;lease:credential_store.Lease
- if conn.config.client_credential_lease!=nil {lease=conn.config.client_credential_lease^} else {
-  l,e:=credential_store.acquire(owner);if e.kind!=.None {return {},true,false};lease=l
-  defer _=credential_store.release(owner,&lease)
-  f,fe:=credential_store.fingerprint(owner,lease);return f,true,fe.kind==.None
- }
- f,fe:=credential_store.fingerprint(owner,lease);return f,true,fe.kind==.None
-}
-@(private)
-resumption_scope_matches :: proc(conn:^Conn,session:^Session)->bool {
- if session==nil {return false};identity,present,valid:=resumption_client_identity(conn)
- if session.roots_identity!=resumption_roots_identity(conn) {return false}
- if !valid||session.has_client_identity!=present||present&&session.client_identity!=identity {return false}
- if session.alpn_len==0 {return len(conn.config.alpn_protocols)==0}
- for protocol in conn.config.alpn_protocols {if protocol==string(session.alpn[:session.alpn_len]) {return true}}
- return false
-}
-@(private)
-resumption_scope_bind :: proc(conn:^Conn,session:^Session) {
- if !session.usable {return};identity,present,valid:=conn.session_identity,conn.session_identity_present,conn.session_identity_valid
- if !valid&&conn.config.client_credentials==nil {valid=true;present=false;identity={}}
- if !valid {session_clear(session);return}
- session.roots_identity=conn.session_roots_identity
- session.client_identity=identity;session.has_client_identity=present
- session.alpn_len=copy(session.alpn[:],conn.alpn_selected[:conn.alpn_selected_size])
+resumption_client_identity :: proc(conn: ^Conn) -> (fingerprint: [32]u8, present, valid: bool) {
+	if conn.config.client_credentials == nil {
+		return {}, false, true
+	}
+	owner := conn.config.client_credentials
+	lease: credential_store.Lease
+	if conn.config.client_credential_lease != nil {
+		lease = conn.config.client_credential_lease^
+	} else {
+		l, e := credential_store.acquire(owner)
+		if e.kind != .None {
+			return {}, true, false
+		}
+		lease = l
+		defer _ = credential_store.release(owner, &lease)
+		f, fe := credential_store.fingerprint(owner, lease)
+		return f, true, fe.kind == .None
+	}
+	f, fe := credential_store.fingerprint(owner, lease)
+	return f, true, fe.kind == .None
 }
 
 @(private)
-resumption_roots_identity :: proc(conn:^Conn)->(out:[32]u8) {
- if len(conn.config.root_cas)==0 {return}
- hash:sha2.Context_256;sha2.init_256(&hash)
- for root in conn.config.root_cas {if root!=nil {sha2.update(&hash,root.raw)}}
- sha2.final(&hash,out[:]);return
+resumption_scope_matches :: proc(conn: ^Conn, session: ^Session) -> bool {
+	if session == nil {
+		return false
+	}
+	identity, present, valid := resumption_client_identity(conn)
+	if session.roots_identity != resumption_roots_identity(conn) {
+		return false
+	}
+	if !valid || session.has_client_identity != present || present && session.client_identity != identity {
+		return false
+	}
+	if session.alpn_len == 0 {
+		return len(conn.config.alpn_protocols) == 0
+	}
+	for protocol in conn.config.alpn_protocols {
+		if protocol == string(session.alpn[:session.alpn_len]) {
+			return true
+		}
+	}
+	return false
+}
+
+@(private)
+resumption_scope_bind :: proc(conn: ^Conn, session: ^Session) {
+	if !session.usable {
+		return
+	}
+	identity, present, valid := conn.session_identity, conn.session_identity_present, conn.session_identity_valid
+	if !valid && conn.config.client_credentials == nil {
+		valid = true
+		present = false
+		identity = {}
+	}
+	if !valid {
+		session_clear(session)
+		return
+	}
+	session.roots_identity = conn.session_roots_identity
+	session.client_identity = identity
+	session.has_client_identity = present
+	session.alpn_len = copy(session.alpn[:], conn.alpn_selected[:conn.alpn_selected_size])
+}
+
+@(private)
+resumption_roots_identity :: proc(conn: ^Conn) -> (out: [32]u8) {
+	if len(conn.config.root_cas) == 0 {
+		return
+	}
+	hash: sha2.Context_256
+	sha2.init_256(&hash)
+	for root in conn.config.root_cas {
+		if root != nil {
+			sha2.update(&hash, root.raw)
+		}
+	}
+	sha2.final(&hash, out[:])
+	return
 }

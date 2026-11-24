@@ -12,13 +12,17 @@ import credential_store "credentials/store"
 server_flight_signing_cost :: proc(t: ^testing.T) {
 	for large in ([]bool{false, true}) {
 		store := flight_test_store(t, large)
-		lease, e := credential_store.acquire(store); assert(e.kind == .None)
+		lease, e := credential_store.acquire(store)
+		assert(e.kind == .None)
 		before, after: posix.rusage
 		assert(posix.getrusage(.SELF, &before) == {})
 		started := time.tick_now()
 		for _ in 0 ..< 3 {
-			output: [512]u8; digest: [32]u8; digest[0] = 153
-			prior := context.allocator; context.allocator = mem.panic_allocator()
+			output: [512]u8
+			digest: [32]u8
+			digest[0] = 153
+			prior := context.allocator
+			context.allocator = mem.panic_allocator()
 			n, se := credential_store.sign_digest_pss_sha256(store, lease, digest, output[:])
 			context.allocator = prior
 			testing.expect(t, se.kind == .None && n == (512 if large else 256))

@@ -7,31 +7,43 @@ import "core:thread"
 
 Work :: struct {
 	credential: ^credentials.Credential,
-	scheme: credentials.Signature_Scheme,
+	scheme:     credentials.Signature_Scheme,
 	signatures: [8][512]u8,
-	length: [8]int,
+	length:     [8]int,
 	error:      credentials.Error,
 }
+
 run :: proc(work: ^Work) {
-	for &signature,i in work.signatures {
-		n, error := credentials.sign_sha256(work.credential, work.scheme, transmute([]u8)string("credential-concurrency-fixture"), signature[:])
+	for &signature, i in work.signatures {
+		n, error := credentials.sign_sha256(
+			work.credential,
+			work.scheme,
+			transmute([]u8)string("credential-concurrency-fixture"),
+			signature[:],
+		)
 		if error != .None {
-			work.error = error; return
+			work.error = error
+			return
 		}
 		work.length[i] = n
 	}
 }
+
 main :: proc() {
 	assert(len(os.args) == 4)
-	cert, ce := os.read_entire_file(os.args[1], context.allocator); assert(ce == nil)
+	cert, ce := os.read_entire_file(os.args[1], context.allocator)
+	assert(ce == nil)
 	defer delete(cert)
-	key, ke := os.read_entire_file(os.args[2], context.allocator); assert(ke == nil)
+	key, ke := os.read_entire_file(os.args[2], context.allocator)
+	assert(ke == nil)
 	defer delete(key)
 	defer crypto.zero_explicit(raw_data(key), len(key))
-	owner, error := credentials.create(cert, key, {}, context.allocator); assert(error == .None)
+	owner, error := credentials.create(cert, key, {}, context.allocator)
+	assert(error == .None)
 	defer credentials.destroy(&owner)
 	before := credentials.storage_usage(owner)
-	fingerprint, fe := credentials.fingerprint(owner); assert(fe == .None)
+	fingerprint, fe := credentials.fingerprint(owner)
+	assert(fe == .None)
 	jobs: [8]Work
 	threads: [8]^thread.Thread
 	for &job, i in jobs {

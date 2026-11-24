@@ -7,7 +7,8 @@ reserve :: proc(scope: Scope, cost: Cost, phase: Job_Phase = .None) -> (Lease, E
 	if node == nil do return {}, .Invalid_Handle
 	if !phase_valid(cost, phase) do return {}, .Invalid_Config
 	root := node.root
-	sync.lock(&root.mu); defer sync.unlock(&root.mu)
+	sync.lock(&root.mu)
+	defer sync.unlock(&root.mu)
 	error: Error
 	if path_closed(node) do error = .Closed
 	else if node.references == max(u64) do error = .Overflow
@@ -18,7 +19,8 @@ reserve :: proc(scope: Scope, cost: Cost, phase: Job_Phase = .None) -> (Lease, E
 		}
 	}
 	if error != .None {
-		reject(node); return {}, error
+		reject(node)
+		return {}, error
 	}
 	for ancestor := node; ancestor != nil; ancestor = ancestor.parent {
 		change_usage(ancestor, {}, cost, .None, phase)
@@ -31,14 +33,15 @@ reserve :: proc(scope: Scope, cost: Cost, phase: Job_Phase = .None) -> (Lease, E
 // rejects; reducing/refunding remains possible. The existing job phase persists.
 replace :: proc(owner: ^Lease, cost: Cost) -> Error {
 	if owner == nil || owner._node == nil do return .Invalid_Handle
-	node := owner._node; old := owner._cost
+	node := owner._node
+	old := owner._cost
 	phase := owner._phase
 	if cost.jobs == 0 do phase = .None
 	if !phase_valid(cost, phase) do return .Invalid_Config
-	sync.lock(&node.root.mu); defer sync.unlock(&node.root.mu)
+	sync.lock(&node.root.mu)
+	defer sync.unlock(&node.root.mu)
 	error: Error
-	if (cost.bytes > old.bytes || cost.streams > old.streams || cost.jobs > old.jobs) &&
-	   path_closed(node) {
+	if (cost.bytes > old.bytes || cost.streams > old.streams || cost.jobs > old.jobs) && path_closed(node) {
 		error = .Closed
 	}
 	if error == .None {
@@ -48,7 +51,8 @@ replace :: proc(owner: ^Lease, cost: Cost) -> Error {
 		}
 	}
 	if error != .None {
-		reject(node); return error
+		reject(node)
+		return error
 	}
 	for ancestor := node; ancestor != nil; ancestor = ancestor.parent {
 		change_usage(ancestor, old, cost, owner._phase, phase)
@@ -63,7 +67,8 @@ set_job_phase :: proc(owner: ^Lease, phase: Job_Phase) -> Error {
 	if owner == nil || owner._node == nil do return .Invalid_Handle
 	if !phase_valid(owner._cost, phase) do return .Invalid_Config
 	node := owner._node
-	sync.lock(&node.root.mu); defer sync.unlock(&node.root.mu)
+	sync.lock(&node.root.mu)
+	defer sync.unlock(&node.root.mu)
 	for ancestor := node; ancestor != nil; ancestor = ancestor.parent {
 		change_usage(ancestor, owner._cost, owner._cost, owner._phase, phase)
 	}
@@ -92,7 +97,9 @@ rebind :: proc(owner: ^Lease, destination: Scope) -> Error {
 		}
 	}
 	if error != .None {
-		reject(target); sync.unlock(&root.mu); return error
+		reject(target)
+		sync.unlock(&root.mu)
+		return error
 	}
 	for ancestor := old; ancestor != common; ancestor = ancestor.parent {
 		change_usage(ancestor, owner._cost, {}, owner._phase, .None)
@@ -100,15 +107,18 @@ rebind :: proc(owner: ^Lease, destination: Scope) -> Error {
 	for ancestor := target; ancestor != common; ancestor = ancestor.parent {
 		change_usage(ancestor, {}, owner._cost, .None, owner._phase)
 	}
-	target.references += 1; owner._node = target
+	target.references += 1
+	owner._node = target
 	sync.unlock(&root.mu)
-	previous := Scope{old}; release_scope(&previous)
+	previous := Scope{old}
+	release_scope(&previous)
 	return .None
 }
 
 release :: proc(owner: ^Lease) {
 	if owner == nil do return
-	old := owner^; owner^ = {}
+	old := owner^
+	owner^ = {}
 	if old._node == nil do return
 	node := old._node
 	sync.lock(&node.root.mu)
@@ -116,7 +126,8 @@ release :: proc(owner: ^Lease) {
 		change_usage(ancestor, old._cost, {}, old._phase, .None)
 	}
 	sync.unlock(&node.root.mu)
-	scope := Scope{node}; release_scope(&scope)
+	scope := Scope{node}
+	release_scope(&scope)
 }
 
 // These return borrowed views; retaining scope_of explicitly creates an owner.

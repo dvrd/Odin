@@ -11,7 +11,8 @@ numeric_connect_is_nonblocking_and_preserves_native_ownership :: proc(t: ^testin
 	for address in ([]Address{IP4_Loopback, IP6_Loopback}) {
 		listener, error := listen_tcp({address, 0})
 		assert(error == nil)
-		endpoint, be := bound_endpoint(listener); assert(be == .None)
+		endpoint, be := bound_endpoint(listener)
+		assert(be == .None)
 		socket, connected, cause := begin_tcp_connect(endpoint)
 		testing.expect(t, cause == nil)
 		started := time.tick_now()
@@ -23,19 +24,24 @@ numeric_connect_is_nonblocking_and_preserves_native_ownership :: proc(t: ^testin
 			}
 		}
 		testing.expect(t, connected && cause == nil)
-		peer, _, accept_error := accept_tcp(listener); assert(accept_error == .None)
+		peer, _, accept_error := accept_tcp(listener)
+		assert(accept_error == .None)
 		buffer: [1]u8
 		_, read_error := recv_tcp(socket, buffer[:])
 		testing.expect_value(t, read_error, .Would_Block)
-		close(peer); close(socket); close(listener)
+		close(peer)
+		close(socket)
+		close(listener)
 	}
 }
 
 @(test)
 numeric_connect_refusal_is_terminal_but_poll_does_not_close :: proc(t: ^testing.T) {
 	testing.set_fail_timeout(t, 5 * time.Second)
-	listener, error := listen_tcp({IP4_Loopback, 0}); assert(error == nil)
-	endpoint, be := bound_endpoint(listener); assert(be == .None)
+	listener, error := listen_tcp({IP4_Loopback, 0})
+	assert(error == nil)
+	endpoint, be := bound_endpoint(listener)
+	assert(be == .None)
 	close(listener)
 	socket, connected, cause := begin_tcp_connect(endpoint)
 	if cause == nil {

@@ -119,9 +119,7 @@ flight_extensions :: proc(dst: []u8, params, extra: []u8) -> []u8 {
 }
 
 flight_certificate :: proc(dst: []u8) -> []u8 {
-	block, _, decode_error := pem.decode(
-		#load("../../../../../tests/core/crypto/tls/testdata/leaf.pem"),
-	)
+	block, _, decode_error := pem.decode(#load("../../../../../tests/core/crypto/tls/testdata/leaf.pem"))
 	if decode_error != nil || block == nil {
 		return nil
 	}
@@ -212,8 +210,7 @@ build_flight :: proc(t: ^testing.T) -> ^Flight {
 	at += copy(f.flight[at:], cv)
 	at += copy(f.flight[at:], server_finished[:])
 	f.flight_n = at
-	if tls.root_pool_parse(&f.pool, #load("../../../../../tests/core/crypto/tls/testdata/root.pem")).kind !=
-	   .None {
+	if tls.root_pool_parse(&f.pool, #load("../../../../../tests/core/crypto/tls/testdata/root.pem")).kind != .None {
 		testing.expect(t, false)
 		return f
 	}
@@ -422,10 +419,7 @@ conn_establishes_and_exchanges_streams :: proc(t: ^testing.T) {
 	settle(t, p)
 	got: [8]u8
 	rn, fin, re := conn.read(p.server, 0, got[:])
-	testing.expect(
-		t,
-		re == .None && fin && rn == len(payload) && bytes.equal(got[:rn], payload[:]),
-	)
+	testing.expect(t, re == .None && fin && rn == len(payload) && bytes.equal(got[:rn], payload[:]))
 	rn, fin, re = conn.read(p.client, 1, got[:])
 	testing.expect(t, re == .None && fin && rn == len(reply) && bytes.equal(got[:rn], reply[:]))
 }
@@ -516,10 +510,7 @@ conn_loss_duplicate_reorder_stall_and_timers :: proc(t: ^testing.T) {
 	pto := conn.timer(p.server, i64(p.link.now))
 	testing.expect(t, pto.armed)
 	model_timer := harness.loss_detection_timer(&p.server.model, i64(p.link.now))
-	testing.expect(
-		t,
-		model_timer.armed && model_timer.at == pto.at && model_timer.kind == pto.kind,
-	)
+	testing.expect(t, model_timer.armed && model_timer.at == pto.at && model_timer.kind == pto.kind)
 	_, te = conn.on_timeout(p.server, pto.at, buf[:])
 	testing.expect(t, te == .None && conn.stats(p.server).pto_count >= 1)
 
@@ -594,10 +585,7 @@ conn_flow_reset_close_congestion_and_bounds :: proc(t: ^testing.T) {
 			cwnd = flight.congestion_window
 		}
 	}
-	testing.expect(
-		t,
-		hit && conn.stats(p.client).bytes_in_flight <= conn.stats(p.client).congestion_window,
-	)
+	testing.expect(t, hit && conn.stats(p.client).bytes_in_flight <= conn.stats(p.client).congestion_window)
 	close_pair(p)
 
 	p = open_pair(t, wide_limits(), false)
@@ -723,58 +711,85 @@ conn_cancel_version_path_and_key_update :: proc(t: ^testing.T) {
 
 @(test)
 review_stream_loss_must_retransmit_data :: proc(t: ^testing.T) {
-	p := open_pair(t, wide_limits(), false); defer close_pair(p); settle(t, p)
+	p := open_pair(t, wide_limits(), false)
+	defer close_pair(p)
+	settle(t, p)
 	data := [?]u8{'l', 'o', 's', 't'}
-	n, e := conn.write(p.client, 0, data[:], true); assert(n == 4 && e == .None)
-	sent, se := post(p, p.client, {drop = true}); assert(sent > 0 && se == .None)
+	n, e := conn.write(p.client, 0, data[:], true)
+	assert(n == 4 && e == .None)
+	sent, se := post(p, p.client, {drop = true})
+	assert(sent > 0 && se == .None)
 	for _ in 0 ..< 8 {
-		timer := conn.timer(p.client, i64(p.link.now)); if !timer.armed {
+		timer := conn.timer(p.client, i64(p.link.now))
+		if !timer.armed {
 			break
 		}
 		p.link.now = sim.Tick(timer.at)
 		packet: [conn.MAX_DATAGRAM]u8
-		timeout_n, err := conn.on_timeout(p.client, timer.at, packet[:]); assert(err == .None)
+		timeout_n, err := conn.on_timeout(p.client, timer.at, packet[:])
+		assert(err == .None)
 		if timeout_n > 0 {
 			src, dst := endpoint(p.client, p)
 			assert(sim.send(&p.link, src, dst, packet[:timeout_n], {}) == .None)
 		}
-		assert(deliver(p, i64(p.link.now)) == .None); settle(t, p)
+		assert(deliver(p, i64(p.link.now)) == .None)
+		settle(t, p)
 	}
-	got: [8]u8; rn, fin, re := conn.read(p.server, 0, got[:])
+	got: [8]u8
+	rn, fin, re := conn.read(p.server, 0, got[:])
 	testing.expect(t, rn == 4 && fin && re == .None, "lost STREAM must be retransmitted")
 }
+
 @(test)
 review_stream_reordering_must_not_fail_connection :: proc(t: ^testing.T) {
-	p := open_pair(t, wide_limits(), false); defer close_pair(p); settle(t, p)
-	a := [?]u8{'a'}; b := [?]u8{'b'}
-	n, e := conn.write(p.client, 0, a[:], false); assert(n == 1 && e == .None)
-	_, se := post(p, p.client, {delay = 100}); assert(se == .None)
-	n, e = conn.write(p.client, 0, b[:], true); assert(n == 1 && e == .None)
-	_, se = post(p, p.client, {}); assert(se == .None)
-	re := deliver(p, i64(p.link.now)); testing.expect_value(t, re, .None)
+	p := open_pair(t, wide_limits(), false)
+	defer close_pair(p)
+	settle(t, p)
+	a := [?]u8{'a'}
+	b := [?]u8{'b'}
+	n, e := conn.write(p.client, 0, a[:], false)
+	assert(n == 1 && e == .None)
+	_, se := post(p, p.client, {delay = 100})
+	assert(se == .None)
+	n, e = conn.write(p.client, 0, b[:], true)
+	assert(n == 1 && e == .None)
+	_, se = post(p, p.client, {})
+	assert(se == .None)
+	re := deliver(p, i64(p.link.now))
+	testing.expect_value(t, re, .None)
 }
 
 @(test)
 review_stream_can_continue_after_ack_and_consume :: proc(t: ^testing.T) {
-	p := open_pair(t, wide_limits(), false); defer close_pair(p); settle(t, p)
-	a: [256]u8; for &v in a {v = 'a'}
-	n, e := conn.write(p.client, 0, a[:], false); assert(n == 256 && e == .None); settle(t, p)
-	got: [256]u8; rn, fin, re := conn.read(p.server, 0, got[:])
-	assert(rn == 256 && !fin && re == .None); settle(t, p)
-	b := [?]u8{'b'}; n, e = conn.write(p.client, 0, b[:], true)
-	testing.expect(
-		t,
-		n == 1 && e == .None,
-		"acknowledged consumed stream must regain bounded buffer capacity",
-	)
+	p := open_pair(t, wide_limits(), false)
+	defer close_pair(p)
+	settle(t, p)
+	a: [256]u8
+	for &v in a {v = 'a'}
+	n, e := conn.write(p.client, 0, a[:], false)
+	assert(n == 256 && e == .None)
+	settle(t, p)
+	got: [256]u8
+	rn, fin, re := conn.read(p.server, 0, got[:])
+	assert(rn == 256 && !fin && re == .None)
+	settle(t, p)
+	b := [?]u8{'b'}
+	n, e = conn.write(p.client, 0, b[:], true)
+	testing.expect(t, n == 1 && e == .None, "acknowledged consumed stream must regain bounded buffer capacity")
 }
 
 @(test)
 conn_incremental_sliding_credit_and_bidi_response :: proc(t: ^testing.T) {
-	limits := wide_limits(); limits.max_stream_data = 256; limits.recv_max_stream_data = 256
-	limits.max_data = 256; limits.recv_max_data = 256
-	p := open_pair(t, limits, false); defer close_pair(p); settle(t, p)
-	data: [256]u8; got: [256]u8
+	limits := wide_limits()
+	limits.max_stream_data = 256
+	limits.recv_max_stream_data = 256
+	limits.max_data = 256
+	limits.recv_max_data = 256
+	p := open_pair(t, limits, false)
+	defer close_pair(p)
+	settle(t, p)
+	data: [256]u8
+	got: [256]u8
 	for round in 0 ..< 16 {
 		for &v, i in data {v = u8((round + i) % 251)}
 		n, e := conn.write(p.client, 0, data[:], round == 15)
@@ -788,59 +803,92 @@ conn_incremental_sliding_credit_and_bidi_response :: proc(t: ^testing.T) {
 		testing.expect_value(t, conn.stats(p.server).retained, 0)
 	}
 	response := [?]u8{'o', 'k'}
-	n, e := conn.write(p.server, 0, response[:], true); testing.expect(t, n == 2 && e == .None)
+	n, e := conn.write(p.server, 0, response[:], true)
+	testing.expect(t, n == 2 && e == .None)
 	settle(t, p)
-	rn, fin, re := conn.read(p.client, 0, got[:]); testing.expect(t, rn == 2 && fin && re == .None)
-	// Uni streams use their own stream-ID kind and never permit reverse writes.
-	n, e = conn.write(p.client, 2, response[:], true); testing.expect(t, n == 2 && e == .None)
-	settle(t, p); rn, fin, re = conn.read(p.server, 2, got[:])
+	rn, fin, re := conn.read(p.client, 0, got[:])
 	testing.expect(t, rn == 2 && fin && re == .None)
-	_, e = conn.write(p.server, 2, response[:], true); testing.expect_value(t, e, .Protocol)
+	// Uni streams use their own stream-ID kind and never permit reverse writes.
+	n, e = conn.write(p.client, 2, response[:], true)
+	testing.expect(t, n == 2 && e == .None)
+	settle(t, p)
+	rn, fin, re = conn.read(p.server, 2, got[:])
+	testing.expect(t, rn == 2 && fin && re == .None)
+	_, e = conn.write(p.server, 2, response[:], true)
+	testing.expect_value(t, e, .Protocol)
 }
 
 @(test)
 conn_reorder_duplicate_fin_and_reset_recovery :: proc(t: ^testing.T) {
-	p := open_pair(t, wide_limits(), false); defer close_pair(p); settle(t, p)
-	a := [?]u8{'a', 'b'}; b := [?]u8{'c', 'd'}
-	n, e := conn.write(p.client, 0, a[:], false); assert(n == 2 && e == .None)
+	p := open_pair(t, wide_limits(), false)
+	defer close_pair(p)
+	settle(t, p)
+	a := [?]u8{'a', 'b'}
+	b := [?]u8{'c', 'd'}
+	n, e := conn.write(p.client, 0, a[:], false)
+	assert(n == 2 && e == .None)
 	_, e = post(p, p.client, {delay = 100, duplicate = true, duplicate_delay = 150})
 	assert(e == .None)
-	n, e = conn.write(p.client, 0, b[:], true); assert(n == 2 && e == .None)
-	_, e = post(p, p.client, {}); assert(e == .None)
+	n, e = conn.write(p.client, 0, b[:], true)
+	assert(n == 2 && e == .None)
+	_, e = post(p, p.client, {})
+	assert(e == .None)
 	assert(deliver(p, i64(p.link.now)) == .None)
-	got: [8]u8; rn, fin, re := conn.read(p.server, 0, got[:])
+	got: [8]u8
+	rn, fin, re := conn.read(p.server, 0, got[:])
 	testing.expect(t, rn == 0 && !fin && re == .None)
-	p.link.now += 100; assert(deliver(p, i64(p.link.now)) == .None)
-	rn, fin, re = conn.read(p.server, 0, got[:]); testing.expect(t, rn == 4 && fin && re == .None)
+	p.link.now += 100
+	assert(deliver(p, i64(p.link.now)) == .None)
+	rn, fin, re = conn.read(p.server, 0, got[:])
+	testing.expect(t, rn == 4 && fin && re == .None)
 	testing.expect(t, bytes.equal(got[:4], []u8{'a', 'b', 'c', 'd'}))
-	p.link.now += 50; assert(deliver(p, i64(p.link.now)) == .None); settle(t, p)
-	rn, fin, re = conn.read(p.server, 0, got[:]); testing.expect(t, rn == 0 && fin && re == .None)
+	p.link.now += 50
+	assert(deliver(p, i64(p.link.now)) == .None)
+	settle(t, p)
+	rn, fin, re = conn.read(p.server, 0, got[:])
+	testing.expect(t, rn == 0 && fin && re == .None)
 	// Lost empty FIN must retry even though it has no payload bytes.
-	n, e = conn.write(p.client, 4, nil, true); assert(n == 0 && e == .None)
-	_, e = post(p, p.client, {drop = true}); assert(e == .None)
-	due := conn.timer(p.client, i64(p.link.now)); assert(due.armed); p.link.now = sim.Tick(due.at)
-	packet: [conn.MAX_DATAGRAM]u8; n, e = conn.on_timeout(p.client, due.at, packet[:])
+	n, e = conn.write(p.client, 4, nil, true)
+	assert(n == 0 && e == .None)
+	_, e = post(p, p.client, {drop = true})
+	assert(e == .None)
+	due := conn.timer(p.client, i64(p.link.now))
+	assert(due.armed)
+	p.link.now = sim.Tick(due.at)
+	packet: [conn.MAX_DATAGRAM]u8
+	n, e = conn.on_timeout(p.client, due.at, packet[:])
 	assert(e == .None)
 	if n > 0 {
 		src, dst := endpoint(p.client, p)
 		assert(sim.send(&p.link, src, dst, packet[:n], {}) == .None)
 	}
-	assert(deliver(p, i64(p.link.now)) == .None); settle(t, p)
-	rn, fin, re = conn.read(p.server, 4, got[:]); testing.expect(t, rn == 0 && fin && re == .None)
+	assert(deliver(p, i64(p.link.now)) == .None)
+	settle(t, p)
+	rn, fin, re = conn.read(p.server, 4, got[:])
+	testing.expect(t, rn == 0 && fin && re == .None)
 	// Reset delivery and sender retention survive a dropped RESET packet.
-	n, e = conn.write(p.client, 8, a[:], false); assert(n == 2 && e == .None); settle(t, p)
+	n, e = conn.write(p.client, 8, a[:], false)
+	assert(n == 2 && e == .None)
+	settle(t, p)
 	assert(conn.reset_stream(p.client, 8) == .None)
-	_, e = post(p, p.client, {drop = true}); assert(e == .None)
-	due = conn.timer(p.client, i64(p.link.now)); assert(due.armed); p.link.now = sim.Tick(due.at)
-	n, e = conn.on_timeout(p.client, due.at, packet[:]); assert(e == .None)
+	_, e = post(p, p.client, {drop = true})
+	assert(e == .None)
+	due = conn.timer(p.client, i64(p.link.now))
+	assert(due.armed)
+	p.link.now = sim.Tick(due.at)
+	n, e = conn.on_timeout(p.client, due.at, packet[:])
+	assert(e == .None)
 	if n > 0 {
 		src, dst := endpoint(p.client, p)
 		assert(sim.send(&p.link, src, dst, packet[:n], {}) == .None)
 	}
-	assert(deliver(p, i64(p.link.now)) == .None); settle(t, p)
-	_, _, re = conn.read(p.server, 8, got[:]); testing.expect_value(t, re, .Protocol)
+	assert(deliver(p, i64(p.link.now)) == .None)
+	settle(t, p)
+	_, _, re = conn.read(p.server, 8, got[:])
+	testing.expect_value(t, re, .Protocol)
 	testing.expect_value(t, conn.stats(p.client).retained, 0)
-	conn.cancel(p.client); testing.expect_value(t, conn.stats(p.client).retained, 0)
+	conn.cancel(p.client)
+	testing.expect_value(t, conn.stats(p.client).retained, 0)
 }
 
 // Encode a real protected application packet with an independently selected
@@ -858,21 +906,10 @@ raw_application_packet :: proc(t: ^testing.T, p: ^Pair, content: []u8) -> []u8 {
 		},
 	)
 	assert(he == .None)
-	n, e := quic.handshake_payload_seal(
-		&p.client.hs,
-		packet[hn:],
-		packet[:hn],
-		content,
-		.One_RTT,
-		pn,
-	); assert(e == .None)
+	n, e := quic.handshake_payload_seal(&p.client.hs, packet[hn:], packet[:hn], content, .One_RTT, pn)
+	assert(e == .None)
 	assert(
-		quic.handshake_header_protection_apply(
-			&p.client.hs,
-			packet[:hn + n],
-			.One_RTT,
-			p.server.local_cid_len,
-		) ==
+		quic.handshake_header_protection_apply(&p.client.hs, packet[:hn + n], .One_RTT, p.server.local_cid_len) ==
 		.None,
 	)
 	return packet[:hn + n]
@@ -880,20 +917,25 @@ raw_application_packet :: proc(t: ^testing.T, p: ^Pair, content: []u8) -> []u8 {
 
 @(test)
 conn_mixed_frames_reassemble_overlaps_and_preserve_credit :: proc(t: ^testing.T) {
-	p := open_pair(t, wide_limits(), false); defer close_pair(p); settle(t, p)
+	p := open_pair(t, wide_limits(), false)
+	defer close_pair(p)
+	settle(t, p)
 	frame: [512]u8
-	at, ok := conn.encode_ack(frame[:], 0, p.server.model.spaces[2].next_send - 1, 0); assert(ok)
-	at, ok = conn.encode_stream(frame[:], at, 0, 1, []u8{'b', 'c'}, true); assert(ok)
-	at, ok = conn.encode_stream(frame[:], at, 0, 0, []u8{'a', 'b'}, false); assert(ok)
-	at, ok = conn.encode_stream(frame[:], at, 2, 0, []u8{'u'}, true); assert(ok)
-	at, ok = conn.encode_credit(frame[:], at, 1, 7777, 9999); assert(ok)
-	packet := raw_application_packet(t, p, frame[:at]); defer delete(packet)
-	testing.expect_value(
-		t,
-		conn.ingest(p.server, i64(p.link.now), p.server.model.path, packet),
-		.None,
-	)
-	got: [8]u8; rn, fin, e := conn.read(p.server, 0, got[:])
+	at, ok := conn.encode_ack(frame[:], 0, p.server.model.spaces[2].next_send - 1, 0)
+	assert(ok)
+	at, ok = conn.encode_stream(frame[:], at, 0, 1, []u8{'b', 'c'}, true)
+	assert(ok)
+	at, ok = conn.encode_stream(frame[:], at, 0, 0, []u8{'a', 'b'}, false)
+	assert(ok)
+	at, ok = conn.encode_stream(frame[:], at, 2, 0, []u8{'u'}, true)
+	assert(ok)
+	at, ok = conn.encode_credit(frame[:], at, 1, 7777, 9999)
+	assert(ok)
+	packet := raw_application_packet(t, p, frame[:at])
+	defer delete(packet)
+	testing.expect_value(t, conn.ingest(p.server, i64(p.link.now), p.server.model.path, packet), .None)
+	got: [8]u8
+	rn, fin, e := conn.read(p.server, 0, got[:])
 	testing.expect(t, rn == 3 && fin && e == .None)
 	testing.expect(t, bytes.equal(got[:3], []u8{'a', 'b', 'c'}))
 	rn, fin, e = conn.read(p.server, 2, got[:])
@@ -903,8 +945,11 @@ conn_mixed_frames_reassemble_overlaps_and_preserve_credit :: proc(t: ^testing.T)
 
 @(test)
 conn_adoption_rejects_oversized_window_without_moving_owner :: proc(t: ^testing.T) {
-	p := open_pair(t, wide_limits(), false); defer close_pair(p); settle(t, p)
-	candidate := new(conn.Connection); defer free(candidate)
+	p := open_pair(t, wide_limits(), false)
+	defer close_pair(p)
+	settle(t, p)
+	candidate := new(conn.Connection)
+	defer free(candidate)
 	cfg := conn.Adopt_Config {
 		role         = .Client,
 		local_cid    = p.client.local_cid[:p.client.local_cid_len],
@@ -919,7 +964,8 @@ conn_adoption_rejects_oversized_window_without_moving_owner :: proc(t: ^testing.
 	testing.expect(t, !p.client.hs.have_one_rtt && candidate.hs.have_one_rtt)
 	defer conn.destroy(candidate)
 	// The moved connection uses the real transferred packet key and packet number.
-	n, e := conn.write(candidate, 0, []u8{'m'}, true); testing.expect(t, n == 1 && e == .None)
+	n, e := conn.write(candidate, 0, []u8{'m'}, true)
+	testing.expect(t, n == 1 && e == .None)
 	packet: [conn.MAX_DATAGRAM]u8
 	for _ in 0 ..< 3 {
 		n, e = conn.pump(candidate, i64(p.link.now), packet[:])
@@ -930,21 +976,22 @@ conn_adoption_rejects_oversized_window_without_moving_owner :: proc(t: ^testing.
 			break
 		}
 	}
-	got: [1]u8; rn, fin, re := conn.read(p.server, 0, got[:])
+	got: [1]u8
+	rn, fin, re := conn.read(p.server, 0, got[:])
 	testing.expect(t, rn == 1 && fin && re == .None && got[0] == 'm')
 }
 
 @(test)
 conn_tiny_independent_ack_needs_no_shadow_padding :: proc(t: ^testing.T) {
-	p := open_pair(t, wide_limits(), false); defer close_pair(p); settle(t, p)
+	p := open_pair(t, wide_limits(), false)
+	defer close_pair(p)
+	settle(t, p)
 	frame: [16]u8
 	largest := p.server.model.spaces[2].next_send - 1
-	n, ok := conn.encode_ack(frame[:], 0, largest, largest); assert(ok)
-	packet := raw_application_packet(t, p, frame[:n]); defer delete(packet)
-	testing.expect_value(
-		t,
-		conn.ingest(p.server, i64(p.link.now), p.server.model.path, packet),
-		.None,
-	)
+	n, ok := conn.encode_ack(frame[:], 0, largest, largest)
+	assert(ok)
+	packet := raw_application_packet(t, p, frame[:n])
+	defer delete(packet)
+	testing.expect_value(t, conn.ingest(p.server, i64(p.link.now), p.server.model.path, packet), .None)
 	testing.expect(t, p.server.phase != .Failed)
 }
