@@ -187,7 +187,8 @@ Conn :: struct {
 	client_auth_allocator: mem.Allocator,
 }
 
-config_validate :: proc(config: Config) -> Client_Error {
+@(private)
+engine_config_validate :: proc(config: Config) -> Client_Error {
  if config.client_credential_lease!=nil {
   if config.client_credentials==nil {return .Invalid_Client_Credentials}
   if _,e:=credential_store.lease_generation(config.client_credentials,config.client_credential_lease^);e.kind!=.None {return .Invalid_Client_Credentials}
@@ -222,7 +223,8 @@ config_validate :: proc(config: Config) -> Client_Error {
 // Like Go's tls.Client, wrapping performs no network I/O.
 // Ownership of the transport transfers only on success. On failure the caller
 // retains it. A closed Conn cannot be reinitialized accidentally.
-client :: proc(conn: ^Conn, underlying: trans.Connection, config: Config) -> Client_Error {
+@(private)
+engine_client :: proc(conn: ^Conn, underlying: trans.Connection, config: Config) -> Client_Error {
 	if conn == nil do return .Nil_Connection
 
 	if conn.phase != .Uninitialized {
@@ -287,7 +289,7 @@ client_trust :: proc(
 		settings.root_cas = allocated.roots[:allocated.count]
 		roots = allocated
 	}
-	if validate_error := config_validate(settings); validate_error != .None {
+	if validate_error := engine_config_validate(settings); validate_error != .None {
 		system_roots_release_pool(roots, roots_allocator)
 		return {}, nil, {}, validate_error
 	}
@@ -334,7 +336,8 @@ Dial_Error :: struct {
 // An empty server_name is inferred from host. DNS/TCP connection establishment
 // uses core:net's dial behavior; handshake_timeout bounds the TLS phase only.
 // conn must stay at the same address until closed and must not be copied.
-dial :: proc(conn: ^Conn, host: string, port: int, config: Config) -> Dial_Error {
+@(private)
+engine_dial :: proc(conn: ^Conn, host: string, port: int, config: Config) -> Dial_Error {
 	if conn == nil || conn.phase != .Uninitialized {
 		return {kind = .Invalid_State}
 	}
@@ -344,7 +347,7 @@ dial :: proc(conn: ^Conn, host: string, port: int, config: Config) -> Dial_Error
 		settings.server_name = host
 	}
 
-	if err := config_validate(settings); err != .None {
+	if err := engine_config_validate(settings); err != .None {
 		return {kind = .Invalid_Config, config = err}
 	}
 	// Before any TCP socket. QUIC's h3 token never enters this record stack.
@@ -360,7 +363,7 @@ dial :: proc(conn: ^Conn, host: string, port: int, config: Config) -> Dial_Error
 	// client overwrites Conn, so install the socket after wrapping its stable
 	// embedded adapter address. No transport I/O happens inside client.
 	underlying := trans.tcp_connection(&conn.tcp)
-	if err := client(conn, underlying, settings); err != .None {
+	if err := engine_client(conn, underlying, settings); err != .None {
 		net.close(socket)
 		return {kind = .Invalid_Config, config = err}
 	}
@@ -368,8 +371,8 @@ dial :: proc(conn: ^Conn, host: string, port: int, config: Config) -> Dial_Error
 	conn.tcp = {
 		socket = socket,
 	}
-	if err := handshake(conn); err.kind != .None {
-		conn_close(conn)
+	if err := engine_handshake(conn); err.kind != .None {
+		engine_close(conn)
 		return {kind = .Handshake_Failed, handshake = err}
 	}
 
@@ -409,7 +412,8 @@ connection_state :: proc(conn: ^Conn) -> Connection_State {
 
 // Zero clears a deadline. Like read/write, callers must serialize these
 // operations; this client does not yet support concurrent connection access.
-set_read_deadline :: proc(conn: ^Conn, deadline: time.Time) -> trans.Connection_Error {
+@(private)
+engine_set_read_deadline :: proc(conn: ^Conn, deadline: time.Time) -> trans.Connection_Error {
 	if conn == nil || conn.phase == .Uninitialized {
 		return {kind = .Invalid_Connection}
 	}
@@ -419,7 +423,8 @@ set_read_deadline :: proc(conn: ^Conn, deadline: time.Time) -> trans.Connection_
 	return trans.set_read_deadline(conn.transport, deadline)
 }
 
-set_write_deadline :: proc(conn: ^Conn, deadline: time.Time) -> trans.Connection_Error {
+@(private)
+engine_set_write_deadline :: proc(conn: ^Conn, deadline: time.Time) -> trans.Connection_Error {
 	if conn == nil || conn.phase == .Uninitialized {
 		return {kind = .Invalid_Connection}
 	}
@@ -429,7 +434,8 @@ set_write_deadline :: proc(conn: ^Conn, deadline: time.Time) -> trans.Connection
 	return trans.set_write_deadline(conn.transport, deadline)
 }
 
-set_deadline :: proc(conn: ^Conn, deadline: time.Time) -> trans.Connection_Error {
+@(private)
+engine_set_deadline :: proc(conn: ^Conn, deadline: time.Time) -> trans.Connection_Error {
 	if conn == nil || conn.phase == .Uninitialized {
 		return {kind = .Invalid_Connection}
 	}
@@ -443,7 +449,8 @@ set_deadline :: proc(conn: ^Conn, deadline: time.Time) -> trans.Connection_Error
 
 // Releases a connection without sending close_notify. Use after protocol/I/O
 // failure when a graceful write cannot safely complete within a deadline.
-abort :: proc(conn: ^Conn) -> IO_Error {
+@(private)
+engine_abort :: proc(conn: ^Conn) -> IO_Error {
 	if conn == nil || conn.phase == .Uninitialized {
 		return {kind = .Invalid_State}
 	}

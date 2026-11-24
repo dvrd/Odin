@@ -57,14 +57,16 @@ Handshake_Error :: struct {
 // Certificate authentication is unchanged. An offered session may resume with
 // psk_dhe_ke. Early data is refused unless Config.early_data is set. That
 // policy is not installed as 0-RTT keys on this path.
-handshake :: proc(conn: ^Conn) -> Handshake_Error {
+@(private)
+engine_handshake :: proc(conn: ^Conn) -> Handshake_Error {
 	return handshake_until_internal(conn, {})
 }
 
 // Authenticates within the earlier of the configured handshake budget and the
 // caller's absolute deadline. Zero preserves handshake's existing behavior.
 // Synchronous callbacks cannot be interrupted; expiry is checked on return.
-handshake_until :: proc(conn: ^Conn, deadline: time.Time) -> Handshake_Error {
+@(private)
+engine_handshake_until :: proc(conn: ^Conn, deadline: time.Time) -> Handshake_Error {
 	effective := deadline
 	// Preserve one effective absolute cutoff, including for callbacks which
 	// return success after the earlier configured handshake budget elapsed.

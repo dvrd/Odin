@@ -37,7 +37,7 @@ handshake_absolute_deadline_is_not_rebased :: proc(t: ^testing.T) {
 	state: Deadline_Test_Transport
 	conn := deadline_test_conn(&state)
 	deadline := time.time_add(time.now(),time.Second)
-	error := handshake_until(&conn,deadline)
+	error := engine_handshake_until(&conn,deadline)
 	testing.expect(t,error.kind != .None)
 	testing.expect_value(t,state.first,deadline)
 	testing.expect_value(t,state.writes,1)
@@ -49,7 +49,7 @@ handshake_configured_limit_still_caps_absolute_budget :: proc(t: ^testing.T) {
 	conn := deadline_test_conn(&state)
 	conn.config.handshake_timeout=time.Millisecond*20
 	start := time.now()
-	_ = handshake_until(&conn,time.time_add(start,time.Second))
+	_ = engine_handshake_until(&conn,time.time_add(start,time.Second))
 	testing.expect(t,time.diff(start,state.first) >= 20*time.Millisecond)
 	testing.expect(t,time.diff(start,state.first) < 100*time.Millisecond)
 }
@@ -58,7 +58,7 @@ handshake_configured_limit_still_caps_absolute_budget :: proc(t: ^testing.T) {
 handshake_slow_deadline_callback_cannot_start_io_after_expiry :: proc(t: ^testing.T) {
 	state := Deadline_Test_Transport{delay=20*time.Millisecond}
 	conn := deadline_test_conn(&state)
-	error := handshake_until(&conn,time.time_add(time.now(),time.Millisecond))
+	error := engine_handshake_until(&conn,time.time_add(time.now(),time.Millisecond))
 	testing.expect_value(t,error.kind,.Deadline_Failed)
 	testing.expect_value(t,error.transport.kind,.Timeout)
 	testing.expect_value(t,state.writes,0)
@@ -70,23 +70,23 @@ handshake_until_requires_bounded_transport_and_preserves_old_signature :: proc(t
 	conn := deadline_test_conn(&state)
 	conn.transport.set_read_deadline=nil
 	conn.transport.set_write_deadline=nil
-	error := handshake_until(&conn,time.time_add(time.now(),time.Second))
+	error := engine_handshake_until(&conn,time.time_add(time.now(),time.Second))
 	testing.expect_value(t,error.transport.kind,.Deadline_Unsupported)
 	testing.expect_value(t,state.writes,0)
-	old_handshake: proc(^Conn)->Handshake_Error = handshake
+	old_handshake: proc(^Conn)->Handshake_Error = engine_handshake
 	old_start: proc(^Conn)->(bool,Handshake_Error) = handshake_deadline_start
 	testing.expect(t,old_handshake != nil && old_start != nil)
 	conn=deadline_test_conn(&state)
 	conn.transport.set_read_deadline=nil
 	conn.transport.set_write_deadline=nil
-	error=handshake_until(&conn,{})
+	error=engine_handshake_until(&conn,{})
 	testing.expect(t,error.kind != .None && state.writes == 1)
 }
 
 @(test)
 handshake_until_expired_terminal_success_cannot_expose_application_state :: proc(t: ^testing.T) {
 	conn := Conn{phase=.Established,handshake_complete=true}
-	error := handshake_until(&conn,time.time_add(time.now(),-time.Second))
+	error := engine_handshake_until(&conn,time.time_add(time.now(),-time.Second))
 	testing.expect_value(t,error.kind,.Deadline_Failed)
 	testing.expect_value(t,conn.phase,.Failed)
 	testing.expect(t,!conn.handshake_complete)

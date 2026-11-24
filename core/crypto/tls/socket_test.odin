@@ -783,9 +783,9 @@ close_resolves_for_socket_and_conn :: proc(t: ^testing.T) {
 	conn := new(Conn)
 	defer free(conn)
 	config := Config{root_cas = roots.roots[:roots.count], offer = .Upstream}
-	dialed := dial(conn, "localhost", server.endpoint.port, config)
+	dialed := engine_dial(conn, "localhost", server.endpoint.port, config)
 	testing.expect_value(t, dialed.kind, Dial_Error_Kind.None)
-	testing.expect_value(t, close(conn).kind, IO_Error_Kind.None)
+	testing.expect_value(t, close(conn), nil)
 	testing.expect_value(t, conn.phase, Conn_Phase.Closed)
 	testing.expect_value(t, close(conn), conn_close(conn))
 

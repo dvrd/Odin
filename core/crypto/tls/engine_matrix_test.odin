@@ -116,13 +116,13 @@ matrix_connection :: proc(t: ^testing.T, entry: Matrix_Case, loc := #caller_loca
 	conn := new(Conn)
 	defer free(conn)
 	wire := net.Connection{data = loop, read = matrix_read, write = matrix_write, close = matrix_close}
-	testing.expect_value(t, client(conn, wire, config), Client_Error.None, loc)
+	testing.expect_value(t, engine_client(conn, wire, config), Client_Error.None, loc)
 
-	established := handshake(conn)
+	established := engine_handshake(conn)
 	testing.expect_value(t, established.kind, Handshake_Error_Kind.None, loc)
 	if established.kind != .None {
 		testing.expectf(t, false, "handshake failed: %v / accept %v", established, accepted, loc = loc)
-		abort(conn)
+		engine_abort(conn)
 		tcp_test_run(&loop.stream)
 		return
 	}
@@ -150,7 +150,7 @@ matrix_connection :: proc(t: ^testing.T, entry: Matrix_Case, loc := #caller_loca
 	testing.expect_value(t, server_async_stats(server).received_key_updates, 1, loc)
 	testing.expect_value(t, conn.application.send.seq < 4, true, loc)
 
-	testing.expect_value(t, conn_close(conn).kind, IO_Error_Kind.None, loc)
+	testing.expect_value(t, engine_close(conn).kind, IO_Error_Kind.None, loc)
 	tcp_test_run(&loop.stream)
 
 	closed: TCP_Test_Result
@@ -169,7 +169,7 @@ matrix_echo :: proc(
 	request, response: string,
 	loc := #caller_location,
 ) {
-	written, write_error := write(conn, transmute([]u8)request)
+	written, write_error := engine_write(conn, transmute([]u8)request)
 	testing.expect_value(t, write_error.kind, IO_Error_Kind.None, loc)
 	testing.expect_value(t, written, len(request), loc)
 
@@ -188,7 +188,7 @@ matrix_echo :: proc(
 	testing.expect_value(t, sent.calls, 1, loc)
 
 	answer: [64]u8
-	count, read_error := read(conn, answer[:])
+	count, read_error := engine_read(conn, answer[:])
 	testing.expect_value(t, read_error.kind, IO_Error_Kind.None, loc)
 	testing.expect_value(t, string(answer[:count]), response, loc)
 }

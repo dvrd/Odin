@@ -86,8 +86,8 @@ main :: proc() {
 	}
 
 	conn := new(tls.Conn)
-	if dialed := tls.dial(conn, os.args[1], port, config); dialed.kind != .None {
-		fail("dial: %v %v %v", dialed.kind, dialed.config, dialed.handshake)
+	if dialed := tls.dial(conn, os.args[1], port, config); dialed != nil {
+		fail("dial: %v", dialed)
 	}
 
 	state := tls.connection_state(conn)
@@ -96,7 +96,7 @@ main :: proc() {
 	}
 
 	request := "odin\n"
-	if _, write_error := tls.write(conn, transmute([]u8)request); write_error.kind != .None {
+	if _, write_error := tls.write(conn, transmute([]u8)request); write_error != nil {
 		fail("write: %v", write_error)
 	}
 
@@ -104,7 +104,7 @@ main :: proc() {
 	used := 0
 	for used < len(request) {
 		count, read_failure := tls.read(conn, answer[used:])
-		if read_failure.kind != .None {
+		if read_failure != nil {
 			fail("read: %v", read_failure)
 		}
 		used += count

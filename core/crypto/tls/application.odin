@@ -144,7 +144,8 @@ application_clear :: proc(state: ^Application_State) {
 // Reads stream bytes only after handshake authentication succeeds. A short
 // destination retains the rest of the decrypted record for later calls. EOF
 // means authenticated close_notify; a raw transport close is Unexpected_EOF.
-read :: proc(conn: ^Conn, dst: []u8) -> (received: int, error: IO_Error) {
+@(private)
+engine_read :: proc(conn: ^Conn, dst: []u8) -> (received: int, error: IO_Error) {
 	if err := application_ensure(conn); err.kind != .None {
 		return 0, err
 	}
@@ -253,7 +254,8 @@ application_alert_apply :: proc(state: ^Application_State, content: []u8) -> IO_
 // Splits application bytes into records of at most 16KiB. A partial transport
 // write is terminal: its record cannot be retried under a reused nonce. The
 // returned count includes only complete records successfully sent.
-write :: proc(conn: ^Conn, src: []u8) -> (written: int, error: IO_Error) {
+@(private)
+engine_write :: proc(conn: ^Conn, src: []u8) -> (written: int, error: IO_Error) {
 	if err := application_ensure(conn); err.kind != .None {
 		return 0, err
 	}
@@ -291,7 +293,8 @@ application_write_records :: proc(conn: ^Conn, src: []u8) -> (written: int, erro
 
 // Sends close_notify under the current application keys, then always closes
 // the transport once and destroys key material. It does not wait for a reply.
-conn_close :: proc(conn: ^Conn) -> IO_Error {
+@(private)
+engine_close :: proc(conn: ^Conn) -> IO_Error {
 	if conn == nil do return {kind = .Invalid_State}
 
 	if conn.phase == .Closed do return {}
@@ -340,7 +343,7 @@ application_ensure :: proc(conn: ^Conn) -> IO_Error {
 	}
 
 	if conn.phase != .Established {
-		if err := handshake(conn); err.kind != .None {
+		if err := engine_handshake(conn); err.kind != .None {
 			return application_fail(conn, {kind = .Handshake_Failed, handshake = err})
 		}
 	}

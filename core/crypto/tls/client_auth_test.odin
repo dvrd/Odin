@@ -235,10 +235,10 @@ mutual_tls_rejects_cross_store_pins_and_anonymous_resumption_cache :: proc(t: ^t
 	lease, e := store.acquire(owner)
 	assert(e.kind == .None)
 	defer _ = store.release(owner, &lease)
-	testing.expect_value(t, config_validate({client_credential_lease = &lease}), .Invalid_Client_Credentials)
+	testing.expect_value(t, engine_config_validate({client_credential_lease = &lease}), .Invalid_Client_Credentials)
 	testing.expect_value(
 		t,
-		config_validate({client_credentials = other, client_credential_lease = &lease}),
+		engine_config_validate({client_credentials = other, client_credential_lease = &lease}),
 		.Invalid_Client_Credentials,
 	)
 	session := Session {

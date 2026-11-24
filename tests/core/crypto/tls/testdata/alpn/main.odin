@@ -38,36 +38,36 @@ sync_case :: proc(c: Case) -> int {
 			net.tcp_connection(&tcp),
 			{server_name = c.hostname, root_cas = c.roots, alpn_protocols = c.offers},
 		) ==
-		.None,
+		nil,
 	)
 	assert(tls.connection_state(conn).negotiated_protocol == "")
 	handshake_error := tls.handshake_until(conn, time.time_add(time.now(), 2 * time.Second))
 	if c.failure {
-		assert(handshake_error.kind != .None)
+		assert(handshake_error != nil)
 		if c.no_overlap {
-			assert(handshake_error.server_hello.alert_description == 120)
+			assert(handshake_error == tls.Error(tls.Protocol_Error.No_Application_Protocol))
 		}
 		assert(tls.connection_state(conn).negotiated_protocol == "")
 	} else {
-		assert(handshake_error.kind == .None)
+		assert(handshake_error == nil)
 		assert(tls.connection_state(conn).negotiated_protocol == c.selected)
 		if len(c.owned_offer) > 0 {
 			c.owned_offer[0] = 'x'
 			assert(tls.connection_state(conn).negotiated_protocol == c.selected)
 			c.owned_offer[0] = 'h'
 		}
-		assert(tls.set_deadline(conn, time.time_add(time.now(), time.Second)).kind == .None)
+		assert(tls.set_deadline(conn, time.time_add(time.now(), time.Second)) == nil)
 		count, write_error := tls.write(conn, transmute([]u8)string("ping\n"))
-		assert(write_error.kind == .None && count == 5)
+		assert(write_error == nil && count == 5)
 		buffer: [5]u8
 		used := 0
 		for used <
 		    len(
 			    buffer,
-		    ) {n, read_error := tls.read(conn, buffer[used:]); assert(read_error.kind == .None && n > 0); used += n}
+		    ) {n, read_error := tls.read(conn, buffer[used:]); assert(read_error == nil && n > 0); used += n}
 		assert(string(buffer[:]) == "ping\n")
 	}
-	assert(tls.abort(conn).kind == .None)
+	assert(tls.abort(conn) == nil)
 	assert(tls.connection_state(conn).negotiated_protocol == "")
 	free(conn)
 	context.allocator = previous
@@ -122,7 +122,7 @@ async_case :: proc(c: Case) -> int {
 			nbio.async_executor(),
 			{server_name = c.hostname, root_cas = c.roots, alpn_protocols = c.offers},
 		) ==
-		.None,
+		nil,
 	)
 	assert(tls.async_connection_state(conn).negotiated_protocol == "")
 	state: Completion

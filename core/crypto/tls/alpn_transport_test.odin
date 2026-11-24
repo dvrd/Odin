@@ -87,10 +87,10 @@ alpn_transport_tcp_and_quic_offers_do_not_share_a_stack :: proc(t: ^testing.T) {
 		server_name = "localhost",
 		root_cas    = {&root},
 	}
-	testing.expect_value(t, config_validate(base), .None)
+	testing.expect_value(t, engine_config_validate(base), .None)
 	h3_config := base
 	h3_config.alpn_protocols = h3[:]
-	testing.expect_value(t, config_validate(h3_config), .None)
+	testing.expect_value(t, engine_config_validate(h3_config), .None)
 
 	probe: ALPN_Bind_Probe
 	transport := net.Connection {
@@ -101,33 +101,33 @@ alpn_transport_tcp_and_quic_offers_do_not_share_a_stack :: proc(t: ^testing.T) {
 	}
 	conn := new(Conn)
 	defer free(conn)
-	testing.expect_value(t, client(conn, transport, h3_config), .Invalid_ALPN)
+	testing.expect_value(t, engine_client(conn, transport, h3_config), .Invalid_ALPN)
 	testing.expect_value(t, probe.writes, 0)
 	testing.expect_value(t, conn.phase, .Uninitialized)
 
 	mixed := [2]string{"http/1.1", "h3"}
 	mixed_config := base
 	mixed_config.alpn_protocols = mixed[:]
-	testing.expect_value(t, client(conn, transport, mixed_config), .Invalid_ALPN)
+	testing.expect_value(t, engine_client(conn, transport, mixed_config), .Invalid_ALPN)
 	testing.expect_value(t, probe.writes, 0)
 
 	h2 := [2]string{"http/1.1", "h2"}
 	h2_config := base
 	h2_config.alpn_protocols = h2[:]
-	testing.expect_value(t, client(conn, transport, h2_config), .None)
+	testing.expect_value(t, engine_client(conn, transport, h2_config), .None)
 	testing.expect_value(t, probe.writes, 0)
 	testing.expect_value(t, len(conn.config.alpn_protocols), 2)
 	testing.expect_value(t, conn.config.alpn_protocols[0], ALPN_HTTP11)
 	testing.expect_value(t, conn.config.alpn_protocols[1], ALPN_H2)
 	conn^ = {}
-	testing.expect_value(t, client(conn, transport, base), .None)
+	testing.expect_value(t, engine_client(conn, transport, base), .None)
 	testing.expect_value(t, len(conn.config.alpn_protocols), 0)
 	testing.expect_value(t, probe.writes, 0)
 
 	dial_conn := new(Conn)
 	defer free(dial_conn)
 	// Port 1 would be a TCP failure if this check regressed past dial_tcp.
-	dialed := dial(dial_conn, "127.0.0.1", 1, h3_config)
+	dialed := engine_dial(dial_conn, "127.0.0.1", 1, h3_config)
 	testing.expect_value(t, dialed.kind, .Invalid_Config)
 	testing.expect_value(t, dialed.config, .Invalid_ALPN)
 	testing.expect_value(t, dial_conn.phase, .Uninitialized)

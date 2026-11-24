@@ -122,7 +122,7 @@ socket_engine_handshake :: proc(
 	// A KeyUpdate request read by recv is left for the sender to answer.
 	conn.defer_key_updates = true
 
-	if failure := handshake(conn); failure.kind != .None {
+	if failure := engine_handshake(conn); failure.kind != .None {
 		socket_engine_release(conn, allocator)
 		return socket_handshake_error(failure)
 	}
@@ -305,7 +305,7 @@ socket_engine_close :: proc(socket: ^Socket, max_close_wait: time.Duration) {
 	sync.lock(&state.rx_lock)
 
 	if state.conn != nil {
-		conn_close(state.conn)
+		engine_close(state.conn)
 		free(state.conn, state.allocator)
 		state.conn = nil
 	}

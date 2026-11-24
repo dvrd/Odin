@@ -12,6 +12,7 @@ Error :: union #shared_nil {
 	io.Error,
 	net.TCP_Send_Error,
 	net.TCP_Recv_Error,
+	net.Dial_Error,
 
 	General_Error,
 	Protocol_Error,
@@ -58,6 +59,19 @@ General_Error :: enum {
 	Invalid_SNI_Hostname,
 	Failed_Key_Share_Generation,
 	Unsupported_Client_Certificate_Requested,
+
+	// The connection is not in a state that allows the call.
+	Invalid_State,
+	// A setting in the Config is missing, malformed or contradicts another.
+	Invalid_Config,
+	// No trust roots were given, or one of them could not be used.
+	Invalid_Trust_Roots,
+	// The host name could not be resolved to an address.
+	Name_Resolution_Failed,
+	// The operation was cancelled before it completed.
+	Cancelled,
+	// The transport under the connection has no deadlines.
+	Deadline_Unsupported,
 }
 
 // Socket is a TLS socket.  It MUST NOT be copied as the internal state

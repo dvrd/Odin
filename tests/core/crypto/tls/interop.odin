@@ -208,17 +208,17 @@ blocking_go_interoperability :: proc(t: ^testing.T) {
 		ep.port,
 		{server_name = "localhost", root_cas = pool.roots[:pool.count], handshake_timeout = time.Second},
 	)
-	testing.expect_value(t, result.kind, .None)
-	if result.kind != .None do return
+	testing.expect_value(t, result, nil)
+	if result != nil do return
 	defer tls.abort(conn)
-	testing.expect_value(t, tls.set_deadline(conn, time.time_add(time.now(), time.Second)).kind, .None)
+	testing.expect_value(t, tls.set_deadline(conn, time.time_add(time.now(), time.Second)), nil)
 	n, write_error := tls.write(conn, []u8{1, 2, 3})
-	testing.expect_value(t, write_error.kind, .None)
+	testing.expect_value(t, write_error, nil)
 	testing.expect_value(t, n, 3)
 	buffer: [3]u8
 	read, read_error := tls.read(conn, buffer[:])
-	testing.expect_value(t, read_error.kind, .None)
+	testing.expect_value(t, read_error, nil)
 	testing.expect_value(t, read, 3)
 	testing.expect_value(t, buffer, [3]u8{1, 2, 3})
-	testing.expect_value(t, tls.conn_close(conn).kind, .None)
+	testing.expect_value(t, tls.conn_close(conn), nil)
 }

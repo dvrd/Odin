@@ -68,7 +68,7 @@ alpn_config_validation_rejects_invalid_offers_before_io :: proc(t: ^testing.T) {
 		root_cas       = {&root},
 		alpn_protocols = {""},
 	}
-	testing.expect_value(t, tls.config_validate(settings), .Invalid_ALPN)
+	testing.expect_value(t, tls.config_validate(settings), tls.Error(tls.General_Error.Invalid_Config))
 }
 
 @(test)
