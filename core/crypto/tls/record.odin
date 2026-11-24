@@ -9,9 +9,9 @@ import "core:time"
 
 // Record headers and plaintext validation
 
-RECORD_HEADER_SIZE :: 5
+RECORD_HEADER_SIZE :: TLS_RECORD_HEADER_SIZE
 
-MAX_PLAINTEXT_SIZE :: 1 << 14
+MAX_PLAINTEXT_SIZE :: TLS13_MAX_RECORD_SIZE
 MAX_CIPHERTEXT_SIZE :: MAX_PLAINTEXT_SIZE + 256
 
 @(private)
@@ -22,12 +22,7 @@ LEGACY_TLS_1_0 :: cast(TLS_Legacy_Record_Version)0x0301
 @(private)
 LEGACY_TLS_1_2 :: cast(TLS_Legacy_Record_Version)0x0303
 
-TLS_Content_Type :: enum u8 {
-	Change_Cipher_Spec = 20,
-	Alert              = 21,
-	Handshake          = 22,
-	Application_Data   = 23,
-}
+TLS_Content_Type :: Content_Type
 
 
 @(private)
@@ -223,13 +218,6 @@ record_read_plaintext_conn :: proc(
 
 GCM_TAG_SIZE :: AEAD_TAG_SIZE
 MAX_INNER_PLAINTEXT_SIZE :: MAX_PLAINTEXT_SIZE + 1
-// Conservative bound below the 2^24.5 full-record AES-GCM limit in RFC 8446
-// section 5.5: upstream's AEAD_REKEY_SEQ for both AES-GCM suites. A direction
-// is rekeyed before this many records; record_protection_limit is the
-// per-suite value (ChaCha20-Poly1305 has no practical limit).
-@(private)
-MAX_RECORDS_PER_KEY :: cast(u64)(1 << 24)
-
 @(private)
 Record_Protection_Error :: enum {
 	None,

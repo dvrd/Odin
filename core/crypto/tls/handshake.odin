@@ -151,11 +151,6 @@ handshake_until_internal :: proc(conn: ^Conn, deadline: time.Time) -> Handshake_
 }
 
 @(private)
-handshake_deadline_start :: proc(conn: ^Conn) -> (bool, Handshake_Error) {
-	return handshake_deadline_start_until(conn, {})
-}
-
-@(private)
 handshake_deadline_start_until :: proc(conn: ^Conn, deadline: time.Time) -> (bool, Handshake_Error) {
 	deadlines_set := false
 	if conn.transport.set_read_deadline != nil && conn.transport.set_write_deadline != nil {

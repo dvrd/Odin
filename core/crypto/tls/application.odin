@@ -492,13 +492,13 @@ application_post_message :: proc(conn: ^Conn, message: []u8, record_ended: bool)
 			return {kind = .Record_Boundary_Violation}
 		}
 
-		if message[4] > 1 {
+		if message[4] > u8(Key_Update_Request.Update_Requested) {
 			return {kind = .Invalid_Post_Handshake}
 		}
 
 		update_connection_secret(&state.secrets, false)
 		record_protection_init(&state.receive, &state.secrets.server_aead)
-		if message[4] == 1 {
+		if message[4] == u8(Key_Update_Request.Update_Requested) {
 			// The async driver serializes this response with application writes.
 			if conn.defer_key_updates {
 				state.key_update_pending = true
@@ -545,8 +545,8 @@ application_post_header_validate :: proc(state: ^Application_State) -> IO_Error 
 }
 
 @(private)
-application_send_key_update :: proc(conn: ^Conn, request_peer := false) -> IO_Error {
-	response := [?]u8{cast(u8)Handshake_Type.Key_Update, 0, 0, 1, u8(request_peer)}
+application_send_key_update :: proc(conn: ^Conn, update_requested := Key_Update_Request.Update_Not_Requested) -> IO_Error {
+	response := [?]u8{cast(u8)Handshake_Type.Key_Update, 0, 0, 1, u8(update_requested)}
 	if err := application_record_write(conn, .Handshake, response[:]); err.kind != .None {
 		return err
 	}

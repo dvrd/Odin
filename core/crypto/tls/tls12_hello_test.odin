@@ -22,37 +22,6 @@ tls12_test_server_hello :: proc(dst: []u8, extensions: []u8) -> []u8 {
 }
 
 @(test)
-tls12_client_offer_bounds_and_wire :: proc(t: ^testing.T) {
-	storage: [TLS12_MAX_CLIENT_HELLO_SIZE]u8
-	offer := TLS12_Client_Hello {
-		server_name    = "fixture.test",
-		alpn_protocols = {"http/1.1"},
-	}
-	for &b in storage[:] {b = 0xa5}
-	n, e := tls12_client_hello_encode(storage[:], offer)
-	testing.expect_value(t, e, .None)
-	testing.expect_value(t, handshake_body_size(storage[:n]) + 4, n)
-	// TLS1.3's server parser intentionally requires key_share; do not relax it.
-	_, strict := server_client_hello_decode(storage[:n])
-	testing.expect_value(t, strict, .Malformed)
-	testing.expect_value(t, hello_u16(storage[:n], 4), u16(0x0303))
-	testing.expect_value(t, hello_u16(storage[:n], 39), u16(4))
-	testing.expect_value(t, hello_u16(storage[:n], 41), u16(0xc02f))
-	testing.expect_value(t, hello_u16(storage[:n], 43), u16(0xc02b))
-	for split in 0 ..< n {
-		short: [TLS12_MAX_CLIENT_HELLO_SIZE]u8
-		for &b in short[:] {b = 0xa5}
-		_, status := tls12_client_hello_encode(short[:split], offer)
-		testing.expect_value(t, status, .Destination_Undersized)
-		for b in short[:] {testing.expect_value(t, b, u8(0xa5))}
-	}
-	_, bad_name := tls12_client_hello_encode(storage[:], {server_name = "bad name"})
-	testing.expect_value(t, bad_name, .Invalid_Server_Name)
-	_, bad_alpn := tls12_client_hello_encode(storage[:], {server_name = "fixture.test", alpn_protocols = {""}})
-	testing.expect_value(t, bad_alpn, .Invalid_ALPN)
-}
-
-@(test)
 tls12_server_hello_validation_and_borrowing :: proc(t: ^testing.T) {
 	storage: [512]u8
 	exts := [?]u8{0, 23, 0, 0, 0xff, 1, 0, 1, 0, 0, 16, 0, 11, 0, 9, 8, 'h', 't', 't', 'p', '/', '1', '.', '1'}

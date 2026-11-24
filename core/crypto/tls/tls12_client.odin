@@ -348,9 +348,7 @@ tls12_next_handshake :: proc(
 			})
 		case .Handshake:
 			pending^ = body
-		case .Change_Cipher_Spec:
-			return nil, handshake_fail(conn, {kind = .Unexpected_Handshake_Message, message_type = u8(header.content_type)})
-		case .Application_Data:
+		case .Change_Cipher_Spec, .Application_Data, .Invalid:
 			return nil, handshake_fail(conn, {kind = .Unexpected_Handshake_Message, message_type = u8(header.content_type)})
 		}
 	}
@@ -495,7 +493,7 @@ tls12_application_read :: proc(conn: ^Conn, dst: []u8) -> (int, IO_Error) {
 			return 0, application_fail(conn, {kind = .Peer_Alert, alert_level = payload[0], alert_description = payload[1]})
 		case .Handshake:
 			return 0, application_fail(conn, {kind = .Invalid_Post_Handshake})
-		case .Change_Cipher_Spec:
+		case .Change_Cipher_Spec, .Invalid:
 			return 0, application_fail(conn, {kind = .Unexpected_Content_Type})
 		}
 	}

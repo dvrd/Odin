@@ -281,7 +281,8 @@ socket_engine_owed_key_update :: proc(socket: ^Socket) -> Error {
 	}
 
 	// One KeyUpdate does both: it replaces our key, and asks for theirs.
-	if failure := application_send_key_update(state.conn, prod); failure.kind != .None {
+	update_requested: Key_Update_Request = .Update_Requested if prod else .Update_Not_Requested
+	if failure := application_send_key_update(state.conn, update_requested); failure.kind != .None {
 		return socket_engine_failure(socket, socket_io_error(failure))
 	}
 	return nil

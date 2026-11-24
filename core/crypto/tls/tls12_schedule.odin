@@ -5,8 +5,6 @@ import "core:crypto"
 import "core:crypto/hmac"
 
 @(private)
-TLS12_MASTER_SECRET_SIZE :: 48
-@(private)
 TLS12_FINISHED_SIZE :: 12
 @(private)
 TLS12_FINISHED_MESSAGE_SIZE :: 4 + TLS12_FINISHED_SIZE
@@ -58,20 +56,6 @@ tls12_prf_sha256 :: proc(secret: []u8, label: string, seed, dst: []u8) -> TLS12_
 		a = next
 	}
 	return .None
-}
-
-// Pure legacy derivation for vectors/explicit policy only. New handshakes must
-// negotiate RFC7627 EMS; this helper does not authorize a non-EMS handshake.
-// Caller owns the returned secret and must erase it after deriving traffic keys.
-@(private)
-tls12_master_secret :: proc(
-	pre_master: []u8,
-	client_random, server_random: [32]u8,
-) -> (master: [48]u8, error: TLS12_Schedule_Error) {
-	seed: [64]u8
-	for v, i in client_random {seed[i] = v}; for v, i in server_random {seed[32+i] = v}
-	error = tls12_prf_sha256(pre_master, "master secret", seed[:], master[:])
-	return
 }
 
 // session_hash is SHA256(ClientHello through ClientKeyExchange), including

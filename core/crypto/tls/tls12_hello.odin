@@ -1,7 +1,6 @@
 package tls
 
 import "core:net"
-import "core:strings"
 
 // TLS 1.2 hello codec. The live client offers these suites on the same
 // connection as TLS 1.3; this encoder itself stays TLS 1.2-only for tests.
@@ -21,8 +20,6 @@ Tls12_Cipher_Suite :: enum u16 {
 TLS12_ECDHE_RSA_AES128_GCM_SHA256 :: u16(Tls12_Cipher_Suite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256)
 @(private)
 TLS12_ECDHE_ECDSA_AES128_GCM_SHA256 :: u16(Tls12_Cipher_Suite.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256)
-@(private)
-TLS12_MAX_CLIENT_HELLO_SIZE :: 512 + MAX_ALPN_OFFER_BYTES
 TLS12_MAX_SERVER_HELLO_SIZE :: 1024
 
 @(private)
@@ -62,82 +59,6 @@ TLS12_Hello_Error :: enum {
 	Missing_Extended_Master_Secret,
 	Missing_Secure_Renegotiation,
 	Downgrade_Detected,
-}
-
-// RFC5246/5289/7627: fresh ECDHE, AES128-GCM, SHA256 and EMS. No session
-// tickets, resumption, renegotiation or fallback reconnect is offered.
-@(private)
-tls12_client_hello_encode :: proc(dst: []u8, hello: TLS12_Client_Hello) -> (int, TLS12_Hello_Error) {
-	if !server_name_valid(hello.server_name) {
-		return 0, .Invalid_Server_Name
-	}
-	alpn_size, valid := alpn_protocols_size(hello.alpn_protocols)
-	if !valid {
-		return 0, .Invalid_ALPN
-	}
-	name := strings.trim_suffix(hello.server_name, ".")
-	if net.parse_address(hello.server_name) != nil {
-		name = ""
-	}
-	sni_size := 0
-	if len(name) > 0 {
-		sni_size = 9 + len(name)
-	}
-	// groups10, points6, signature algorithms12, EMS4, renegotiation5.
-	extensions_size := sni_size + 10 + 6 + 12 + 4 + 5
-	if alpn_size > 0 {
-		extensions_size += 6 + alpn_size
-	}
-	size := 4 + 45 + extensions_size
-	if len(dst) < size {
-		return 0, .Destination_Undersized
-	}
-	dst[0], dst[1], dst[2], dst[3] = 1, 0, u8((size - 4) >> 8), u8(size - 4)
-	at := 4
-	hello_put_u16(dst, &at, TLS12_VERSION)
-	for b, i in hello.random {dst[at + i] = b}; at += 32
-	dst[at] = 0
-	at += 1
-	hello_put_u16(dst, &at, 4)
-	hello_put_u16(dst, &at, TLS12_ECDHE_RSA_AES128_GCM_SHA256)
-	hello_put_u16(dst, &at, TLS12_ECDHE_ECDSA_AES128_GCM_SHA256)
-	dst[at], dst[at + 1] = 1, 0
-	at += 2
-	hello_put_u16(dst, &at, u16(extensions_size))
-	if len(name) > 0 {
-		tls12_hello_extension(dst, &at, 0, 5 + len(name))
-		hello_put_u16(dst, &at, u16(3 + len(name)))
-		dst[at] = 0
-		at += 1
-		hello_put_u16(dst, &at, u16(len(name)))
-		copy(dst[at:], transmute([]u8)name)
-		at += len(name)
-	}
-	tls12_hello_extension(dst, &at, 10, 6)
-	hello_put_u16(dst, &at, 4)
-	hello_put_u16(dst, &at, 29)
-	hello_put_u16(dst, &at, 23)
-	tls12_hello_extension(dst, &at, 11, 2)
-	dst[at], dst[at + 1] = 1, 0
-	at += 2
-	tls12_hello_extension(dst, &at, 13, 8)
-	hello_put_u16(dst, &at, 6)
-	for scheme in ([3]u16{0x0804, 0x0403, 0x0401}) {hello_put_u16(dst, &at, scheme)}
-	tls12_hello_extension(dst, &at, 23, 0)
-	tls12_hello_extension(dst, &at, 0xff01, 1)
-	dst[at] = 0
-	at += 1
-	if alpn_size > 0 {
-		tls12_hello_extension(dst, &at, 16, 2 + alpn_size)
-		hello_put_u16(dst, &at, u16(alpn_size))
-		for protocol in hello.alpn_protocols {
-			dst[at] = u8(len(protocol))
-			at += 1
-			copy(dst[at:], transmute([]u8)protocol)
-			at += len(protocol)
-		}
-	}
-	return at, .None
 }
 
 @(private)

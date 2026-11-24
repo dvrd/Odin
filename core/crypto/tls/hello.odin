@@ -144,7 +144,7 @@ engine_client_hello_encode :: proc(
 	if len(name) > 0 {
 		hello_put_extension(dst, &written, .Server_Name, 5 + len(name))
 		hello_put_u16(dst, &written, cast(u16)(3 + len(name)))
-		dst[written] = 0 // host_name
+		dst[written] = u8(Name_Type.Host_Name)
 		written += 1
 		hello_put_u16(dst, &written, cast(u16)len(name))
 		copy(dst[written:][:len(name)], transmute([]u8)name)
@@ -425,7 +425,7 @@ upstream_client_hello_encode :: proc(
 	if len(name) > 0 {
 		hello_put_extension(dst, &at, .Server_Name, 5 + len(name))
 		hello_put_u16(dst, &at, u16(3 + len(name)))
-		dst[at] = 0 // host_name
+		dst[at] = u8(Name_Type.Host_Name)
 		at += 1
 		hello_put_u16(dst, &at, u16(len(name)))
 		at += copy(dst[at:], name)

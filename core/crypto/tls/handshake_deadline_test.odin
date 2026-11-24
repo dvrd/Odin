@@ -73,9 +73,6 @@ handshake_until_requires_bounded_transport_and_preserves_old_signature :: proc(t
 	error := engine_handshake_until(&conn,time.time_add(time.now(),time.Second))
 	testing.expect_value(t,error.transport.kind,.Deadline_Unsupported)
 	testing.expect_value(t,state.writes,0)
-	old_handshake: proc(^Conn)->Handshake_Error = engine_handshake
-	old_start: proc(^Conn)->(bool,Handshake_Error) = handshake_deadline_start
-	testing.expect(t,old_handshake != nil && old_start != nil)
 	conn=deadline_test_conn(&state)
 	conn.transport.set_read_deadline=nil
 	conn.transport.set_write_deadline=nil

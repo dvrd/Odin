@@ -744,7 +744,6 @@ early_data_usable :: proc(conn: ^Conn, method: string) -> bool {
 // One application effect for this handshake. Acceptance of a replay-safe method
 // applies it. Rejection or a method the policy refuses does not. A later call
 // does not apply it again.
-@(private)
 connection_early_data_apply :: proc(
 	conn: ^Conn,
 	method: string,
@@ -774,7 +773,6 @@ connection_early_data_apply :: proc(
 // Fallback after rejected early data, or after a method the policy refused.
 // Does nothing when the effect was already applied, including an accepted
 // replay-safe 0-RTT attempt.
-@(private)
 connection_early_data_fallback :: proc(
 	conn: ^Conn,
 	method: string,

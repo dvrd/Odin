@@ -49,10 +49,6 @@ tls12_schedule_reference :: proc(t: ^testing.T) {
 	client := tls12_test_array(32, "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f")
 	server := tls12_test_array(32, "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f")
 	digest := tls12_test_array(32, "145e3a23a8405718b35fb1aee0be9b06b0f18cb5815d611a416a0972907ffbc4")
-	expected_master := tls12_test_array(
-		48,
-		"518bc65fd30dabe86349152f98435c94d907b50c92a931c5a2f9e3a4d90f3439f2726c763fb1a40aec90b8bc60173f7c",
-	)
 	expected_ems := tls12_test_array(
 		48,
 		"e8157b0a4806515d2b8c972eb7d0f3f2515338b0d4a0a88e4122fd20cb3e727a975845ffca349bb6a127fe823ad6a851",
@@ -65,13 +61,9 @@ tls12_schedule_reference :: proc(t: ^testing.T) {
 	expected_server_finished := tls12_test_array(12, "9da30a8a9dee0ded8ad6ad16")
 	context.allocator = mem.nil_allocator()
 	context.temp_allocator = mem.nil_allocator()
-	master, e := tls12_master_secret(secret[:], client, server)
-	testing.expect_value(t, e, .None)
-	testing.expect_value(t, master, expected_master)
 	ems, ee := tls12_extended_master_secret(secret[:], digest)
 	testing.expect_value(t, ee, .None)
 	testing.expect_value(t, ems, expected_ems)
-	testing.expect(t, ems != master)
 	keys := tls12_key_block(ems, client, server)
 	testing.expect(t, bytes.equal(keys.client_key[:], expected_keys[:16]))
 	testing.expect(t, bytes.equal(keys.server_key[:], expected_keys[16:32]))
@@ -112,9 +104,6 @@ tls12_prf_validation_preserves_sources :: proc(t: ^testing.T) {
 	}
 	// Long secrets exercise HMAC's hash-first branch without allocating.
 	testing.expect_value(t, tls12_prf_sha256(storage[:512], "label", storage[520:776], storage[800:4896]), .None)
-	invalid, ie := tls12_master_secret(nil, [32]u8{}, [32]u8{})
-	testing.expect_value(t, ie, .Invalid_Secret_Length)
-	testing.expect_value(t, invalid, [48]u8{})
 }
 
 @(test)

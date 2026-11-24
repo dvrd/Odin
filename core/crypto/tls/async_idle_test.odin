@@ -198,7 +198,7 @@ async_idle_partial_plaintext_records_control_and_key_update_are_buffered :: proc
 		case 14:
 			c.protocol.handshake_receive.initialized = true
 		case 15:
-			c.protocol.application.send.seq = MAX_RECORDS_PER_KEY - 1
+			c.protocol.application.send.seq = AEAD_REKEY_SEQ[.AES_GCM_128] - 1
 		}
 		idle_test_expect(t, &c, .Buffered)
 	}
@@ -226,9 +226,9 @@ async_idle_terminal_state_precedes_busy_and_never_means_callbacks_drained :: pro
 		case 6:
 			c.close_error.kind = .Timeout
 		case 7:
-			c.protocol.application.send.seq = MAX_RECORDS_PER_KEY
+			c.protocol.application.send.seq = AEAD_REKEY_SEQ[.AES_GCM_128]
 		case 8:
-			c.protocol.application.receive.seq = MAX_RECORDS_PER_KEY
+			c.protocol.application.receive.seq = AEAD_REKEY_SEQ[.AES_GCM_128]
 		}
 		idle_test_expect(t, &c, .Closed)
 	}

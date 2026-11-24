@@ -840,8 +840,8 @@ server_async_key_usage_reservation_and_control_caps :: proc(t: ^testing.T) {
 		op := tcp_test_op(&r)
 		buffer: [8]u8
 		if mode == 0 {
-			server_async_keys(&s).write.seq = MAX_RECORDS_PER_KEY - 1
-			receiver.seq = MAX_RECORDS_PER_KEY - 1
+			server_async_keys(&s).write.seq = AEAD_REKEY_SEQ[.AES_GCM_128] - 1
+			receiver.seq = AEAD_REKEY_SEQ[.AES_GCM_128] - 1
 			at := len(stream.output)
 			net.async_write(server_async_connection(&s), &op, []u8{9, 8})
 			tcp_test_run(&stream)
