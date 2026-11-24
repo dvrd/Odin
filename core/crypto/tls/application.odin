@@ -15,6 +15,7 @@ UPSTREAM_MAX_USELESS_RECORDS :: 16
 @(private)
 NEW_SESSION_TICKET_TYPE :: cast(u8)4
 
+@(private)
 IO_Error_Kind :: enum {
 	None,
 	EOF,
@@ -37,6 +38,7 @@ IO_Error_Kind :: enum {
 	No_Progress,
 }
 
+@(private)
 IO_Error :: struct {
 	kind:                           IO_Error_Kind,
 	handshake:                      Handshake_Error,

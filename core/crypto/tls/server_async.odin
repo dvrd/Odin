@@ -17,6 +17,7 @@ Server_Async_Init_Error :: enum {
 	Invalid_Transport,
 }
 
+@(private)
 Server_Async_Failure_Kind :: enum {
 	None,
 	Invalid_State,
@@ -29,6 +30,7 @@ Server_Async_Failure_Kind :: enum {
 	Post_Handshake,
 }
 
+@(private)
 Server_Async_Failure :: struct {
 	kind:                           Server_Async_Failure_Kind,
 	engine:                         Server_Handshake_Error,

@@ -11,6 +11,7 @@ import "core:time"
 
 MAX_SERVER_FLIGHT_SIZE :: 1 << 20
 
+@(private)
 Handshake_Error_Kind :: enum {
 	None,
 	Invalid_State,
@@ -32,6 +33,7 @@ Handshake_Error_Kind :: enum {
 	Early_Data_Disabled,
 }
 
+@(private)
 Handshake_Error :: struct {
 	kind:           Handshake_Error_Kind,
 	client_hello:   Client_Hello_Send_Error,
@@ -778,6 +780,7 @@ encrypted_extensions_decode :: proc(
 
 // Initial ClientHello exchange
 
+@(private)
 Client_Hello_Send_Error_Kind :: enum {
 	None,
 	Invalid_State,
@@ -787,6 +790,7 @@ Client_Hello_Send_Error_Kind :: enum {
 	Write_Failed,
 }
 
+@(private)
 Client_Hello_Send_Error :: struct {
 	kind:      Client_Hello_Send_Error_Kind,
 	encode:    Client_Hello_Error,
@@ -958,6 +962,7 @@ client_hello_fail :: proc(conn: ^Conn, err: Client_Hello_Send_Error) -> Client_H
 @(private)
 MAX_IGNORED_CHANGE_CIPHER_SPECS :: 16
 
+@(private)
 Server_Hello_Read_Error_Kind :: enum {
 	None,
 	Invalid_State,
@@ -972,6 +977,7 @@ Server_Hello_Read_Error_Kind :: enum {
 	Invalid_Key_Share,
 }
 
+@(private)
 Server_Hello_Read_Error :: struct {
 	kind:              Server_Hello_Read_Error_Kind,
 	record:            Record_Read_Error,
@@ -1301,12 +1307,14 @@ server_hello_fail :: proc(conn: ^Conn, err: Server_Hello_Read_Error) -> Server_H
 
 // Handshake key installation and cleanup
 
+@(private)
 Handshake_Keys_Error_Kind :: enum {
 	None,
 	Invalid_State,
 	Derivation_Failed,
 }
 
+@(private)
 Handshake_Keys_Error :: struct {
 	kind:  Handshake_Keys_Error_Kind,
 	cause: Key_Schedule_Error,
@@ -1734,6 +1742,7 @@ retry_put_u24 :: proc(data: []u8, at, value: int) {
 
 // Encrypted handshake records and message boundaries
 
+@(private)
 Handshake_Record_Read_Error_Kind :: enum {
 	None,
 	Invalid_State,
@@ -1750,6 +1759,7 @@ Handshake_Record_Read_Error_Kind :: enum {
 	Peer_Alert,
 }
 
+@(private)
 Handshake_Record_Read_Error :: struct {
 	kind:              Handshake_Record_Read_Error_Kind,
 	transport:         transport.Connection_Error,

@@ -13,6 +13,7 @@ import "core:crypto/hmac"
 // resumption), and the SHA-256 by-value forms the QUIC hooks and the pure
 // codecs expose.
 
+@(private)
 Key_Schedule_Error :: enum {
 	None,
 	Invalid_Shared_Secret,
@@ -232,6 +233,7 @@ FINISHED_MESSAGE_SIZE :: 4 + 32
 @(private)
 MAX_FINISHED_MESSAGE_SIZE :: 4 + MAX_TRANSCRIPT_HASH_SIZE
 
+@(private)
 Finished_Error :: enum {
 	None,
 	Destination_Undersized,

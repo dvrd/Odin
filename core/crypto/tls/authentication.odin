@@ -12,6 +12,7 @@ MAX_SERVER_CERTIFICATES :: 16
 MAX_CERTIFICATE_MESSAGE_SIZE :: 1 << 20
 SERVER_CERTIFICATE_VERIFY_CONTEXT :: "TLS 1.3, server CertificateVerify"
 
+@(private)
 Authentication_Error_Kind :: enum {
 	None,
 	Truncated,
@@ -33,6 +34,7 @@ Authentication_Error_Kind :: enum {
 	Invalid_Signature,
 }
 
+@(private)
 Authentication_Error :: struct {
 	kind: Authentication_Error_Kind,
 	x509: x509.Error,

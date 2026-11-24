@@ -40,6 +40,7 @@ Client_Hello :: struct {
 	alpn_protocols:    []string,
 }
 
+@(private)
 Client_Hello_Error :: enum {
 	None,
 	Invalid_Server_Name,
@@ -518,6 +519,7 @@ Server_Hello :: struct {
 	key_share_size:    int,
 }
 
+@(private)
 Server_Hello_Error :: enum {
 	None,
 	Truncated,

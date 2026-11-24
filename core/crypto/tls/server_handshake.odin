@@ -28,6 +28,7 @@ Server_Handshake_Event_Kind :: enum {
 	Fatal,
 }
 
+@(private)
 Server_Handshake_Error :: enum {
 	None,
 	Invalid_Config,

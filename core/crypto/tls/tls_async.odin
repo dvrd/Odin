@@ -82,6 +82,25 @@ server_async_failure :: proc(s: ^Server_Async_Conn) -> Error {
 	return server_async_failure_error(engine_server_async_failure(s))
 }
 
+// async_handshake_error returns how a completed handshake operation ended:
+// nil, or the error. Read it in the operation's callback.
+@(require_results)
+async_handshake_error :: proc(op: ^Async_Handshake_Operation) -> Error {
+	if op.result.kind != .None {
+		return handshake_error(op.result)
+	}
+	return transport_error(op.err)
+}
+
+// server_async_handshake_error is `async_handshake_error` for a server.
+@(require_results)
+server_async_handshake_error :: proc(op: ^Server_Async_Handshake_Operation) -> Error {
+	if op.result.kind != .None {
+		return server_async_failure_error(op.result)
+	}
+	return transport_error(op.err)
+}
+
 @(private, require_results)
 server_async_init_error :: proc(failure: Server_Async_Init_Error) -> Error {
 	switch failure {

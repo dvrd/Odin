@@ -14,6 +14,7 @@ Quic_Secret_Level :: enum {
 	Application,
 }
 
+@(private)
 Quic_Secret_Kind :: enum {
 	None,
 	Invalid_Input,
@@ -29,6 +30,7 @@ Quic_Secret_Kind :: enum {
 	Finished_Failed,
 }
 
+@(private)
 Quic_Secret_Error :: struct {
 	kind:           Quic_Secret_Kind,
 	authentication: Authentication_Error,

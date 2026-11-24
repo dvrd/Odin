@@ -9,6 +9,7 @@ import "core:time"
 @(private)
 SERVER_TICKET_MAX_LIFETIME :: 7 * 24 * time.Hour
 
+@(private)
 Server_Ticket_Error :: enum {
 	None,
 	Invalid,

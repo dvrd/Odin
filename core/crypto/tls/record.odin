@@ -37,6 +37,7 @@ Record_Header :: struct {
 	length:         u16,
 }
 
+@(private)
 Record_Error :: enum {
 	None,
 	Unknown_Content_Type,
@@ -119,6 +120,7 @@ record_header_validate_plaintext :: proc(header: Record_Header) -> Record_Error 
 
 // Plaintext record I/O
 
+@(private)
 Record_Read_Error_Kind :: enum {
 	None,
 	Destination_Undersized,
@@ -127,6 +129,7 @@ Record_Read_Error_Kind :: enum {
 	Body_Read_Failed,
 }
 
+@(private)
 Record_Read_Error :: struct {
 	kind:      Record_Read_Error_Kind,
 	record:    Record_Error,
@@ -227,6 +230,7 @@ MAX_INNER_PLAINTEXT_SIZE :: MAX_PLAINTEXT_SIZE + 1
 @(private)
 MAX_RECORDS_PER_KEY :: cast(u64)(1 << 24)
 
+@(private)
 Record_Protection_Error :: enum {
 	None,
 	Invalid_State,

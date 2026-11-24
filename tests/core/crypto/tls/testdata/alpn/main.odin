@@ -77,16 +77,14 @@ sync_case :: proc(c: Case) -> int {
 }
 
 Completion :: struct {
-	done:   bool,
-	error:  net.Connection_Error,
-	result: tls.Handshake_Error,
+	done:  bool,
+	error: tls.Error,
 }
 
 handshake_done :: proc(op: ^tls.Async_Handshake_Operation) {
 	state := cast(^Completion)op.user_data
 	state.done = true
-	state.error = op.err
-	state.result = op.result
+	state.error = tls.async_handshake_error(op)
 }
 
 IO_Completion :: struct {
@@ -134,13 +132,13 @@ async_case :: proc(c: Case) -> int {
 	assert(tls.async_connection_state(conn).negotiated_protocol == "")
 	assert(nbio.run() == nil && state.done)
 	if c.failure {
-		assert(state.error.kind != .None)
+		assert(state.error != nil)
 		if c.no_overlap {
-			assert(state.result.server_hello.alert_description == 120)
+			assert(state.error == tls.Error(tls.Protocol_Error.No_Application_Protocol))
 		}
 		assert(tls.async_connection_state(conn).negotiated_protocol == "")
 	} else {
-		assert(state.error.kind == .None)
+		assert(state.error == nil)
 		assert(tls.async_connection_state(conn).negotiated_protocol == c.selected)
 		if len(c.owned_offer) > 0 {
 			c.owned_offer[0] = 'x'

@@ -60,6 +60,7 @@ Config :: struct {
 	no_system_roots: bool,
 }
 
+@(private)
 Client_Error :: enum {
 	None,
 	Nil_Connection,
@@ -317,6 +318,7 @@ system_roots_release :: proc(conn: ^Conn) {
 
 // Connection establishment and inspection
 
+@(private)
 Dial_Error_Kind :: enum {
 	None,
 	Invalid_State,
@@ -325,6 +327,7 @@ Dial_Error_Kind :: enum {
 	Handshake_Failed,
 }
 
+@(private)
 Dial_Error :: struct {
 	kind:      Dial_Error_Kind,
 	config:    Client_Error,

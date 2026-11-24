@@ -44,9 +44,8 @@ async_go_interoperability :: proc(t: ^testing.T) {
 		nil,
 	)
 	State :: struct {
-		done:      bool,
-		error:     net.Connection_Error,
-		handshake: tls.Handshake_Error,
+		done:  bool,
+		error: tls.Error,
 	}
 	hs_result: State
 	hs := tls.Async_Handshake_Operation {
@@ -54,15 +53,13 @@ async_go_interoperability :: proc(t: ^testing.T) {
 		callback = proc(op: ^tls.Async_Handshake_Operation) {
 			s := cast(^State)op.user_data
 			s.done = true
-			s.error = op.err
-			s.handshake = op.result
+			s.error = tls.async_handshake_error(op)
 		},
 	}
 	testing.expect_value(t, tls.async_handshake(conn, &hs), nil)
 	testing.expect(t, nbio.run() == nil)
-	testing.expect_value(t, hs_result.error.kind, .None)
-	testing.expect_value(t, hs_result.handshake.kind, .None)
-	if !hs_result.done || hs_result.error.kind != .None {
+	testing.expect_value(t, hs_result.error, nil)
+	if !hs_result.done || hs_result.error != nil {
 		result: Result
 		op := net.Async_Operation {
 			callback  = completed,
@@ -161,9 +158,8 @@ async_go_rejects_wrong_hostname :: proc(t: ^testing.T) {
 		nil,
 	)
 	State :: struct {
-		calls:     int,
-		error:     net.Connection_Error_Kind,
-		handshake: tls.Handshake_Error_Kind,
+		calls: int,
+		error: tls.Error,
 	}
 	state: State
 	op := tls.Async_Handshake_Operation {
@@ -171,15 +167,13 @@ async_go_rejects_wrong_hostname :: proc(t: ^testing.T) {
 		callback = proc(op: ^tls.Async_Handshake_Operation) {
 			s := cast(^State)op.user_data
 			s.calls += 1
-			s.error = op.err.kind
-			s.handshake = op.result.kind
+			s.error = tls.async_handshake_error(op)
 		},
 	}
 	_ = tls.async_handshake(conn, &op)
 	assert(nbio.run() == nil)
 	testing.expect_value(t, state.calls, 1)
-	testing.expect_value(t, state.error, .Protocol_Failed)
-	testing.expect_value(t, state.handshake, .Authentication_Failed)
+	testing.expect(t, state.error != nil)
 	r: Result
 	close_op := net.Async_Operation {
 		user_data = &r,

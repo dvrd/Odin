@@ -12,6 +12,7 @@ MAX_ROOT_CERTIFICATES :: 512
 @(private)
 MAX_ROOT_BUNDLE_SIZE :: 4 << 20
 
+@(private)
 Root_Error_Kind :: enum {
 	None,
 	Invalid_State,
@@ -23,6 +24,7 @@ Root_Error_Kind :: enum {
 	Certificate_Limit,
 	Allocation_Failed,
 }
+@(private)
 Root_Error :: struct {
 	kind:        Root_Error_Kind,
 	io:          os.Error,
