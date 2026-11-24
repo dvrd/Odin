@@ -23,15 +23,31 @@ TP0x07. These limit writes on peer-initiated bidi, locally initiated bidi, and
 local uni streams respectively. Local receive limits belong in `limits.recv_*`.
 A zero grant in an unrelated direction does not suppress another stream kind.
 
-Each stream has a 256-byte sliding send and receive window. Acknowledged bytes
-are reclaimed while absolute offsets persist. Consumed bytes return connection
-and stream credit via retained MAX_DATA/MAX_STREAM_DATA frames. Incremental
-transfers can exceed 256 bytes; callers retry writes after ACK/credit progress.
-Out-of-order fragments and identical overlaps are accepted within the window.
-Conflicting retained overlaps and inconsistent final sizes are protocol errors.
-A packet exceeding the retained receive window is discarded without ACK so it
-can retry after consumption. Set advertised initial per-stream receive credit to
-at most 256; adoption rejects a larger initial grant. `next_readable` enumerates readable bytes, FIN and reset; applications
+Each stream has a sliding send and a sliding receive window. Both default to
+`STREAM_BYTES` (256) and are set per connection by `Stream_Windows` in
+`Adopt_Config.windows` (or `Config.windows`). Acknowledged bytes are reclaimed
+while absolute offsets persist. Consumed bytes return connection and stream
+credit via retained MAX_DATA/MAX_STREAM_DATA frames. A transfer can exceed the
+window; `write` takes all of its bytes or returns `Capacity`, and
+`stream_send_room` reports what it would take now. A window larger than a
+datagram is sent one STREAM frame per packet. Out-of-order fragments and
+identical overlaps are accepted within the window. Conflicting retained overlaps
+and inconsistent final sizes are protocol errors. A packet exceeding the
+retained receive window is discarded without ACK so it can retry after
+consumption. Advertised initial per-stream receive credit must fit the receive
+window; adoption rejects a larger initial grant.
+
+Stream bytes live in fixed blocks from one pool per connection, each with its
+acknowledged/retry or present bitmap, so a stream holds memory for what it has
+buffered and an idle stream holds none. The default pool is embedded and covers
+a full default window for every record in both directions. A window above
+`STREAM_BYTES` needs `Stream_Windows.allocator`: the pool is allocated once at
+adoption and freed by `destroy`, and nothing allocates on the packet path.
+`send_pool` and `recv_pool` bound the heap bytes all streams share. Zero sizes a
+pool so it cannot run out: every record's full send window, and for receive the
+connection receive window plus two blocks per record. A smaller send pool makes
+`write` return `Capacity` until acknowledgments free blocks; a smaller receive
+pool discards the packet it cannot buffer, unacknowledged. `next_readable` enumerates readable bytes, FIN and reset; applications
 must track delivered terminal events.
 
 Bounds are 32 stream IDs for the connection lifetime, 64 outstanding packets,

@@ -21,8 +21,6 @@ was_stateless_reset :: proc(c: ^Connection) -> bool {return c != nil && c.statel
 @(private)
 reset_terminal :: proc(c: ^Connection) {
 	cancel(c); harness.destroy(&c.model); crypto.zero_explicit(&c.migration, size_of(c.migration))
-	crypto.zero_explicit(&c.send_mem, size_of(c.send_mem))
-	crypto.zero_explicit(&c.recv_mem, size_of(c.recv_mem))
 	crypto.zero_explicit(&c.crypto_mem, size_of(c.crypto_mem))
 	crypto.zero_explicit(&c.udp_hold, size_of(c.udp_hold))
 	crypto.zero_explicit(&c.tx, size_of(c.tx))

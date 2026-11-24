@@ -262,7 +262,12 @@ Pair :: struct {
 	flight:         ^Flight,
 }
 
-open_pair :: proc(t: ^testing.T, limits: harness.Limits, full_size: bool) -> ^Pair {
+open_pair :: proc(
+	t: ^testing.T,
+	limits: harness.Limits,
+	full_size: bool,
+	windows: conn.Stream_Windows = {},
+) -> ^Pair {
 	p := new(Pair)
 	p.flight = build_flight(t)
 	p.client = new(conn.Connection)
@@ -279,6 +284,7 @@ open_pair :: proc(t: ^testing.T, limits: harness.Limits, full_size: bool) -> ^Pa
 				peer_cid = peer[:],
 				material = material_of(p.flight),
 				limits = limits,
+				windows = windows,
 				max_datagram = 1200,
 				full_size = full_size,
 			},
@@ -295,6 +301,7 @@ open_pair :: proc(t: ^testing.T, limits: harness.Limits, full_size: bool) -> ^Pa
 				peer_cid = local[:],
 				material = material_of(p.flight),
 				limits = limits,
+				windows = windows,
 				max_datagram = 1200,
 				full_size = full_size,
 			},

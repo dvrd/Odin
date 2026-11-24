@@ -30,7 +30,7 @@ confirm_early :: proc(c:^Connection,owner:^quic.Handshake,cfg:Adopt_Config,accep
  if !accepted {
   c.early_state.rejected_end=c.model.spaces[2].next_send;_=harness.reject_early_packets(&c.model)
   for &sent in c.tx {sent={}}
-  for &b in c.bufs {if !b.used {continue};for i in 0..<b.n {b.send_retry[i]=!b.send_acked[i]};b.fin_retry=b.fin&&!b.fin_acked;b.reset_retry=b.reset}
+  retransmit_unacknowledged(c)
  }
  early_read:=c.hs.zero_rtt_read
  quic.handshake_fail(&c.hs);c.hs=owner^;owner^={}
@@ -98,7 +98,8 @@ early_ingest :: proc(c:^Connection,now:i64,path:u32,datagram:[]u8)->Error {
  parsed,ok:=parse_frames(plain[:n]);for i in 0..<parsed.path_n {if parsed.paths[i].response {ok=false}}
  if n==0||!ok||parsed.new_token||parsed.ack||parsed.crypto||parsed.handshake_done {fail(c,"0RTT frame");return .Protocol}
  duplicate:=already_received(sp,full)
- for i in 0..<parsed.stream_n {stream:=parsed.streams[i];if !stream_fits_recv(c,{stream_id=stream.id,stream_off=stream.offset,stream_data=stream.data}) {return .Capacity}}
+ recv_blocks:=0
+ for i in 0..<parsed.stream_n {stream:=parsed.streams[i];if !stream_fits_recv(c,{stream_id=stream.id,stream_off=stream.offset,stream_data=stream.data},&recv_blocks) {return .Capacity}}
  req:=shadow_from_parsed(parsed);req.stream=false;req.reset=false;req.stop_sending=false;req.max_data=false;req.attach_ack=false;req.ping=parsed.ping||parsed.control_eliciting||parsed.stream||parsed.reset||parsed.stop||parsed.max_data||parsed.max_stream_data||parsed.max_streams_bidi||parsed.max_streams_uni
  shadow:[MAX_DATAGRAM]u8
  if !shadow_packet(c,shadow[:size],.Application,fields.packet_number_length,u64(fields.packet_number),req,0) {return .Protocol}

@@ -31,6 +31,7 @@ import ecn "core:net/quic/ecn"
 import "core:time"
 
 STREAMS :: 32
+// Default per-stream window. Stream_Windows raises it for one connection.
 STREAM_BYTES :: 256
 PACKETS :: 64
 CRYPTO_BYTES :: 2048
@@ -80,6 +81,7 @@ Config :: struct {
 	local_cid, peer_cid: []u8,
 	material:            Material,
 	limits:              harness.Limits,
+	windows:             Stream_Windows,
 	max_datagram:        int,
 	// Pad 1-RTT packets to max_datagram. Handshake packets stay natural size,
 	// except Initial datagrams, which stay at the 1200-byte floor.
@@ -112,12 +114,15 @@ Buf :: struct {
  want_stop,stop_sent,stop_retry,stop_acked:bool,
 	stop:                              bool,
 	send_base:                         u64,
-	send_acked:                        [STREAM_BYTES]bool,
-	send_retry:                        [STREAM_BYTES]bool,
+	// Ring positions of the blocks that hold send_base and recv_base.
+	send_head, recv_head:              int,
+	// Some retained byte may be marked for retransmission.
+	retry_pending:                     bool,
+	// Received bytes held at or above recv_base, in order or not.
+	recv_held:                         int,
 	fin_acked, fin_retry, reset_retry: bool,
  reset_acked:bool,
 	recv_base, recv_final:             u64,
-	recv_present:                      [STREAM_BYTES]bool,
 	send_limit:                        u64,
 	recv_credit:                       u64,
 	credit_dirty:                      bool,
@@ -148,8 +153,9 @@ Connection :: struct {
 	app_pkts:                                    [PACKETS]harness.Packet,
 	model_streams:                               [STREAMS]harness.Stream,
 	crypto_mem:                                  [3][CRYPTO_BYTES]u8,
-	send_mem:                                    [STREAMS][STREAM_BYTES]u8,
-	recv_mem:                                    [STREAMS][STREAM_BYTES]u8,
+	streams:                                     Stream_Pool,
+	stream_mem:                                  [INLINE_BLOCKS * INLINE_STRIDE]u8,
+	stream_table:                                [INLINE_BLOCKS]u32,
 	bufs:                                        [STREAMS]Buf,
 	local_cid, peer_cid:                         [CID_CAP]u8,
 	local_cid_len:                               int,
@@ -267,6 +273,12 @@ init :: proc(c: ^Connection, cfg: Config) -> Error {
 		c.reason = "limits"
 		return map_harness(err)
 	}
+	if err := pool_setup(c, cfg.windows, cfg.limits.recv_max_data); err != .None {
+		harness.destroy(&c.model)
+		quic.handshake_fail(&c.hs)
+		c.reason = "stream windows"
+		return err
+	}
 	c.initialized = true
 	return .None
 }
@@ -284,6 +296,7 @@ destroy :: proc(c: ^Connection) {
 	crypto.zero_explicit(&c.shared, size_of(c.shared))
 	crypto.zero_explicit(&c.expected_finished, size_of(c.expected_finished))
 	crypto.zero_explicit(&c.material.shared, size_of(c.material.shared))
+	pool_release(c)
 	c^ = {}
 }
 
@@ -363,7 +376,9 @@ write :: proc(c: ^Connection, id: u64, data: []u8, fin: bool) -> (int, Error) {
 		return 0, .Protocol
 	}
 	compact_send(c, buf)
-	if len(data) > STREAM_BYTES - buf.n {
+	end := buf.send_base + u64(buf.n)
+	if len(data) > c.streams.window[.Send] - buf.n ||
+	   win_missing(c, buf, .Send, end, end + u64(len(data))) > pool_room(c, .Send) {
 		if fresh {
 			buf^ = {}
 		}; return 0, .Capacity
@@ -378,7 +393,10 @@ write :: proc(c: ^Connection, id: u64, data: []u8, fin: bool) -> (int, Error) {
 		}; return 0, map_harness(e)
 	}
 	buf.send_limit = limit
-	copy(c.send_mem[buf_index(c, buf)][buf.n:], data); buf.n += len(data)
+	if !win_reserve(c, buf, .Send, end, end + u64(len(data))) {
+		fail(c, "stream send pool"); return 0, .Failed
+	}
+	win_write(c, buf, .Send, end, data); buf.n += len(data)
 	if fin {
 		buf.fin = true
 	}
@@ -401,17 +419,20 @@ read :: proc(c: ^Connection, id: u64, dst: []u8) -> (int, bool, Error) {
 	if buf.recv_reset {
 		return 0, false, .Protocol
 	}
-	n := min(buf.recv_n, len(dst)); idx := buf_index(c, buf)
-	copy(dst[:n], c.recv_mem[idx][:n])
+	n := min(buf.recv_n, len(dst))
 	if n > 0 {
 		if e := harness.stream_receive_release(&c.model, id, n); e != .None {
 			return 0, false, map_harness(e)
 		}
-		copy(c.recv_mem[idx][:], c.recv_mem[idx][n:])
-		for i in 0 ..< STREAM_BYTES - n {buf.recv_present[i] = buf.recv_present[i + n]}
-		for i in STREAM_BYTES - n ..< STREAM_BYTES {buf.recv_present[i] = false}
-		buf.recv_base += u64(n); buf.recv_n = 0
-		for buf.recv_n < STREAM_BYTES && buf.recv_present[buf.recv_n] {buf.recv_n += 1}
+		win_read(c, buf, .Recv, buf.recv_base, dst[:n])
+		// The bytes after a contiguous prefix stay contiguous.
+		buf.recv_n -= n; buf.recv_held -= n
+		if buf.recv_held <= 0 {
+			win_clear(c, buf, .Recv)
+		} else {
+			win_advance(c, buf, .Recv, buf.recv_base + u64(n))
+		}
+		buf.recv_base += u64(n)
 		buf.recv_credit += u64(n); buf.credit_dirty = true
 	}
 	fin := buf.recv_fin && buf.recv_base == buf.recv_final && buf.recv_n == 0
@@ -467,6 +488,7 @@ cancel :: proc(c: ^Connection) {
 	for &buf in c.bufs {
 		buf = {}
 	}
+	pool_reset(c)
 }
 
 timer :: proc(c: ^Connection, now: i64) -> Timer {
@@ -648,12 +670,13 @@ ingest :: proc(c: ^Connection, now: i64, path: u32, datagram: []u8) -> Error {
 			   parsed.max_streams_uni) {
 		fail(c, "application frame before 1-RTT"); return .Protocol
 	}
+	recv_blocks := 0
 	for si in 0 ..< parsed.stream_n {
 		f := parsed.streams[si]; p := Parsed {
 			stream_id   = f.id,
 			stream_off  = f.offset,
 			stream_data = f.data,
-		}; if !stream_fits_recv(c, p) {
+		}; if !stream_fits_recv(c, p, &recv_blocks) {
 			return .Discarded
 		}
 	}
@@ -1241,8 +1264,10 @@ shadow_from_parsed :: proc(parsed: Parsed) -> harness.Emit {
 	return req
 }
 
+// Whether the stream window and the pool can take this frame. need carries the
+// blocks earlier frames of the same packet already claimed.
 @(private)
-stream_fits_recv :: proc(c: ^Connection, p: Parsed) -> bool {
+stream_fits_recv :: proc(c: ^Connection, p: Parsed, need: ^int) -> bool {
 	if u64(len(p.stream_data)) > max(u64) - p.stream_off {
 		return false
 	}
@@ -1251,7 +1276,14 @@ stream_fits_recv :: proc(c: ^Connection, p: Parsed) -> bool {
 		base = buf.recv_base
 	}
 	end := p.stream_off + u64(len(p.stream_data))
-	return end <= base || end - base <= STREAM_BYTES
+	if end <= base || buf != nil && buf.recv_reset {
+		return true
+	}
+	if end - base > u64(c.streams.window[.Recv]) {
+		return false
+	}
+	need^ += win_missing(c, buf, .Recv, max(p.stream_off, base), end)
+	return need^ <= pool_room(c, .Recv)
 }
 
 @(private)
@@ -1317,7 +1349,7 @@ apply_parsed :: proc(c: ^Connection, level: quic.Encryption_Level, parsed: Parse
 			return map_harness(e)
 		}
 		buf.recv_reset = true;buf.recv_reset_error=parsed.reset_error; buf.recv_final = parsed.reset_final
-		buf.recv_n = 0; buf.recv_present = {}
+		buf.recv_n = 0; buf.recv_held = 0; win_clear(c, buf, .Recv)
 	}
 	if parsed.stop {
 		if !send_direction(c, parsed.stop_id) || find_buf(c, parsed.stop_id) == nil {

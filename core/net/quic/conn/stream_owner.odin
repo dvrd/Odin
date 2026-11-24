@@ -15,6 +15,9 @@ Adopt_Config :: struct {
 	directional_limits:                                               bool,
 	peer_max_data, peer_bidi_local, peer_bidi_remote, peer_uni:       u64,
 	peer_bidi_streams, peer_uni_streams:                              u64,
+	// Zero keeps the embedded STREAM_BYTES windows and allocates nothing.
+	// limits.recv_max_stream_data must fit in the receive window.
+	windows:                                                          Stream_Windows,
 }
 adopt_established :: proc(c: ^Connection, owner: ^quic.Handshake, cfg: Adopt_Config) -> Error {
 	if c == nil ||
@@ -32,7 +35,8 @@ adopt_established :: proc(c: ^Connection, owner: ^quic.Handshake, cfg: Adopt_Con
 	   cfg.next_send_pn >= u64(1) << 62 {
 		return .Invalid
 	}
-	if cfg.limits.recv_max_stream_data > STREAM_BYTES {
+	recv_window := cfg.windows.recv if cfg.windows.recv != 0 else STREAM_BYTES
+	if recv_window < 0 || cfg.limits.recv_max_stream_data > u64(recv_window) {
 		return .Invalid
 	}
 	size := cfg.max_datagram; if size == 0 {
@@ -59,6 +63,9 @@ adopt_established :: proc(c: ^Connection, owner: ^quic.Handshake, cfg: Adopt_Con
 	}
 	if e := harness.configure(&c.model, cfg.limits); e != .None {
 		harness.destroy(&c.model); return map_harness(e)
+	}
+	if e := pool_setup(c, cfg.windows, cfg.limits.recv_max_data); e != .None {
+		harness.destroy(&c.model); return e
 	}
 	_ = harness.discard_space(&c.model, .Initial); _ = harness.confirm_handshake(&c.model)
 	c.model.address_validated = true; c.model.has_path = true
@@ -140,14 +147,15 @@ send_limits :: proc(c: ^Connection, id: u64) -> (u64, u64) {
 }
 @(private)
 compact_send :: proc(c: ^Connection, b: ^Buf) {
-	n := 0; for n < b.n && b.send_acked[n] {n += 1}; if n == 0 {
+	n := win_run(c, b, .Send, .Acked, b.send_base, b.n, true); if n == 0 {
 		return
 	}
-	idx := int((uintptr(b) - uintptr(&c.bufs[0])) / size_of(Buf))
-	copy(c.send_mem[idx][:], c.send_mem[idx][n:b.n])
-	for i in 0 ..< b.n -
-		n {b.send_acked[i] = b.send_acked[i + n]; b.send_retry[i] = b.send_retry[i + n]}
-	for i in b.n - n ..< STREAM_BYTES {b.send_acked[i] = false; b.send_retry[i] = false}
+	// An idle stream holds no block.
+	if n == b.n {
+		win_clear(c, b, .Send)
+	} else {
+		win_advance(c, b, .Send, b.send_base + u64(n))
+	}
 	b.n -= n; b.sent = max(0, b.sent - n); b.send_base += u64(n)
 }
 @(private)
@@ -167,41 +175,56 @@ receive_stream :: proc(c: ^Connection, p: Parsed) -> Error {
 	if b.recv_fin && (end > b.recv_final || p.fin && end != b.recv_final) {
 		return .Protocol
 	}
-	if end > b.recv_base + STREAM_BYTES {
+	window := u64(c.streams.window[.Recv])
+	if end > b.recv_base + window {
 		return .Discarded
 	}
-	unique := 0; idx := int((uintptr(b) - uintptr(&c.bufs[0])) / size_of(Buf))
-	present := b.recv_present
-	for v, i in p.stream_data {
-		off := p.stream_off + u64(i); if off < b.recv_base {
-			continue
-		}; at := int(off - b.recv_base)
-		if present[at] {
-			if c.recv_mem[idx][at] != v {
-				return .Protocol
-			}
-		} else {
-			present[at] = true; unique += 1
-		}
+	// Bytes below recv_base were delivered. The rest must agree with what is held.
+	lo := max(p.stream_off, b.recv_base); data: []u8
+	if lo < end {
+		data = p.stream_data[int(lo - p.stream_off):]
 	}
-	contiguous := 0; for contiguous < STREAM_BYTES && present[contiguous] {contiguous += 1}
+	unique := 0
+	for done := 0; done < len(data); {
+		block, at, count := win_segment(c, b, .Recv, lo + u64(done), len(data) - done)
+		if block == nil {
+			unique += count
+		} else {
+			present := win_bitmap(c, block, PRESENT)
+			for i in 0 ..< count {
+				bit := at + i
+				if present[bit >> 3] & (1 << uint(bit & 7)) == 0 {
+					unique += 1
+				} else if block[bit] != data[done + i] {
+					return .Protocol
+				}
+			}
+		}
+		done += count
+	}
+	frontier := b.recv_base + u64(b.recv_n); contiguous := frontier
+	if lo <= frontier && end > frontier {
+		contiguous = end + u64(win_run(c, b, .Recv, PRESENT, end, int(b.recv_base + window - end), true))
+	}
+	if !win_reserve(c, b, .Recv, lo, end) {
+		c.reason = "stream receive pool"; return .Capacity
+	}
 	if e := harness.stream_receive_admit(
 		&c.model,
 		p.stream_id,
 		p.stream_off,
 		len(p.stream_data),
 		unique,
-		b.recv_base + u64(contiguous),
+		contiguous,
 		p.fin,
 	); e != .None {
+		if b.recv_held == 0 {
+			win_clear(c, b, .Recv)
+		}
 		c.reason = "stream receive accounting"; return map_harness(e)
 	}
-	for v, i in p.stream_data {
-		off := p.stream_off + u64(i); if off >= b.recv_base {
-			c.recv_mem[idx][int(off - b.recv_base)] = v
-		}
-	}
-	b.recv_present = present; b.recv_n = contiguous
+	win_write(c, b, .Recv, lo, data); win_set(c, b, .Recv, PRESENT, lo, len(data), true)
+	b.recv_held += unique; b.recv_n = int(contiguous - b.recv_base)
 	if b.recv_credit == 0 {
 		b.recv_credit = c.model.max_stream_data_recv
 	}
@@ -209,6 +232,15 @@ receive_stream :: proc(c: ^Connection, p: Parsed) -> Error {
 		b.recv_fin = true; b.recv_final = end
 	}
 	return .None
+}
+// The part of [offset, offset+n) the stream still retains.
+@(private)
+retained_range :: proc(b: ^Buf, offset: u64, n: int) -> (u64, int) {
+	lo := max(offset, b.send_base); hi := min(offset + u64(n), b.send_base + u64(b.n))
+	if hi <= lo {
+		return lo, 0
+	}
+	return lo, int(hi - lo)
 }
 @(private)
 mark_retry :: proc(c: ^Connection, t: Tx_Packet) {
@@ -220,13 +252,7 @@ mark_retry :: proc(c: ^Connection, t: Tx_Packet) {
         if t.credit {
 			b.credit_dirty = true; return
 		}
-		for i in 0 ..< t.n {
-			off := t.offset + u64(i); if off >= b.send_base && off < b.send_base + u64(b.n) {
-				at := int(off - b.send_base); if !b.send_acked[at] {
-					b.send_retry[at] = true
-				}
-			}
-		}
+		win_retry(c, b, retained_range(b, t.offset, t.n))
 		if t.fin && !b.fin_acked {
 			b.fin_retry = true
 		}; if t.reset && !b.reset_acked {
@@ -273,20 +299,13 @@ acknowledge_tx :: proc(c: ^Connection, p: Parsed) {
 		}; if acked {
 			if b:=find_buf(c,t.id);b!=nil&&t.stop {b.stop_acked=true;b.stop_retry=false}
             if b := find_buf(c, t.id); b != nil && !t.credit && !t.stop {
-				n := 0; for i in 0 ..< t.n {
-					off := t.offset + u64(i)
-					if off >= b.send_base && off < b.send_base + u64(b.n) {
-						at := int(off - b.send_base); if !b.send_acked[at] {
-							b.send_acked[at] = true; b.send_retry[at] = false; n += 1
-						}
-					}
-				}
+				n := win_ack(c, b, retained_range(b, t.offset, t.n))
 				if t.fin {
 					b.fin_acked = true; b.fin_retry = false
 				}; if t.reset {
 					b.reset_retry = false;b.reset_acked=true;b.fin_acked=true;b.fin_retry=false
-                    idx:=int((uintptr(b)-uintptr(&c.bufs[0]))/size_of(Buf));for &value in c.send_mem[idx] {value=0}
-                    b.send_base=b.reset_final;b.n=0;b.sent=0;b.send_acked={};b.send_retry={}
+                    win_clear(c,b,.Send)
+                    b.send_base=b.reset_final;b.n=0;b.sent=0;b.retry_pending=false
 				}
 				_ = harness.stream_send_ack(&c.model, b.id, n, t.fin, t.reset); compact_send(c, b)
 			}
@@ -307,7 +326,7 @@ send_owned_stream :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, b
 	if !journal_room(c) {
 		return 0, .None, false
 	}
-	for &b, idx in c.bufs {
+	for &b in c.bufs {
 		if !b.used {
 			continue
 		}
@@ -341,14 +360,15 @@ send_owned_stream :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, b
 				continue
 			}; reset = true
 		} else {
-			retry := -1; for i in 0 ..< b.n {
-				if b.send_retry[i] && !b.send_acked[i] {
-					retry = i; break
-				}
+			// A byte is never both acknowledged and marked for retry.
+			retry := b.n
+			if b.retry_pending {
+				retry = win_run(c, &b, .Send, .Retry, b.send_base, b.n, false)
+				b.retry_pending = retry < b.n
 			}
-			if retry >= 0 {
+			if retry < b.n {
 				off = retry
-				for off + n < b.n && b.send_retry[off + n] && !b.send_acked[off + n] {n += 1}
+				n = win_run(c, &b, .Send, .Retry, b.send_base + u64(off), b.n - off, true)
 			} else {
 				off = b.sent; n = b.n - b.sent
 			}
@@ -371,14 +391,16 @@ send_owned_stream :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, b
 		if reset {
 			at, ok = encode_reset(frame[:], at, b.id, b.reset_final,b.reset_error)
 		} else {
-			at, ok = encode_stream(
-				frame[:],
-				at,
-				b.id,
-				b.send_base + u64(off),
-				c.send_mem[idx][off:off + n],
-				fin,
-			)
+			// One frame per packet: a window larger than a datagram goes out in
+			// pieces, and FIN rides only with the last one.
+			if room := stream_frame_room(c, len(dst), at, b.id, b.send_base + u64(off)); n > room {
+				if room <= 0 {
+					return 0, .Capacity, true
+				}
+				n = room; fin = false
+			}
+			payload: [MAX_DATAGRAM]u8; win_read(c, &b, .Send, b.send_base + u64(off), payload[:n])
+			at, ok = encode_stream(frame[:], at, b.id, b.send_base + u64(off), payload[:n], fin)
 		}
 		if !ok {
 			return 0, .Capacity, true
@@ -393,7 +415,7 @@ send_owned_stream :: proc(c: ^Connection, now: i64, dst: []u8) -> (int, Error, b
 		) {
 			fail(c, "retention journal full"); return 0, .Failed, true
 		}
-		for i in off ..< off + n {b.send_retry[i] = false}; b.sent = max(b.sent, off + n)
+		win_set(c, &b, .Send, .Retry, b.send_base + u64(off), n, false); b.sent = max(b.sent, off + n)
 		if fin {
 			b.fin_sent = true; b.fin_retry = false
 		}; if reset {
@@ -429,4 +451,17 @@ journal_room :: proc(c: ^Connection) -> bool {
 		}
 	}
 	return false
+}
+
+// STREAM payload bytes that fit one packet after the frames already encoded.
+@(private)
+stream_frame_room :: proc(c: ^Connection, dst, used: int, id, offset: u64) -> int {
+	header := 1 + c.peer_cid_len + 4
+	if early(c) {
+		header = 7 + c.local_cid_len + c.peer_cid_len + 2 + 4
+	}
+	id_n, _ := quic.varint_size(id); offset_n, _ := quic.varint_size(offset)
+	// Type, stream ID, offset and a two-byte length, then the AEAD tag.
+	room := min(c.max_datagram, dst, MAX_DATAGRAM) - header - used - (1 + id_n + offset_n + 2) - 16
+	return min(room, 16383)
 }
