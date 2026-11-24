@@ -214,6 +214,19 @@ socket_engine_recv :: proc(socket: ^Socket, buf: []byte) -> (n: int, err: Error)
 		}
 	}
 
+	// In the unlikely event that the peer has failed to rekey in a
+	// reasonable timeframe, prod them into doing so if possible.
+	if failure.kind == .None && socket_peer_rekey_due(state, &conn.application.receive) {
+		sync.atomic_store(&state.peer_key_update_owed, true)
+		if sync.mutex_try_lock(&state.tx_lock) {
+			update := socket_engine_owed_key_update(socket)
+			sync.mutex_unlock(&state.tx_lock)
+			if update != nil {
+				return received, update
+			}
+		}
+	}
+
 	#partial switch failure.kind {
 	case .None:
 		return received, nil
@@ -244,14 +257,33 @@ socket_engine_recv :: proc(socket: ^Socket, buf: []byte) -> (n: int, err: Error)
 
 // Sends the KeyUpdate the peer asked for, if one is owed. The caller holds
 // the send lock.
+// Whether to ask the peer for a new key: its current one has protected as
+// many records as a key should, it can still be replaced, and it has not been
+// asked about this one before. Called with the receive lock held.
+@(private, require_results)
+socket_peer_rekey_due :: proc(state: ^Socket_State, receive: ^Record_Protection) -> bool {
+	if !receive.initialized || receive.seq < record_protection_limit(receive) || !record_protection_can_rekey(receive) {
+		return false
+	}
+	if state.peer_key_update_asked && state.peer_key_update_gen == receive.gen {
+		return false
+	}
+	state.peer_key_update_asked = true
+	state.peer_key_update_gen = receive.gen
+	return true
+}
+
 @(private, require_results)
 socket_engine_owed_key_update :: proc(socket: ^Socket) -> Error {
 	state := &socket._state
-	if !sync.atomic_exchange(&state.key_update_owed, false) {
+	answer := sync.atomic_exchange(&state.key_update_owed, false)
+	prod := sync.atomic_exchange(&state.peer_key_update_owed, false)
+	if !answer && !prod {
 		return nil
 	}
 
-	if failure := application_send_key_update(state.conn); failure.kind != .None {
+	// One KeyUpdate does both: it replaces our key, and asks for theirs.
+	if failure := application_send_key_update(state.conn, prod); failure.kind != .None {
 		return socket_engine_failure(socket, socket_io_error(failure))
 	}
 	return nil

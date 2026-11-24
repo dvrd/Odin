@@ -941,3 +941,39 @@ socket_test_message :: proc(dst: []u8, type: Handshake_Type, prefix: []u8, exten
 	server_flight_put24(dst[1:4], at - 4)
 	return at
 }
+
+// Upstream's receiver prods a peer that has not replaced its key in good time,
+// once for each key, and never past the last key the suite allows.
+@(test)
+socket_asks_a_slow_peer_to_rekey_once_for_each_key :: proc(t: ^testing.T) {
+	state: Socket_State
+	receive: Record_Protection
+	key: [16]u8
+	iv: [12]u8
+	record_protection_init(&receive, key, iv)
+	defer record_protection_clear(&receive)
+
+	limit := record_protection_limit(&receive)
+	testing.expect_value(t, limit, AEAD_REKEY_SEQ[.AES_GCM_128])
+
+	receive.seq = limit - 1
+	testing.expect(t, !socket_peer_rekey_due(&state, &receive))
+	receive.seq = limit
+	testing.expect(t, socket_peer_rekey_due(&state, &receive))
+	receive.seq = limit + 5
+	testing.expect(t, !socket_peer_rekey_due(&state, &receive), "asked twice about one key")
+
+	// The peer rekeyed and is slow again.
+	receive.gen += 1
+	receive.seq = 0
+	testing.expect(t, !socket_peer_rekey_due(&state, &receive))
+	receive.seq = limit
+	testing.expect(t, socket_peer_rekey_due(&state, &receive))
+
+	// AES-128-GCM has no key after its 2^48th.
+	receive.gen = 1 << 48 - 1
+	testing.expect(t, !socket_peer_rekey_due(&state, &receive))
+
+	unused: Record_Protection
+	testing.expect(t, !socket_peer_rekey_due(&state, &unused))
+}

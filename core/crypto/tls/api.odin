@@ -111,6 +111,12 @@ Socket_State :: struct {
 	// The peer asked for new keys in the send direction: recv notes
 	// it here, and the sender answers before its next record.
 	key_update_owed: bool,
+	// The peer has used its key for too long without replacing it: recv
+	// notes it here, once for each generation of that key, and the sender
+	// asks the peer to rekey.
+	peer_key_update_owed:  bool,
+	peer_key_update_asked: bool,
+	peer_key_update_gen:   u64,
 	// A direction that ended without an error to report: its calls
 	// fail with `io.Error.Unknown`.
 	rx_dead: bool,

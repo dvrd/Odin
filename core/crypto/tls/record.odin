@@ -330,6 +330,16 @@ record_protection_limit :: proc(state: ^Record_Protection) -> u64 {
 	return AEAD_REKEY_SEQ[aead.algorithm(&state.ctx)]
 }
 
+// Whether a direction may take another key. RFC 8446, section 4.7.3 stops
+// AES-128-GCM after 2^48 of them; the other suites have no such bound.
+@(private)
+record_protection_can_rekey :: proc(state: ^Record_Protection) -> bool {
+	if aead.algorithm(&state.ctx) == .AES_GCM_128 {
+		return state.gen + 1 != 1 << 48
+	}
+	return true
+}
+
 // Produces a complete TLSCiphertext record without optional zero padding.
 // dst and body must not overlap. Invalid local arguments consume no nonce and
 // can be corrected and retried. The caller must send the returned record once.

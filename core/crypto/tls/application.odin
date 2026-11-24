@@ -545,8 +545,8 @@ application_post_header_validate :: proc(state: ^Application_State) -> IO_Error 
 }
 
 @(private)
-application_send_key_update :: proc(conn: ^Conn) -> IO_Error {
-	response := [?]u8{cast(u8)Handshake_Type.Key_Update, 0, 0, 1, 0}
+application_send_key_update :: proc(conn: ^Conn, request_peer := false) -> IO_Error {
+	response := [?]u8{cast(u8)Handshake_Type.Key_Update, 0, 0, 1, u8(request_peer)}
 	if err := application_record_write(conn, .Handshake, response[:]); err.kind != .None {
 		return err
 	}
