@@ -250,24 +250,26 @@ Async_Operation :: struct {
 // terminal callback, including cancellation/close. A rejected operation gets no
 // callback. The application must keep driving the loop until close completes.
 // Buffers are borrowed through completion; cancellation never rolls back I/O.
-// Deadlines are absolute (zero disables) and bound this operation only.
+// A deadline is a monotonic tick (`time.tick_now` plus a duration), so a change
+// to the wall clock neither shortens nor extends it. Zero disables it. It
+// bounds this operation only.
 //
 // Close rejects new I/O, drains accepted operations, releases the connection,
 // then calls its callback. State may be freed in that callback. A completed
 // operation may succeed even when cancellation or close was requested.
 Async_Connection :: struct {
 	data:   rawptr,
-	submit: proc(data: rawptr, op: ^Async_Operation, kind: Async_Operation_Kind, buffer: []u8, deadline: time.Time) -> Network_Error,
+	submit: proc(data: rawptr, op: ^Async_Operation, kind: Async_Operation_Kind, buffer: []u8, deadline: time.Tick) -> Network_Error,
 	cancel: proc(data: rawptr, op: ^Async_Operation) -> Network_Error,
 }
 
-async_read :: proc(conn: Async_Connection, op: ^Async_Operation, dst: []u8, deadline := time.Time{}) -> Network_Error {
+async_read :: proc(conn: Async_Connection, op: ^Async_Operation, dst: []u8, deadline := time.Tick{}) -> Network_Error {
 	return async_submit(conn, op, .Read, dst, deadline)
 }
 
 // Completes when all bytes are written or a terminal error occurs. count
 // includes any bytes transferred before cancellation, close or timeout.
-async_write :: proc(conn: Async_Connection, op: ^Async_Operation, src: []u8, deadline := time.Time{}) -> Network_Error {
+async_write :: proc(conn: Async_Connection, op: ^Async_Operation, src: []u8, deadline := time.Tick{}) -> Network_Error {
 	return async_submit(conn, op, .Write, src, deadline)
 }
 
@@ -285,7 +287,7 @@ async_cancel :: proc(conn: Async_Connection, op: ^Async_Operation) -> Network_Er
 }
 
 @(private)
-async_submit :: proc(conn: Async_Connection, op: ^Async_Operation, kind: Async_Operation_Kind, buffer: []u8, deadline: time.Time) -> Network_Error {
+async_submit :: proc(conn: Async_Connection, op: ^Async_Operation, kind: Async_Operation_Kind, buffer: []u8, deadline: time.Tick) -> Network_Error {
 	if conn.submit == nil do return Connection_Error.Invalid_Connection
 	if op == nil || op.callback == nil do return Connection_Error.Invalid_Operation
 	if op.pending do return Connection_Error.Operation_Pending

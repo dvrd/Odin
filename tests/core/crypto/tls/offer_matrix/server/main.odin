@@ -55,7 +55,7 @@ session_read :: proc(op: ^net.Async_Operation) {
 	s.received = op.result.count
 	answer := ANSWER
 	s.write = {callback = session_written, user_data = s}
-	submitted := net.async_write(tls.server_async_connection(&s.server), &s.write, transmute([]u8)answer, time.time_add(time.now(), 10 * time.Second))
+	submitted := net.async_write(tls.server_async_connection(&s.server), &s.write, transmute([]u8)answer, time.tick_add(time.tick_now(), 10 * time.Second))
 	assert(submitted == nil)
 }
 
@@ -69,7 +69,7 @@ session_established :: proc(op: ^tls.Server_Async_Handshake_Operation) {
 
 	s.established = true
 	s.read = {callback = session_read, user_data = s}
-	submitted := net.async_read(tls.server_async_connection(&s.server), &s.read, s.input[:], time.time_add(time.now(), 10 * time.Second))
+	submitted := net.async_read(tls.server_async_connection(&s.server), &s.read, s.input[:], time.tick_add(time.tick_now(), 10 * time.Second))
 	assert(submitted == nil)
 }
 

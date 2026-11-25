@@ -32,7 +32,7 @@ alpn_bind_submit :: proc(
 	op: ^net.Async_Operation,
 	kind: net.Async_Operation_Kind,
 	buffer: []u8,
-	deadline: time.Time,
+	deadline: time.Tick,
 ) -> net.Network_Error {
 	_ = op
 	_ = kind

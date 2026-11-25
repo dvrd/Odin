@@ -95,7 +95,7 @@ async_go_interoperability :: proc(t: ^testing.T) {
 			s.error = op.result.err
 			if s.error == nil && s.used < len(s.buffer) {
 				assert(
-					net.async_read(s.stream, op, s.buffer[s.used:], time.time_add(time.now(), time.Second)) ==
+					net.async_read(s.stream, op, s.buffer[s.used:], time.tick_add(time.tick_now(), time.Second)) ==
 					nil,
 				)
 			}
@@ -106,7 +106,7 @@ async_go_interoperability :: proc(t: ^testing.T) {
 		callback  = completed,
 		user_data = &written,
 	}
-	deadline := time.time_add(time.now(), 2 * time.Second)
+	deadline := time.tick_add(time.tick_now(), 2 * time.Second)
 	testing.expect_value(t, net.async_read(stream, &read_op, destination, deadline), nil)
 	testing.expect_value(t, net.async_write(stream, &write_op, payload, deadline), nil)
 	testing.expect(t, nbio.run() == nil)

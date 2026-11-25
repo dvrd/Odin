@@ -578,7 +578,7 @@ async_receive_start :: proc(conn: ^Async_Conn, deadline: time.Time) {
 		conn.transport,
 		&conn.rx,
 		conn.rx_wire[conn.rx_used:conn.rx_expected],
-		deadline,
+		deadline_tick(deadline),
 	)
 	if error != nil {
 		conn.rx_error = error; async_queue(conn)
@@ -664,7 +664,7 @@ async_send_start :: proc(
 	deadline: time.Time,
 ) {
 	conn.tx_kind, conn.tx_size = kind, size
-	error := net.async_write(conn.transport, &conn.tx, conn.tx_wire[:size], deadline)
+	error := net.async_write(conn.transport, &conn.tx, conn.tx_wire[:size], deadline_tick(deadline))
 	if error != nil {
 		conn.tx.result = {
 			err = error,

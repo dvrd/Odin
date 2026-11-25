@@ -152,7 +152,7 @@ async_case :: proc(c: Case) -> int {
 			user_data = &written,
 		}
 		assert(
-			net.async_write(tls.async_connection(conn), &write_op, transmute([]u8)string("ping\n"), time.time_add(time.now(), time.Second)) ==
+			net.async_write(tls.async_connection(conn), &write_op, transmute([]u8)string("ping\n"), time.tick_add(time.tick_now(), time.Second)) ==
 			nil,
 		)
 		assert(nbio.run() == nil && written.done && written.error == nil && written.count == 5)
@@ -165,7 +165,7 @@ async_case :: proc(c: Case) -> int {
 				user_data = &read,
 			}
 			assert(
-				net.async_read(tls.async_connection(conn), &read_op, buffer[used:], time.time_add(time.now(), time.Second)) ==
+				net.async_read(tls.async_connection(conn), &read_op, buffer[used:], time.tick_add(time.tick_now(), time.Second)) ==
 				nil,
 			)
 			assert(nbio.run() == nil && read.done && read.error == nil && read.count > 0)

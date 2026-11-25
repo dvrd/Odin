@@ -642,15 +642,34 @@ engine_async_failure :: proc(conn: ^Async_Conn) -> IO_Error {
 	return conn.io_error
 }
 
+// The engine keeps its deadlines on the wall clock; a connection takes a
+// monotonic tick. Each is the other, the same time from now.
+@(private)
+deadline_time :: proc(tick: time.Tick) -> time.Time {
+	if tick == {} {
+		return {}
+	}
+	return time.time_add(time.now(), time.tick_diff(time.tick_now(), tick))
+}
+
+@(private)
+deadline_tick :: proc(deadline: time.Time) -> time.Tick {
+	if deadline == {} {
+		return {}
+	}
+	return time.tick_add(time.tick_now(), time.diff(time.now(), deadline))
+}
+
 @(private)
 async_submit :: proc(
 	data: rawptr,
 	op: ^net.Async_Operation,
 	kind: net.Async_Operation_Kind,
 	buffer: []u8,
-	deadline: time.Time,
+	tick: time.Tick,
 ) -> net.Network_Error {
 	conn := cast(^Async_Conn)data
+	deadline := deadline_time(tick)
 	if conn.closing || conn.transport_closed && kind != .Close do return trans.Connection_Error.Closed
 	if kind != .Close {
 		if conn.failure != nil do return conn.failure

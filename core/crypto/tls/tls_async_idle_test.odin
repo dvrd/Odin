@@ -10,7 +10,7 @@ idle_test_submit :: proc(
 	_: ^net.Async_Operation,
 	_: net.Async_Operation_Kind,
 	_: []u8,
-	_: time.Time,
+	_: time.Tick,
 ) -> net.Network_Error {panic("classification performed IO")}
 
 idle_test_cancel :: proc(_: rawptr, _: ^net.Async_Operation) -> net.Network_Error {

@@ -41,7 +41,7 @@ hook_submit :: proc(
 	op: ^net.Async_Operation,
 	kind: net.Async_Operation_Kind,
 	buffer: []u8,
-	deadline: time.Time,
+	deadline: time.Tick,
 ) -> net.Network_Error {
 	h := cast(^Hook)data
 	if kind == .Write &&
@@ -120,7 +120,7 @@ read_done :: proc(op: ^net.Async_Operation) {
 		finish(s)
 	} else {
 		assert(
-			net.async_read(tls.server_async_connection(&s.server), &s.read, s.input[s.used:], time.time_add(time.now(), 10 * time.Second)) ==
+			net.async_read(tls.server_async_connection(&s.server), &s.read, s.input[s.used:], time.tick_add(time.tick_now(), 10 * time.Second)) ==
 			nil,
 		)
 	}
@@ -180,11 +180,11 @@ handshake_done :: proc(op: ^tls.Server_Async_Handshake_Operation) {
 		user_data = s,
 	}
 	assert(
-		net.async_read(tls.server_async_connection(&s.server), &s.read, s.input[:], time.time_add(time.now(), 10 * time.Second)) ==
+		net.async_read(tls.server_async_connection(&s.server), &s.read, s.input[:], time.tick_add(time.tick_now(), 10 * time.Second)) ==
 		nil,
 	)
 	assert(
-		net.async_write(tls.server_async_connection(&s.server), &s.write, s.output[:], time.time_add(time.now(), 10 * time.Second)) ==
+		net.async_write(tls.server_async_connection(&s.server), &s.write, s.output[:], time.tick_add(time.tick_now(), 10 * time.Second)) ==
 		nil,
 	)
 }

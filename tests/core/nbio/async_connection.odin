@@ -67,7 +67,7 @@ async_connection_read_write_overlap :: proc(t: ^testing.T) {
 			user_data = &c,
 		}
 		buffer: [4]u8
-		deadline := time.time_add(time.now(), time.Second)
+		deadline := time.tick_add(time.tick_now(), time.Second)
 		ev(t, net.async_read(conn, &read_op, buffer[:], deadline), nil)
 		ev(t, net.async_write(conn, &write_op, []u8{9}, deadline), nil)
 		// Write completion can run while the read remains pending.
@@ -165,7 +165,7 @@ async_connection_deadline_and_admission :: proc(t: ^testing.T) {
 			user_data = &c,
 		}
 		buffer: [1]u8
-		ev(t, net.async_read(conn, &read_op, buffer[:], time.time_add(time.now(), 10 * time.Millisecond)), nil)
+		ev(t, net.async_read(conn, &read_op, buffer[:], time.tick_add(time.tick_now(), 10 * time.Millisecond)), nil)
 		ev(t, net.async_read(conn, &read_op, buffer[:]), net.Network_Error(net.Connection_Error.Operation_Pending))
 		ev(t, net.async_read(conn, &other, buffer[:]), net.Network_Error(net.Connection_Error.Operation_Pending))
 		e(t, !other.pending)

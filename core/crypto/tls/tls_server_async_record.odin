@@ -118,7 +118,7 @@ server_async_receive_record :: proc(s: ^Server_Async_Conn, deadline: time.Time) 
 	if !s._rx_into_header {
 		dst = s._rx_wire[s._rx_used:s._rx_expected]
 	}
-	e := net.async_read(s._transport, &s._rx, dst, deadline)
+	e := net.async_read(s._transport, &s._rx, dst, deadline_tick(deadline))
 	if e != nil {
 		s._rx_error = e
 		server_async_queue(s)
@@ -194,7 +194,7 @@ server_async_send_record :: proc(
 		n = 5 + len(body)
 	}
 	s._tx_kind, s._tx_size = kind, n
-	e := net.async_write(s._transport, &s._tx, s._tx_wire[:n], deadline)
+	e := net.async_write(s._transport, &s._tx, s._tx_wire[:n], deadline_tick(deadline))
 	if e != nil {
 		s._tx.result = {
 			err = e,

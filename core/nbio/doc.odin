@@ -226,7 +226,7 @@ offload CPU-intensive work to workers and schedule results onto the owning loop.
 then closes the socket and delivers close completion. Interrupted work reports
 Closed; already-completed work can retain its original result. Free the adapter
 only in or after close completion. Do not use raw socket operations after
-ownership transfers. An absolute deadline belongs to each submitted operation;
+ownership transfers. A deadline, a monotonic tick, belongs to each submitted operation;
 zero disables it. The blocking Connection/io.Stream APIs remain separate.
 
 **Why does the design of this package use callbacks?**

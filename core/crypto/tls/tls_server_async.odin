@@ -469,9 +469,10 @@ server_async_submit :: proc(
 	op: ^net.Async_Operation,
 	kind: net.Async_Operation_Kind,
 	buffer: []u8,
-	deadline: time.Time,
+	tick: time.Tick,
 ) -> net.Network_Error {
 	s := cast(^Server_Async_Conn)data
+	deadline := deadline_time(tick)
 	if !server_async_valid(s) {
 		return net.Connection_Error.Invalid_Connection
 	}

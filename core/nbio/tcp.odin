@@ -41,7 +41,7 @@ tcp_async_submit :: proc(
 	request: ^net.Async_Operation,
 	kind: net.Async_Operation_Kind,
 	buffer: []u8,
-	deadline: time.Time,
+	deadline: time.Tick,
 ) -> net.Network_Error {
 	tcp := cast(^TCP_Async_Connection)data
 	assert(tcp.loop == current_thread_event_loop(), "connection used from a different event loop")
@@ -73,8 +73,18 @@ tcp_async_submit :: proc(
 	buffers := &tcp._read_buffers
 	if kind == .Write do buffers = &tcp._write_buffers
 	buffers^ = {buffer}
+	// The deadline is a monotonic tick; an operation of this package expires
+	// at a wall-clock time, taken here as the time remaining from now.
+	expires: time.Time
+	expired := false
+	if deadline != {} {
+		remaining := time.tick_diff(time.tick_now(), deadline)
+		expired = remaining <= 0
+		expires = time.time_add(time.now(), remaining)
+	}
+
 	// Empty operations and already-expired deadlines still complete later.
-	if len(buffer) == 0 || deadline != (time.Time{}) && time.diff(time.now(), deadline) <= 0 {
+	if len(buffer) == 0 || expired {
 		op = prep_next_tick(tcp_async_io_done, tcp.loop)
 		if len(buffer) > 0 {
 			if kind == .Read {
@@ -85,10 +95,10 @@ tcp_async_submit :: proc(
 		}
 	} else if kind == .Read {
 		op = prep_recv(tcp.socket, buffers^[:], tcp_async_io_done, l = tcp.loop)
-		op.recv.expires = deadline
+		op.recv.expires = expires
 	} else {
 		op = prep_send(tcp.socket, buffers^[:], tcp_async_io_done, all = true, l = tcp.loop)
-		op.send.expires = deadline
+		op.send.expires = expires
 	}
 	op.user_data[0] = request
 	op.user_data[1] = tcp

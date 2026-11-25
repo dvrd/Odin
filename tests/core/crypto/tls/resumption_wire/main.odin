@@ -120,7 +120,7 @@ async_handshake :: proc(op: ^tls.Async_Handshake_Operation) {
 		user_data = s,
 	}
 	assert(
-		net.async_read(tls.async_connection(&s.owner), &s.read, s.bytes[:], time.time_add(time.now(), 5 * time.Second)) ==
+		net.async_read(tls.async_connection(&s.owner), &s.read, s.bytes[:], time.tick_add(time.tick_now(), 5 * time.Second)) ==
 		nil,
 	)
 }

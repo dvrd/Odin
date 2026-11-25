@@ -15,7 +15,7 @@ read/write deadlines on Darwin and Linux. For asynchronous networking, see
 core:nbio; Connection does not schedule operations on its event loop.
 
 Async_Connection is a separate callback contract with caller-owned operations
-and per-operation absolute deadlines. core:nbio provides a TCP adapter with one
+and per-operation deadlines on the monotonic clock. core:nbio provides a TCP adapter with one
 read and one write in flight, cancellation completion, and close that drains
 pending operations. Callbacks run on an application-driven owning event loop.
 See core:nbio for initialization, ownership and shutdown examples.
