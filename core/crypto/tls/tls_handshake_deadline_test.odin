@@ -9,7 +9,7 @@ Deadline_Test_Transport :: struct {
 	delay: time.Duration,
 	writes: int,
 }
-deadline_test_set :: proc(data: rawptr, deadline: time.Time) -> net.Connection_Error {
+deadline_test_set :: proc(data: rawptr, deadline: time.Time) -> net.Network_Error {
 	s := cast(^Deadline_Test_Transport)data
 	if deadline != (time.Time{}) && s.first == (time.Time{}) {
 		s.first = deadline
@@ -17,12 +17,12 @@ deadline_test_set :: proc(data: rawptr, deadline: time.Time) -> net.Connection_E
 	}
 	return {}
 }
-deadline_test_close :: proc(data: rawptr) -> net.Connection_Error {return {}}
-deadline_test_read :: proc(data: rawptr, dst: []u8) -> (int, net.Connection_Error) {return 0,{kind=.Peer_Closed}}
-deadline_test_write :: proc(data: rawptr, src: []u8) -> (int, net.Connection_Error) {
+deadline_test_close :: proc(data: rawptr) -> net.Network_Error {return {}}
+deadline_test_read :: proc(data: rawptr, dst: []u8) -> (int, net.Network_Error) {return 0,net.Connection_Error.Peer_Closed}
+deadline_test_write :: proc(data: rawptr, src: []u8) -> (int, net.Network_Error) {
 	s := cast(^Deadline_Test_Transport)data
 	s.writes += 1
-	return 0,{kind=.Peer_Closed}
+	return 0,net.Connection_Error.Peer_Closed
 }
 deadline_test_conn :: proc(state: ^Deadline_Test_Transport) -> Conn {
 	return {
@@ -60,7 +60,7 @@ handshake_slow_deadline_callback_cannot_start_io_after_expiry :: proc(t: ^testin
 	conn := deadline_test_conn(&state)
 	error := engine_handshake_until(&conn,time.time_add(time.now(),time.Millisecond))
 	testing.expect_value(t,error.kind,.Deadline_Failed)
-	testing.expect_value(t,error.transport.kind,.Timeout)
+	testing.expect_value(t,error.transport,net.Network_Error(net.Connection_Error.Timeout))
 	testing.expect_value(t,state.writes,0)
 }
 
@@ -71,7 +71,7 @@ handshake_until_requires_bounded_transport_and_preserves_old_signature :: proc(t
 	conn.transport.set_read_deadline=nil
 	conn.transport.set_write_deadline=nil
 	error := engine_handshake_until(&conn,time.time_add(time.now(),time.Second))
-	testing.expect_value(t,error.transport.kind,.Deadline_Unsupported)
+	testing.expect_value(t,error.transport,net.Network_Error(net.Connection_Error.Deadline_Unsupported))
 	testing.expect_value(t,state.writes,0)
 	conn=deadline_test_conn(&state)
 	conn.transport.set_read_deadline=nil

@@ -377,7 +377,7 @@ tls12_send_plaintext :: proc(conn: ^Conn, content: TLS_Content_Type, body: []u8)
 	copy(wire[:], header[:])
 	copy(wire[RECORD_HEADER_SIZE:], body)
 	_, write_error := transport.write_all(conn.transport, wire[:RECORD_HEADER_SIZE + len(body)])
-	if write_error.kind != .None {
+	if write_error != nil {
 		return handshake_fail(conn, {kind = .Finished_Write_Failed, transport = write_error})
 	}
 	return {}
@@ -391,7 +391,7 @@ tls12_send_encrypted :: proc(conn: ^Conn, content: TLS_Content_Type, body: []u8)
 		return handshake_fail(conn, {kind = .Finished_Write_Failed, protection = protection_error})
 	}
 	_, write_error := transport.write_all(conn.transport, wire[:written])
-	if write_error.kind != .None {
+	if write_error != nil {
 		return handshake_fail(conn, {kind = .Finished_Write_Failed, transport = write_error})
 	}
 	return {}
@@ -417,7 +417,7 @@ tls12_expect_server_ccs :: proc(conn: ^Conn, scratch: []u8) -> Handshake_Error {
 tls12_read_encrypted :: proc(conn: ^Conn) -> (TLS_Content_Type, []u8, Handshake_Error) {
 	wire: [RECORD_HEADER_SIZE + TLS12_MAX_CIPHERTEXT_SIZE]u8
 	header_count, header_error := transport.read_exact(conn.transport, wire[:RECORD_HEADER_SIZE])
-	if header_error.kind != .None {
+	if header_error != nil {
 		return {}, nil, handshake_fail(conn, {
 			kind = .Server_Flight_Read_Failed,
 			transport = header_error,
@@ -429,7 +429,7 @@ tls12_read_encrypted :: proc(conn: ^Conn) -> (TLS_Content_Type, []u8, Handshake_
 		return {}, nil, handshake_fail(conn, {kind = .Server_Flight_Read_Failed, record = {kind = .Invalid_Header}})
 	}
 	body_count, body_error := transport.read_exact(conn.transport, wire[RECORD_HEADER_SIZE:][:cipher_size])
-	if body_error.kind != .None {
+	if body_error != nil {
 		return {}, nil, handshake_fail(conn, {
 			kind = .Server_Flight_Read_Failed,
 			transport = body_error,
@@ -530,7 +530,7 @@ tls12_application_record_write :: proc(conn: ^Conn, content: TLS_Content_Type, p
 		return {kind = .Encryption_Failed, protection = protection_error}
 	}
 	written, transport_error := transport.write_all(conn.transport, wire[:size])
-	if transport_error.kind != .None {
+	if transport_error != nil {
 		return {kind = .Transport_Write_Failed, transport = transport_error, transferred = written}
 	}
 	return {}
@@ -540,9 +540,9 @@ tls12_application_record_write :: proc(conn: ^Conn, content: TLS_Content_Type, p
 tls12_application_record_read :: proc(conn: ^Conn) -> (TLS_Content_Type, []u8, IO_Error) {
 	wire: [RECORD_HEADER_SIZE + TLS12_MAX_CIPHERTEXT_SIZE]u8
 	header_count, header_error := transport.read_exact(conn.transport, wire[:RECORD_HEADER_SIZE])
-	if header_error.kind != .None {
+	if header_error != nil {
 		kind: IO_Error_Kind = .Transport_Read_Failed
-		if header_error.kind == .Peer_Closed do kind = .Unexpected_EOF
+		if header_error == transport.Connection_Error.Peer_Closed do kind = .Unexpected_EOF
 		return {}, nil, {kind = kind, transport = header_error, transferred = header_count}
 	}
 	if wire[1] != 3 || wire[2] != 3 {
@@ -553,9 +553,9 @@ tls12_application_record_read :: proc(conn: ^Conn) -> (TLS_Content_Type, []u8, I
 		return {}, nil, {kind = .Invalid_Record, record = .Record_Oversized}
 	}
 	body_count, body_error := transport.read_exact(conn.transport, wire[RECORD_HEADER_SIZE:][:cipher_size])
-	if body_error.kind != .None {
+	if body_error != nil {
 		kind: IO_Error_Kind = .Transport_Read_Failed
-		if body_error.kind == .Peer_Closed do kind = .Unexpected_EOF
+		if body_error == transport.Connection_Error.Peer_Closed do kind = .Unexpected_EOF
 		return {}, nil, {kind = kind, transport = body_error, transferred = body_count}
 	}
 	content, payload, protection_error := tls12_record_open(&conn.tls12.receive, conn.application.inbound[:], wire[:RECORD_HEADER_SIZE + cipher_size])

@@ -10,19 +10,19 @@ ALPN_Bind_Probe :: struct {
 	writes: int,
 }
 
-alpn_bind_read :: proc(data: rawptr, dst: []u8) -> (int, net.Connection_Error) {
+alpn_bind_read :: proc(data: rawptr, dst: []u8) -> (int, net.Network_Error) {
 	_ = data
 	_ = dst
-	return 0, {kind = .Peer_Closed}
+	return 0, net.Connection_Error.Peer_Closed
 }
 
-alpn_bind_write :: proc(data: rawptr, src: []u8) -> (int, net.Connection_Error) {
+alpn_bind_write :: proc(data: rawptr, src: []u8) -> (int, net.Network_Error) {
 	_ = src
 	(cast(^ALPN_Bind_Probe)data).writes += 1
-	return 0, {kind = .Peer_Closed}
+	return 0, net.Connection_Error.Peer_Closed
 }
 
-alpn_bind_close :: proc(data: rawptr) -> net.Connection_Error {
+alpn_bind_close :: proc(data: rawptr) -> net.Network_Error {
 	_ = data
 	return {}
 }
@@ -33,16 +33,16 @@ alpn_bind_submit :: proc(
 	kind: net.Async_Operation_Kind,
 	buffer: []u8,
 	deadline: time.Time,
-) -> net.Connection_Error {
+) -> net.Network_Error {
 	_ = op
 	_ = kind
 	_ = buffer
 	_ = deadline
 	(cast(^ALPN_Bind_Probe)data).writes += 1
-	return {kind = .Invalid_Connection}
+	return net.Connection_Error.Invalid_Connection
 }
 
-alpn_bind_cancel :: proc(data: rawptr, op: ^net.Async_Operation) -> net.Connection_Error {
+alpn_bind_cancel :: proc(data: rawptr, op: ^net.Async_Operation) -> net.Network_Error {
 	_ = data
 	_ = op
 	return {}

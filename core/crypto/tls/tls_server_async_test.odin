@@ -22,7 +22,7 @@ TCP_Test_Stream :: struct {
 	destination, source:             []u8,
 	read_queued, hold_write, closed: bool,
 	fragment, max_write:             int,
-	read_error, write_error:         net.Connection_Error,
+	read_error, write_error:         net.Network_Error,
 	close_calls:                     int,
 }
 
@@ -37,7 +37,7 @@ TCP_Test_Audit :: struct {
 
 TCP_Test_Result :: struct {
 	calls, count: int,
-	error:        net.Connection_Error,
+	error:        net.Network_Error,
 	detail:       Server_Async_Failure,
 }
 
@@ -137,7 +137,7 @@ tcp_test_receive :: proc(data: rawptr) {
 }
 
 tcp_test_wake :: proc(s: ^TCP_Test_Stream) {
-	if s.read != nil && !s.read_queued && (s.input_at < len(s.input) || s.read_error.kind != .None) {
+	if s.read != nil && !s.read_queued && (s.input_at < len(s.input) || s.read_error != nil) {
 		s.read_queued = true
 		tcp_test_schedule(s, tcp_test_receive, s)
 	}
@@ -165,7 +165,7 @@ tcp_test_submit :: proc(
 	kind: net.Async_Operation_Kind,
 	buffer: []u8,
 	deadline: time.Time,
-) -> net.Connection_Error {
+) -> net.Network_Error {
 	s := cast(^TCP_Test_Stream)data
 	op.kind, op.pending, op.result, op._owner = kind, true, {}, s
 	switch kind {
@@ -188,18 +188,14 @@ tcp_test_submit :: proc(
 	return {}
 }
 
-tcp_test_cancel :: proc(data: rawptr, op: ^net.Async_Operation) -> net.Connection_Error {
+tcp_test_cancel :: proc(data: rawptr, op: ^net.Async_Operation) -> net.Network_Error {
 	s := cast(^TCP_Test_Stream)data
 	if op == s.read {
-		s.read_error = {
-			kind = .Cancelled,
-		}
+		s.read_error = net.Connection_Error.Cancelled
 		tcp_test_wake(s)
 	} else if op == s.write {
 		s.max_write = 1
-		s.write_error = {
-			kind = .Cancelled,
-		}
+		s.write_error = net.Connection_Error.Cancelled
 		tcp_test_send(s)
 	}
 	return {}
@@ -260,7 +256,7 @@ tcp_test_clean :: proc(t: ^testing.T, s: ^Server_Async_Conn, a: ^TCP_Test_Audit)
 tcp_test_close :: proc(t: ^testing.T, s: ^Server_Async_Conn, stream: ^TCP_Test_Stream, a: ^TCP_Test_Audit) {
 	r: TCP_Test_Result
 	op := tcp_test_op(&r)
-	testing.expect_value(t, net.async_close(server_async_connection(s), &op).kind, .None)
+	testing.expect_value(t, net.async_close(server_async_connection(s), &op), nil)
 	testing.expect_value(t, r.calls, 0)
 	tcp_test_run(stream)
 	testing.expect_value(t, r.calls, 1)
@@ -305,7 +301,7 @@ tcp_test_establish :: proc(
 		callback  = tcp_test_handshake,
 		user_data = &result,
 	}
-	testing.expect_value(t, engine_server_async_handshake(s, &op).kind, .None)
+	testing.expect_value(t, engine_server_async_handshake(s, &op), nil)
 	testing.expect_value(t, result.calls, 0)
 	tcp_test_run(stream)
 	testing.expect_value(t, result.calls, 0)
@@ -343,7 +339,7 @@ tcp_test_establish :: proc(
 	tcp_test_record(stream, &client, .Handshake, finished[:])
 	tcp_test_run(stream)
 	testing.expect_value(t, result.calls, 1)
-	testing.expect_value(t, result.error.kind, .Protocol_Failed if bad_finished else .None)
+	testing.expect_value(t, result.error, net.Network_Error(net.Connection_Error.Protocol_Failed) if bad_finished else nil)
 	testing.expect_value(t, server_async_connection_state(s).handshake_complete, !bad_finished)
 	testing.expect_value(t, server_async_stats(s).engine.live_bytes, 0)
 	record_protection_init(&write, secrets.client_key, secrets.client_iv)
@@ -419,8 +415,8 @@ server_async_authenticated_records_buffering_and_overlap :: proc(t: ^testing.T) 
 	read_result, write_result: TCP_Test_Result
 	rop, wop := tcp_test_op(&read_result), tcp_test_op(&write_result)
 	buffer: [3]u8
-	testing.expect_value(t, net.async_read(server_async_connection(&s), &rop, buffer[:]).kind, .None)
-	testing.expect_value(t, net.async_write(server_async_connection(&s), &wop, input[:]).kind, .None)
+	testing.expect_value(t, net.async_read(server_async_connection(&s), &rop, buffer[:]), nil)
+	testing.expect_value(t, net.async_write(server_async_connection(&s), &wop, input[:]), nil)
 	start := len(stream.output)
 	tcp_test_record(&stream, &peer, .Application_Data, []u8{1, 2, 3, 4, 5})
 	tcp_test_run(&stream)
@@ -440,7 +436,7 @@ server_async_authenticated_records_buffering_and_overlap :: proc(t: ^testing.T) 
 		at += n
 	}
 	testing.expect_value(t, copied, 40000)
-	testing.expect_value(t, net.async_read(server_async_connection(&s), &rop, buffer[:]).kind, .None)
+	testing.expect_value(t, net.async_read(server_async_connection(&s), &rop, buffer[:]), nil)
 	testing.expect_value(t, read_result.calls, 1)
 	tcp_test_run(&stream)
 	testing.expect_value(t, read_result.calls, 2)
@@ -472,23 +468,21 @@ server_async_partial_record_cancel_timeout_and_resume :: proc(t: ^testing.T) {
 		net.async_read(server_async_connection(&s), &op, buffer[:])
 		tcp_test_run(&stream)
 		if mode == 2 {
-			stream.read_error = {
-				kind = .Timeout,
-			}
+			stream.read_error = net.Connection_Error.Timeout
 			tcp_test_wake(&stream)
 		} else {
 			net.async_cancel(server_async_connection(&s), &op)
 		}
 		tcp_test_run(&stream)
 		testing.expect_value(t, r.calls, 1)
-		testing.expect_value(t, r.error.kind, .Timeout if mode == 2 else .Cancelled)
+		testing.expect_value(t, r.error, net.Network_Error(net.Connection_Error.Timeout) if mode == 2 else net.Network_Error(net.Connection_Error.Cancelled))
 		stream.read_error = {}
 		append(&stream.input, ..wire[prefix:n])
 		tcp_test_wake(&stream)
 		net.async_read(server_async_connection(&s), &op, buffer[:])
 		tcp_test_run(&stream)
 		testing.expect_value(t, r.calls, 2)
-		testing.expect_value(t, r.error.kind, .None)
+		testing.expect_value(t, r.error, nil)
 		testing.expect_value(t, buffer, [3]u8{7, 8, 9})
 		tcp_test_close(t, &s, &stream, &a)
 	}
@@ -506,9 +500,7 @@ server_async_partial_write_is_terminal_and_full_record_wins :: proc(t: ^testing.
 		}
 		s: Server_Async_Conn
 		tcp_test_establish(t, &s, &stream, &a, store)
-		stream.write_error = {
-			kind = .Cancelled,
-		}
+		stream.write_error = net.Connection_Error.Cancelled
 		if mode < 2 {
 			stream.max_write = 3
 		}
@@ -521,12 +513,12 @@ server_async_partial_write_is_terminal_and_full_record_wins :: proc(t: ^testing.
 		tcp_test_run(&stream)
 		testing.expect_value(t, r.calls, 1)
 		if mode < 2 {
-			testing.expect(t, r.error.kind != .None)
+			testing.expect(t, r.error != nil)
 			testing.expect_value(t, r.count, 0)
 			testing.expect(t, stream.closed)
 			tcp_test_clean(t, &s, &a)
 		} else {
-			testing.expect_value(t, r.error.kind, .None)
+			testing.expect_value(t, r.error, nil)
 			testing.expect_value(t, r.count, 3)
 		}
 		stream.write_error = {}
@@ -558,7 +550,7 @@ server_async_key_update_role_order_and_boundaries :: proc(t: ^testing.T) {
 	record_protection_init(&peer, key, iv)
 	tcp_test_record(&stream, &peer, .Application_Data, []u8{9, 8, 7, 6})
 	tcp_test_run(&stream)
-	testing.expect_value(t, r.error.kind, .None)
+	testing.expect_value(t, r.error, nil)
 	testing.expect_value(t, buffer, [4]u8{9, 8, 7, 6})
 	plain: [128]u8
 	kind, body, e := engine_record_open(&receiver, plain[:], stream.output[at:])
@@ -569,7 +561,7 @@ server_async_key_update_role_order_and_boundaries :: proc(t: ^testing.T) {
 	key, iv = traffic_key_iv(updated)
 	record_protection_init(&receiver, key, iv)
 	at = len(stream.output)
-	testing.expect_value(t, engine_server_async_key_update(&s, true).kind, .None)
+	testing.expect_value(t, engine_server_async_key_update(&s, true), nil)
 	tcp_test_run(&stream)
 	kind, body, e = engine_record_open(&receiver, plain[:], stream.output[at:])
 	testing.expect_value(t, e, .None)
@@ -596,9 +588,7 @@ server_async_protocol_truncation_close_and_post_handshake_failure :: proc(t: ^te
 		buffer: [4]u8
 		net.async_read(server_async_connection(&s), &op, buffer[:])
 		if mode == 0 {
-			stream.read_error = {
-				kind = .Peer_Closed,
-			}
+			stream.read_error = net.Connection_Error.Peer_Closed
 			tcp_test_wake(&stream)
 		}
 		if mode == 1 {
@@ -616,7 +606,7 @@ server_async_protocol_truncation_close_and_post_handshake_failure :: proc(t: ^te
 		}
 		tcp_test_run(&stream)
 		testing.expect_value(t, r.calls, 1)
-		testing.expect_value(t, r.error.kind, .Peer_Closed if mode == 1 else .Protocol_Failed)
+		testing.expect_value(t, r.error, net.Network_Error(net.Connection_Error.Peer_Closed) if mode == 1 else net.Network_Error(net.Connection_Error.Protocol_Failed))
 		if mode != 1 {
 			tcp_test_clean(t, &s, &a)
 		}
@@ -666,7 +656,7 @@ server_async_allocation_failure_and_handshake_cancel :: proc(t: ^testing.T) {
 				tcp_test_run(&stream)
 			}
 			testing.expect_value(t, r.calls, 1)
-			testing.expect(t, r.error.kind != .None)
+			testing.expect(t, r.error != nil)
 			tcp_test_clean(t, &s, &a)
 			ss, _ := credential_store.stats(store)
 			testing.expect_value(t, ss.active_leases, 0)
@@ -723,13 +713,13 @@ server_async_handshake_policy_budget_deadline_and_bad_finished :: proc(t: ^testi
 		engine_server_async_handshake(&s, &op, deadline)
 		tcp_test_run(&stream)
 		if mode == 6 {
-			testing.expect_value(t, engine_server_async_cancel_handshake(&s).kind, .None)
+			testing.expect_value(t, engine_server_async_cancel_handshake(&s), nil)
 			tcp_test_run(&stream)
 		}
 		testing.expect_value(t, r.calls, 1)
-		testing.expect(t, r.error.kind != .None)
+		testing.expect(t, r.error != nil)
 		if mode == 2 {
-			testing.expect_value(t, r.error.kind, .Timeout)
+			testing.expect_value(t, r.error, net.Network_Error(net.Connection_Error.Timeout))
 		}
 		if mode == 3 {
 			testing.expect_value(t, server_async_stats(&s).engine.allocation_attempts, 0)
@@ -845,7 +835,7 @@ server_async_key_usage_reservation_and_control_caps :: proc(t: ^testing.T) {
 			at := len(stream.output)
 			net.async_write(server_async_connection(&s), &op, []u8{9, 8})
 			tcp_test_run(&stream)
-			testing.expect_value(t, r.error.kind, .None)
+			testing.expect_value(t, r.error, nil)
 			first := 5 + (int(stream.output[at + 3]) << 8 | int(stream.output[at + 4]))
 			plain: [128]u8
 			kind, body, e := engine_record_open(&receiver, plain[:], stream.output[at:at + first])
@@ -868,7 +858,7 @@ server_async_key_usage_reservation_and_control_caps :: proc(t: ^testing.T) {
 				tcp_test_record(&stream, &peer, .Application_Data, nil)
 			}
 			tcp_test_run(&stream)
-			testing.expect_value(t, r.error.kind, .Protocol_Failed)
+			testing.expect_value(t, r.error, net.Network_Error(net.Connection_Error.Protocol_Failed))
 		}
 		tcp_test_close(t, &s, &stream, &a)
 	}
@@ -912,7 +902,7 @@ server_async_maximum_retry_budget_is_charged_and_erased :: proc(t: ^testing.T) {
 		tcp_test_run(&stream)
 		if limited {
 			testing.expect_value(t, r.calls, 1)
-			testing.expect(t, r.error.kind != .None)
+			testing.expect(t, r.error != nil)
 			testing.expect(t, server_async_stats(&s).peak_bytes <= 166409)
 		} else {
 			testing.expect_value(t, server_async_stats(&s).peak_bytes, 166410)

@@ -428,34 +428,34 @@ connection_state :: proc(conn: ^Conn) -> Connection_State {
 // Zero clears a deadline. Like read/write, callers must serialize these
 // operations; this client does not yet support concurrent connection access.
 @(private)
-engine_set_read_deadline :: proc(conn: ^Conn, deadline: time.Time) -> trans.Connection_Error {
+engine_set_read_deadline :: proc(conn: ^Conn, deadline: time.Time) -> trans.Network_Error {
 	if conn == nil || conn.phase == .Uninitialized {
-		return {kind = .Invalid_Connection}
+		return trans.Connection_Error.Invalid_Connection
 	}
 
-	if conn.phase == .Closed do return {kind = .Closed}
+	if conn.phase == .Closed do return trans.Connection_Error.Closed
 
 	return trans.set_read_deadline(conn.transport, deadline)
 }
 
 @(private)
-engine_set_write_deadline :: proc(conn: ^Conn, deadline: time.Time) -> trans.Connection_Error {
+engine_set_write_deadline :: proc(conn: ^Conn, deadline: time.Time) -> trans.Network_Error {
 	if conn == nil || conn.phase == .Uninitialized {
-		return {kind = .Invalid_Connection}
+		return trans.Connection_Error.Invalid_Connection
 	}
 
-	if conn.phase == .Closed do return {kind = .Closed}
+	if conn.phase == .Closed do return trans.Connection_Error.Closed
 
 	return trans.set_write_deadline(conn.transport, deadline)
 }
 
 @(private)
-engine_set_deadline :: proc(conn: ^Conn, deadline: time.Time) -> trans.Connection_Error {
+engine_set_deadline :: proc(conn: ^Conn, deadline: time.Time) -> trans.Network_Error {
 	if conn == nil || conn.phase == .Uninitialized {
-		return {kind = .Invalid_Connection}
+		return trans.Connection_Error.Invalid_Connection
 	}
 
-	if conn.phase == .Closed do return {kind = .Closed}
+	if conn.phase == .Closed do return trans.Connection_Error.Closed
 
 	return trans.set_deadline(conn.transport, deadline)
 }
@@ -476,7 +476,7 @@ engine_abort :: proc(conn: ^Conn) -> IO_Error {
 	alpn_clear(conn)
 	application_clear(&conn.application)
 	handshake_keys_clear(conn)
-	if err := conn.transport.close(conn.transport.data); err.kind != .None {
+	if err := conn.transport.close(conn.transport.data); err != nil {
 		return {kind = .Transport_Close_Failed, transport = err}
 	}
 
@@ -492,7 +492,7 @@ Async_Handshake_Operation :: struct {
 	callback:  proc(op: ^Async_Handshake_Operation),
 	user_data: rawptr,
 	pending:   bool,
-	err:       net.Connection_Error,
+	err:       net.Network_Error,
 	result:    Handshake_Error,
 }
 
@@ -507,9 +507,9 @@ Async_Conn :: struct {
 	allocator:                                                         mem.Allocator,
 	initialized, queued, closing, transport_closing, transport_closed: bool,
 	notify_allowed, notify_sent:                                       bool,
-	failure:                                                           net.Connection_Error,
+	failure:                                                           net.Network_Error,
 	io_error:                                                          IO_Error,
-	close_error:                                                       net.Connection_Error,
+	close_error:                                                       net.Network_Error,
 	handshake_op:                                                      ^Async_Handshake_Operation,
 	handshake_deadline:                                                time.Time,
 	flight:                                                            []u8,
@@ -525,7 +525,7 @@ Async_Conn :: struct {
 	rx_wire:                                                           [RECORD_HEADER_SIZE + MAX_CIPHERTEXT_SIZE]u8,
 	rx_plain:                                                          [MAX_CIPHERTEXT_SIZE]u8,
 	rx_used, rx_expected:                                              int,
-	rx_error:                                                          net.Connection_Error,
+	rx_error:                                                          net.Network_Error,
 	tx_wire:                                                           [RECORD_HEADER_SIZE + MAX_CIPHERTEXT_SIZE]u8,
 	tx_size, tx_plain_count:                                           int,
 	tx_kind:                                                           Async_Send_Kind,
@@ -605,12 +605,12 @@ engine_async_handshake :: proc(
 	conn: ^Async_Conn,
 	op: ^Async_Handshake_Operation,
 	deadline := time.Time{},
-) -> net.Connection_Error {
-	if conn == nil || !conn.initialized do return {kind = .Invalid_Connection}
-	if op == nil || op.callback == nil do return {kind = .Invalid_Operation}
-	if conn.closing || conn.transport_closed do return {kind = .Closed}
-	if op.pending || conn.handshake_op != nil do return {kind = .Operation_Pending}
-	if conn.protocol.phase != .Handshake_Pending && conn.protocol.phase != .Established do return {kind = .Protocol_Failed}
+) -> net.Network_Error {
+	if conn == nil || !conn.initialized do return trans.Connection_Error.Invalid_Connection
+	if op == nil || op.callback == nil do return trans.Connection_Error.Invalid_Operation
+	if conn.closing || conn.transport_closed do return trans.Connection_Error.Closed
+	if op.pending || conn.handshake_op != nil do return trans.Connection_Error.Operation_Pending
+	if conn.protocol.phase != .Handshake_Pending && conn.protocol.phase != .Established do return trans.Connection_Error.Protocol_Failed
 	op.pending, op.err, op.result = true, {}, {}
 	conn.handshake_op = op
 	timeout := conn.protocol.config.handshake_timeout
@@ -622,10 +622,10 @@ engine_async_handshake :: proc(
 }
 
 @(private)
-engine_async_cancel_handshake :: proc(conn: ^Async_Conn) -> net.Connection_Error {
-	if conn == nil || !conn.initialized do return {kind = .Invalid_Connection}
+engine_async_cancel_handshake :: proc(conn: ^Async_Conn) -> net.Network_Error {
+	if conn == nil || !conn.initialized do return trans.Connection_Error.Invalid_Connection
 	if conn.handshake_op == nil || conn.protocol.phase == .Established do return {}
-	async_terminal(conn, {kind = .Cancelled}, {})
+	async_terminal(conn, trans.Connection_Error.Cancelled, {})
 	return {}
 }
 
@@ -649,20 +649,20 @@ async_submit :: proc(
 	kind: net.Async_Operation_Kind,
 	buffer: []u8,
 	deadline: time.Time,
-) -> net.Connection_Error {
+) -> net.Network_Error {
 	conn := cast(^Async_Conn)data
-	if conn.closing || conn.transport_closed && kind != .Close do return {kind = .Closed}
+	if conn.closing || conn.transport_closed && kind != .Close do return trans.Connection_Error.Closed
 	if kind != .Close {
-		if conn.failure.kind != .None do return conn.failure
-		if conn.protocol.phase != .Established do return {kind = .Invalid_Connection}
+		if conn.failure != nil do return conn.failure
+		if conn.protocol.phase != .Established do return trans.Connection_Error.Invalid_Connection
 	}
 	switch kind {
 	case .Read:
-		if conn.read_op != nil do return {kind = .Operation_Pending}
+		if conn.read_op != nil do return trans.Connection_Error.Operation_Pending
 		conn.read_op, conn.read_buffer, conn.read_deadline, conn.read_cancel =
 			op, buffer, deadline, false
 	case .Write:
-		if conn.write_op != nil do return {kind = .Operation_Pending}
+		if conn.write_op != nil do return trans.Connection_Error.Operation_Pending
 		conn.write_op, conn.write_buffer, conn.write_deadline, conn.write_cancel =
 			op, buffer, deadline, false
 	case .Close:
@@ -672,7 +672,7 @@ async_submit :: proc(
 		// Only idle, healthy writers can safely send close_notify.
 		conn.notify_allowed =
 			conn.protocol.phase == .Established &&
-			conn.failure.kind == .None &&
+			conn.failure == nil &&
 			!conn.tx.pending &&
 			!conn.tx_done
 	}
@@ -682,10 +682,10 @@ async_submit :: proc(
 }
 
 @(private)
-async_cancel :: proc(data: rawptr, op: ^net.Async_Operation) -> net.Connection_Error {
+async_cancel :: proc(data: rawptr, op: ^net.Async_Operation) -> net.Network_Error {
 	conn := cast(^Async_Conn)data
 	if !op.pending do return {}
-	if op._owner != conn || op.kind == .Close do return {kind = .Invalid_Operation}
+	if op._owner != conn || op.kind == .Close do return trans.Connection_Error.Invalid_Operation
 	if op == conn.read_op {
 		conn.read_cancel = true
 		if conn.rx.pending do net.async_cancel(conn.transport, &conn.rx)
@@ -693,7 +693,7 @@ async_cancel :: proc(data: rawptr, op: ^net.Async_Operation) -> net.Connection_E
 		conn.write_cancel = true
 		if conn.tx.pending && conn.tx_kind == .Data do net.async_cancel(conn.transport, &conn.tx)
 	} else {
-		return {kind = .Invalid_Operation}
+		return trans.Connection_Error.Invalid_Operation
 	}
 	async_queue(conn)
 	return {}
@@ -715,7 +715,7 @@ async_pump :: proc(data: rawptr) {
 		conn.tx_done = false
 		async_send_process(conn)
 	}
-	if conn.closing || conn.failure.kind != .None {
+	if conn.closing || conn.failure != nil {
 		async_shutdown_drive(conn)
 		return // close callback can free conn
 	}
@@ -723,13 +723,13 @@ async_pump :: proc(data: rawptr) {
 		if conn.handshake_op != nil do async_handshake_drive(conn)
 	} else {
 		if conn.handshake_op != nil do async_handshake_complete(conn, {})
-		if !conn.closing && conn.failure.kind == .None do async_application_drive(conn)
+		if !conn.closing && conn.failure == nil do async_application_drive(conn)
 	}
 }
 
 @(private)
-async_terminal :: proc(conn: ^Async_Conn, error: net.Connection_Error, details: IO_Error) {
-	if conn.failure.kind == .None {
+async_terminal :: proc(conn: ^Async_Conn, error: net.Network_Error, details: IO_Error) {
+	if conn.failure == nil {
 		conn.failure = error
 		conn.io_error = details
 		if conn.handshake_op != nil && conn.protocol.handshake_error.kind == .None {
@@ -752,7 +752,7 @@ async_terminal :: proc(conn: ^Async_Conn, error: net.Connection_Error, details: 
 async_emit :: proc(
 	conn: ^Async_Conn,
 	kind: net.Async_Operation_Kind,
-	error: net.Connection_Error,
+	error: net.Network_Error,
 ) {
 	op := conn.read_op if kind == .Read else conn.write_op
 	if op == nil do return
@@ -766,7 +766,7 @@ async_emit :: proc(
 }
 
 @(private)
-async_handshake_complete :: proc(conn: ^Async_Conn, error: net.Connection_Error) {
+async_handshake_complete :: proc(conn: ^Async_Conn, error: net.Network_Error) {
 	op := conn.handshake_op
 	if op == nil do return
 	conn.handshake_op = nil
@@ -785,13 +785,11 @@ async_shutdown_drive :: proc(conn: ^Async_Conn) {
 	}
 	if conn.rx.pending do return
 	error := conn.failure
-	if conn.closing do error = {
-		kind = .Closed,
-	}
+	if conn.closing do error = trans.Connection_Error.Closed
 	async_handshake_complete(conn, error)
 	async_emit(conn, .Read, error)
 	async_emit(conn, .Write, error)
-	if conn.closing && conn.notify_allowed && !conn.notify_sent && conn.failure.kind == .None {
+	if conn.closing && conn.notify_allowed && !conn.notify_sent && conn.failure == nil {
 		size, seal_error := engine_record_seal(
 			&conn.protocol.application.send,
 			conn.tx_wire[:],
@@ -807,7 +805,7 @@ async_shutdown_drive :: proc(conn: ^Async_Conn) {
 	if !conn.transport_closing {
 		conn.transport_closing = true
 		close_error := net.async_close(conn.transport, &conn.shutdown)
-		if close_error.kind != .None {
+		if close_error != nil {
 			conn.close_error = close_error; conn.transport_closed = true
 		}
 	}
@@ -836,6 +834,6 @@ async_shutdown_drive :: proc(conn: ^Async_Conn) {
 async_shutdown_done :: proc(op: ^net.Async_Operation) {
 	conn := cast(^Async_Conn)op.user_data
 	conn.transport_closed = true
-	if conn.close_error.kind == .None do conn.close_error = op.result.err
+	if conn.close_error == nil do conn.close_error = op.result.err
 	async_queue(conn)
 }

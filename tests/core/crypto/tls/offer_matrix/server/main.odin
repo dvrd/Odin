@@ -30,7 +30,7 @@ Session :: struct {
 session_close :: proc(s: ^Session) {
 	s.close = {callback = session_closed, user_data = s}
 	submitted := net.async_close(tls.server_async_connection(&s.server), &s.close)
-	assert(submitted.kind == .None)
+	assert(submitted == nil)
 }
 
 session_closed :: proc(op: ^net.Async_Operation) {
@@ -40,13 +40,13 @@ session_closed :: proc(op: ^net.Async_Operation) {
 
 session_written :: proc(op: ^net.Async_Operation) {
 	s := cast(^Session)op.user_data
-	s.answered = op.result.err.kind == .None && op.result.count == len(ANSWER)
+	s.answered = op.result.err == nil && op.result.count == len(ANSWER)
 	session_close(s)
 }
 
 session_read :: proc(op: ^net.Async_Operation) {
 	s := cast(^Session)op.user_data
-	if op.result.err.kind != .None {
+	if op.result.err != nil {
 		fmt.eprintf("read failure: %v\n", op.result.err)
 		session_close(s)
 		return
@@ -56,13 +56,13 @@ session_read :: proc(op: ^net.Async_Operation) {
 	answer := ANSWER
 	s.write = {callback = session_written, user_data = s}
 	submitted := net.async_write(tls.server_async_connection(&s.server), &s.write, transmute([]u8)answer, time.time_add(time.now(), 10 * time.Second))
-	assert(submitted.kind == .None)
+	assert(submitted == nil)
 }
 
 session_established :: proc(op: ^tls.Server_Async_Handshake_Operation) {
 	s := cast(^Session)op.user_data
-	if op.err.kind != .None {
-		fmt.eprintf("handshake failure: transport=%v kind=%v engine=%v\n", op.err.kind, op.result.kind, op.result.engine)
+	if op.err != nil {
+		fmt.eprintf("handshake failure: transport=%v kind=%v engine=%v\n", op.err, op.result.kind, op.result.engine)
 		session_close(s)
 		return
 	}
@@ -70,7 +70,7 @@ session_established :: proc(op: ^tls.Server_Async_Handshake_Operation) {
 	s.established = true
 	s.read = {callback = session_read, user_data = s}
 	submitted := net.async_read(tls.server_async_connection(&s.server), &s.read, s.input[:], time.time_add(time.now(), 10 * time.Second))
-	assert(submitted.kind == .None)
+	assert(submitted == nil)
 }
 
 load_credential :: proc(certificate, key: string) -> ^credentials.Credential {

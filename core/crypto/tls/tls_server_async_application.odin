@@ -1,24 +1,25 @@
 package tls
 
 import "core:crypto"
+import "core:net"
 import "core:time"
 
 @(private)
 server_async_post_handshake :: proc(s: ^Server_Async_Conn, body: []u8) -> bool {
 	for b, i in body {
 		if s._post_used >= 5 {
-			server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Post_Handshake})
+			server_async_fail(s, net.Connection_Error.Protocol_Failed, {kind = .Post_Handshake})
 			return false
 		}
 		s._post[s._post_used] = b
 		s._post_used += 1
 		if s._post[0] != 24 || s._post_used >= 4 && (s._post[1] != 0 || s._post[2] != 0 || s._post[3] != 1) {
-			server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Post_Handshake})
+			server_async_fail(s, net.Connection_Error.Protocol_Failed, {kind = .Post_Handshake})
 			return false
 		}
 		if s._post_used == 5 {
 			if b > 1 || i != len(body) - 1 {
-				server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Post_Handshake})
+				server_async_fail(s, net.Connection_Error.Protocol_Failed, {kind = .Post_Handshake})
 				return false
 			}
 			server_async_rotate(s, .Read)
@@ -49,14 +50,14 @@ server_async_application_drive :: proc(s: ^Server_Async_Conn) {
 			s._non_application_records = 0
 			server_async_emit(s, .Read, {})
 		} else if s._peer_closed {
-			server_async_emit(s, .Read, {kind = .Peer_Closed})
+			server_async_emit(s, .Read, net.Connection_Error.Peer_Closed)
 		} else {
 			header, ready := server_async_receive_record(s, s._read_deadline)
 			if ready {
 				if header.content_type != .Application_Data {
 					server_async_fail(
 						s,
-						{kind = .Protocol_Failed},
+						net.Connection_Error.Protocol_Failed,
 						{kind = .Record, protection = .Unexpected_Outer_Content_Type},
 					); return
 				}
@@ -65,7 +66,7 @@ server_async_application_drive :: proc(s: ^Server_Async_Conn) {
 					return
 				}
 				if s._post_used > 0 && kind != .Handshake {
-					server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Post_Handshake})
+					server_async_fail(s, net.Connection_Error.Protocol_Failed, {kind = .Post_Handshake})
 					return
 				}
 				keep := false
@@ -90,14 +91,14 @@ server_async_application_drive :: proc(s: ^Server_Async_Conn) {
 					} else if body[1] != 90 {
 						server_async_fail(
 							s,
-							{kind = .Protocol_Failed},
+							net.Connection_Error.Protocol_Failed,
 							{kind = .Peer_Alert, alert_level = body[0], alert_description = body[1]},
 						); return
 					}
 				case:
 					server_async_fail(
 						s,
-						{kind = .Protocol_Failed},
+						net.Connection_Error.Protocol_Failed,
 						{kind = .Record, record = .Unexpected_Content_Type},
 					); return
 				}
@@ -105,7 +106,7 @@ server_async_application_drive :: proc(s: ^Server_Async_Conn) {
 				if !keep && !s._peer_closed {
 					s._non_application_records += 1
 					if s._non_application_records > MAX_NON_APPLICATION_RECORDS {
-						server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Limit})
+						server_async_fail(s, net.Connection_Error.Protocol_Failed, {kind = .Limit})
 						return
 					}
 				}
@@ -113,7 +114,7 @@ server_async_application_drive :: proc(s: ^Server_Async_Conn) {
 			}
 		}
 	}
-	if s._closing || s._failure.kind != .None || s._tx.pending || s._tx_done {
+	if s._closing || s._failure != nil || s._tx.pending || s._tx_done {
 		return
 	}
 	keys := server_async_keys(s)
@@ -131,7 +132,7 @@ server_async_application_drive :: proc(s: ^Server_Async_Conn) {
 		return
 	}
 	if s._write_cancel {
-		server_async_emit(s, .Write, {kind = .Cancelled})
+		server_async_emit(s, .Write, net.Connection_Error.Cancelled)
 		return
 	}
 	written := s._write_op.result.count
@@ -140,7 +141,7 @@ server_async_application_drive :: proc(s: ^Server_Async_Conn) {
 		return
 	}
 	if s._write_deadline != (time.Time{}) && time.diff(time.now(), s._write_deadline) <= 0 {
-		server_async_emit(s, .Write, {kind = .Timeout})
+		server_async_emit(s, .Write, net.Connection_Error.Timeout)
 		return
 	}
 	count := min(MAX_PLAINTEXT_SIZE, len(s._write_buffer) - written)

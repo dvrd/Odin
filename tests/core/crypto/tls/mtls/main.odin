@@ -38,7 +38,7 @@ State :: struct {
 
 event :: proc(data: rawptr, e: ^saba.TLS_Event) {
 	s := cast(^State)data
-	if e.kind == .Handshake && e.error.kind != .None {
+	if e.kind == .Handshake && e.error != nil {
 		assert(!s.expect)
 		sync.atomic_store(&s.observed, true)
 	}
@@ -70,29 +70,29 @@ close_client :: proc(s: ^Client) {
 		callback  = close_done,
 		user_data = s,
 	}
-	assert(net.async_close(tls.async_connection(&s.owner), &s.close).kind == .None)
+	assert(net.async_close(tls.async_connection(&s.owner), &s.close) == nil)
 }
 
 read_done :: proc(op: ^net.Async_Operation) {
 	s := cast(^Client)op.user_data
 	if !s.expect {
-		assert(op.result.err.kind != .None)
+		assert(op.result.err != nil)
 		close_client(s)
 		return
 	}
-	assert(op.result.err.kind == .None && op.result.count > 0)
+	assert(op.result.err == nil && op.result.count > 0)
 	s.n += op.result.count
 	if s.n == 2 {
 		assert(string(s.bytes[:]) == "OK")
 		close_client(s)
 	} else {
-		assert(net.async_read(tls.async_connection(&s.owner), &s.read, s.bytes[s.n:]).kind == .None)
+		assert(net.async_read(tls.async_connection(&s.owner), &s.read, s.bytes[s.n:]) == nil)
 	}
 }
 
 hs_done :: proc(op: ^tls.Async_Handshake_Operation) {
 	s := cast(^Client)op.user_data
-	if op.err.kind != .None {
+	if op.err != nil {
 		assert(!s.expect)
 		close_client(s)
 		return
@@ -102,8 +102,8 @@ hs_done :: proc(op: ^tls.Async_Handshake_Operation) {
 		user_data = s,
 	}
 	assert(
-		net.async_read(tls.async_connection(&s.owner), &s.read, s.bytes[:], time.time_add(time.now(), 3 * time.Second)).kind ==
-		.None,
+		net.async_read(tls.async_connection(&s.owner), &s.read, s.bytes[:], time.time_add(time.now(), 3 * time.Second)) ==
+		nil,
 	)
 }
 

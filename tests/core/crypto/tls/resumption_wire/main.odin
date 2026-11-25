@@ -91,13 +91,13 @@ Async_Client :: struct {
 
 async_closed :: proc(op: ^net.Async_Operation) {
 	s := cast(^Async_Client)op.user_data
-	assert(op.result.err.kind == .None)
+	assert(op.result.err == nil)
 	s.closed = true
 }
 
 async_read :: proc(op: ^net.Async_Operation) {
 	s := cast(^Async_Client)op.user_data
-	assert(op.result.err.kind == .None && op.result.count > 0)
+	assert(op.result.err == nil && op.result.count > 0)
 	s.n += op.result.count
 	if s.n == 2 {
 		assert(string(s.bytes[:]) == "OK")
@@ -105,23 +105,23 @@ async_read :: proc(op: ^net.Async_Operation) {
 			callback  = async_closed,
 			user_data = s,
 		}
-		assert(net.async_close(tls.async_connection(&s.owner), &s.close).kind == .None)
+		assert(net.async_close(tls.async_connection(&s.owner), &s.close) == nil)
 	} else {
-		assert(net.async_read(tls.async_connection(&s.owner), &s.read, s.bytes[s.n:]).kind == .None)
+		assert(net.async_read(tls.async_connection(&s.owner), &s.read, s.bytes[s.n:]) == nil)
 	}
 }
 
 async_handshake :: proc(op: ^tls.Async_Handshake_Operation) {
 	s := cast(^Async_Client)op.user_data
-	assert(op.err.kind == .None)
+	assert(op.err == nil)
 	assert(tls.async_connection_state(&s.owner).resumed == s.resumed)
 	s.read = {
 		callback  = async_read,
 		user_data = s,
 	}
 	assert(
-		net.async_read(tls.async_connection(&s.owner), &s.read, s.bytes[:], time.time_add(time.now(), 5 * time.Second)).kind ==
-		.None,
+		net.async_read(tls.async_connection(&s.owner), &s.read, s.bytes[:], time.time_add(time.now(), 5 * time.Second)) ==
+		nil,
 	)
 }
 

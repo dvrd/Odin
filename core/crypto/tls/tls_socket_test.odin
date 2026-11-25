@@ -75,7 +75,7 @@ socket_test_pump :: proc(peer: ^Socket_Test_Peer, calls: ^int) {
 		n, err := net.recv_tcp(peer.fd, buffer[:])
 		if err != nil || n == 0 {
 			peer.eof = true
-			peer.stream.read_error = {kind = .Peer_Closed}
+			peer.stream.read_error = net.Connection_Error.Peer_Closed
 		} else {
 			append(&peer.stream.input, ..buffer[:n])
 		}
@@ -120,7 +120,7 @@ socket_test_serve :: proc(server: ^Socket_Test_Server) {
 	engine_server_async_handshake(engine, &accept)
 	socket_test_pump(peer, &accepted.calls)
 
-	if accepted.calls == 1 && accepted.error.kind == .None {
+	if accepted.calls == 1 && accepted.error == nil {
 		state := server_async_connection_state(engine)
 		server.established = true
 		server.suite = state.cipher_suite
@@ -156,12 +156,12 @@ socket_test_script :: proc(server: ^Socket_Test_Server, engine: ^Server_Async_Co
 	for {
 		received: TCP_Test_Result
 		reading := tcp_test_op(&received)
-		if net.async_read(stream, &reading, storage).kind != .None {
+		if net.async_read(stream, &reading, storage) != nil {
 			return
 		}
 
 		socket_test_pump(peer, &received.calls)
-		if received.calls == 0 || received.error.kind != .None || received.count == 0 {
+		if received.calls == 0 || received.error != nil || received.count == 0 {
 			return
 		}
 
@@ -171,12 +171,12 @@ socket_test_script :: proc(server: ^Socket_Test_Server, engine: ^Server_Async_Co
 
 		sent: TCP_Test_Result
 		sending := tcp_test_op(&sent)
-		if net.async_write(stream, &sending, storage[:received.count]).kind != .None {
+		if net.async_write(stream, &sending, storage[:received.count]) != nil {
 			return
 		}
 
 		socket_test_pump(peer, &sent.calls)
-		if sent.calls == 0 || sent.error.kind != .None {
+		if sent.calls == 0 || sent.error != nil {
 			return
 		}
 		server.echoed += received.count
@@ -620,8 +620,8 @@ socket_logs_secrets_to_the_callers_file :: proc(t: ^testing.T) {
 
 @(test)
 socket_errors_map_to_upstreams :: proc(t: ^testing.T) {
-	refused := net.Connection_Error{kind = .Write_Failed, write_cause = net.TCP_Send_Error.Connection_Closed}
-	reset := net.Connection_Error{kind = .Read_Failed, read_cause = net.TCP_Recv_Error.Connection_Closed}
+	refused := net.Network_Error(net.TCP_Send_Error.Connection_Closed)
+	reset := net.Network_Error(net.TCP_Recv_Error.Connection_Closed)
 
 	Handshake_Case :: struct {
 		failure:  Handshake_Error,
@@ -636,7 +636,7 @@ socket_errors_map_to_upstreams :: proc(t: ^testing.T) {
 		{{kind = .Server_Hello_Failed, server_hello = {kind = .Record_Read_Failed, record = {kind = .Invalid_Header, record = .Record_Oversized}}}, Protocol_Error.Record_Overflow},
 		{{kind = .Server_Hello_Failed, server_hello = {kind = .Record_Read_Failed, record = {kind = .Invalid_Header, record = .Unknown_Content_Type}}}, Protocol_Error.Unexpected_Message},
 		{{kind = .Server_Hello_Failed, server_hello = {kind = .Record_Read_Failed, record = {transport = reset}}}, net.TCP_Recv_Error.Connection_Closed},
-		{{kind = .Server_Hello_Failed, server_hello = {kind = .Record_Read_Failed, record = {transport = {kind = .Peer_Closed}}}}, net.TCP_Recv_Error.Connection_Closed},
+		{{kind = .Server_Hello_Failed, server_hello = {kind = .Record_Read_Failed, record = {transport = net.Connection_Error.Peer_Closed}}}, net.TCP_Recv_Error.Connection_Closed},
 		{{kind = .Server_Hello_Failed, server_hello = {kind = .Invalid_Server_Hello, decode = .Invalid_Legacy_Version}}, Protocol_Error.Protocol_Version},
 		{{kind = .Server_Hello_Failed, server_hello = {kind = .Invalid_Server_Hello, decode = .Unsupported_Version}}, Protocol_Error.Illegal_Parameter},
 		{{kind = .Server_Hello_Failed, server_hello = {kind = .Invalid_Server_Hello, decode = .Missing_Supported_Versions}}, Protocol_Error.Illegal_Parameter},
@@ -690,7 +690,7 @@ socket_errors_map_to_upstreams :: proc(t: ^testing.T) {
 	transfers := [?]IO_Case {
 		{{kind = .EOF}, Protocol_Error.Close_Notify},
 		{{kind = .Closed}, io.Error.Closed},
-		{{kind = .Unexpected_EOF, transport = {kind = .Peer_Closed}}, net.TCP_Recv_Error.Connection_Closed},
+		{{kind = .Unexpected_EOF, transport = net.Connection_Error.Peer_Closed}, net.TCP_Recv_Error.Connection_Closed},
 		{{kind = .Transport_Read_Failed, transport = reset}, net.TCP_Recv_Error.Connection_Closed},
 		{{kind = .Transport_Write_Failed, transport = refused}, net.TCP_Send_Error.Connection_Closed},
 		{{kind = .Peer_Alert, alert_level = 2, alert_description = 20}, Protocol_Error.Bad_Record_Mac},

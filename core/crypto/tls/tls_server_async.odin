@@ -36,7 +36,7 @@ Server_Async_Failure :: struct {
 	engine:                         Server_Handshake_Error,
 	protection:                     Record_Protection_Error,
 	record:                         Record_Error,
-	transport:                      net.Connection_Error,
+	transport:                      net.Network_Error,
 	wire_transferred:               int,
 	alert_level, alert_description: u8,
 }
@@ -55,7 +55,7 @@ Server_Async_Handshake_Operation :: struct {
 	callback:  proc(^Server_Async_Handshake_Operation),
 	user_data: rawptr,
 	pending:   bool,
-	err:       net.Connection_Error,
+	err:       net.Network_Error,
 	result:    Server_Async_Failure,
 }
 
@@ -103,7 +103,7 @@ Server_Async_Conn :: struct {
 	_phase:                                                             Server_Async_Phase,
 	_engine:                                                            Server_Handshake,
 	_stats:                                                             Server_Async_Stats,
-	_failure, _close_error:                                             net.Connection_Error,
+	_failure, _close_error:                                             net.Network_Error,
 	_detail:                                                            Server_Async_Failure,
 	_queued, _closing, _transport_closing, _transport_closed, _cleaned: bool,
 	_notify_allowed, _notify_sent, _peer_closed:                        bool,
@@ -119,7 +119,7 @@ Server_Async_Conn :: struct {
 	_rx_header:                                                         [5]u8,
 	_rx_header_used, _rx_used, _rx_expected:                            int,
 	_rx_into_header:                                                    bool,
-	_rx_error:                                                          net.Connection_Error,
+	_rx_error:                                                          net.Network_Error,
 	_rx_wire, _rx_plain, _tx_wire, _key_grant:                          []u8,
 	_read_keys, _write_keys:                                            bool,
 	_application_secrets:                                               u8,
@@ -235,24 +235,24 @@ engine_server_async_handshake :: proc(
 	s: ^Server_Async_Conn,
 	op: ^Server_Async_Handshake_Operation,
 	deadline := time.Time{},
-) -> net.Connection_Error {
+) -> net.Network_Error {
 	if !server_async_valid(s) {
-		return {kind = .Invalid_Connection}
+		return net.Connection_Error.Invalid_Connection
 	}
 	if op == nil || op.callback == nil {
-		return {kind = .Invalid_Operation}
+		return net.Connection_Error.Invalid_Operation
 	}
 	if s._closing || s._transport_closed {
-		return {kind = .Closed}
+		return net.Connection_Error.Closed
 	}
 	if op.pending || s._handshake_op != nil {
-		return {kind = .Operation_Pending}
+		return net.Connection_Error.Operation_Pending
 	}
-	if s._failure.kind != .None {
+	if s._failure != nil {
 		return s._failure
 	}
 	if s._phase != .Ready && s._phase != .Established {
-		return {kind = .Invalid_Connection}
+		return net.Connection_Error.Invalid_Connection
 	}
 	op.pending, op.err, op.result = true, {}, {}
 	s._handshake_op = op
@@ -268,12 +268,12 @@ engine_server_async_handshake :: proc(
 }
 
 @(private)
-engine_server_async_cancel_handshake :: proc(s: ^Server_Async_Conn) -> net.Connection_Error {
+engine_server_async_cancel_handshake :: proc(s: ^Server_Async_Conn) -> net.Network_Error {
 	if !server_async_valid(s) {
-		return {kind = .Invalid_Connection}
+		return net.Connection_Error.Invalid_Connection
 	}
 	if s._handshake_op != nil && s._phase != .Established {
-		server_async_fail(s, {kind = .Cancelled}, {kind = .Handshake, engine = .Cancelled})
+		server_async_fail(s, net.Connection_Error.Cancelled, {kind = .Handshake, engine = .Cancelled})
 	}
 	return {}
 }
@@ -286,7 +286,7 @@ server_async_connection :: proc(s: ^Server_Async_Conn) -> net.Async_Connection {
 }
 
 server_async_connection_state :: proc(s: ^Server_Async_Conn) -> Connection_State {
-	if !server_async_valid(s) || s._phase != .Established || s._failure.kind != .None || s._closing {
+	if !server_async_valid(s) || s._phase != .Established || s._failure != nil || s._closing {
 		return {}
 	}
 	return {
@@ -320,18 +320,18 @@ server_async_stats :: proc(s: ^Server_Async_Conn) -> Server_Async_Stats {
 // Bounded control request, serialized with all record writes. Completion/error
 // belongs to the connection; this does not borrow an operation or caller bytes.
 @(private)
-engine_server_async_key_update :: proc(s: ^Server_Async_Conn, request_peer := false) -> net.Connection_Error {
+engine_server_async_key_update :: proc(s: ^Server_Async_Conn, request_peer := false) -> net.Network_Error {
 	if !server_async_valid(s) || s._phase != .Established {
-		return {kind = .Invalid_Connection}
+		return net.Connection_Error.Invalid_Connection
 	}
 	if s._closing || s._transport_closed {
-		return {kind = .Closed}
+		return net.Connection_Error.Closed
 	}
-	if s._failure.kind != .None {
+	if s._failure != nil {
 		return s._failure
 	}
 	if s._key_update_pending || s._tx_kind == .Key_Update {
-		return {kind = .Operation_Pending}
+		return net.Connection_Error.Operation_Pending
 	}
 	s._key_update_pending, s._key_update_request = true, request_peer
 	server_async_queue(s)
@@ -388,7 +388,7 @@ server_async_grant :: proc(s: ^Server_Async_Conn, slot: ^[]u8, size: int, alignm
 	}
 	grant, e := server_async_allocator(s, .Alloc, size, alignment, nil, 0)
 	if e != nil {
-		server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Limit, engine = .Allocation_Failed})
+		server_async_fail(s, net.Connection_Error.Protocol_Failed, {kind = .Limit, engine = .Allocation_Failed})
 		return false
 	}
 	slot^ = grant
@@ -418,10 +418,10 @@ server_async_queue :: proc(s: ^Server_Async_Conn) {
 }
 
 @(private)
-server_async_fail :: proc(s: ^Server_Async_Conn, e: net.Connection_Error, detail: Server_Async_Failure) {
-	if s._failure.kind == .None {
+server_async_fail :: proc(s: ^Server_Async_Conn, e: net.Network_Error, detail: Server_Async_Failure) {
+	if s._failure == nil {
 		s._failure, s._detail = e, detail
-		if e.kind == .Protocol_Failed &&
+		if e == net.Connection_Error.Protocol_Failed &&
 		   detail.kind != .Transport &&
 		   detail.kind != .Unexpected_EOF &&
 		   detail.kind != .Peer_Alert &&
@@ -436,7 +436,7 @@ server_async_fail :: proc(s: ^Server_Async_Conn, e: net.Connection_Error, detail
 }
 
 @(private)
-server_async_emit :: proc(s: ^Server_Async_Conn, kind: net.Async_Operation_Kind, e: net.Connection_Error) {
+server_async_emit :: proc(s: ^Server_Async_Conn, kind: net.Async_Operation_Kind, e: net.Network_Error) {
 	op := s._read_op if kind == .Read else s._write_op
 	if op == nil {
 		return
@@ -453,7 +453,7 @@ server_async_emit :: proc(s: ^Server_Async_Conn, kind: net.Async_Operation_Kind,
 }
 
 @(private)
-server_async_handshake_emit :: proc(s: ^Server_Async_Conn, e: net.Connection_Error) {
+server_async_handshake_emit :: proc(s: ^Server_Async_Conn, e: net.Network_Error) {
 	op := s._handshake_op
 	if op == nil {
 		return
@@ -470,40 +470,40 @@ server_async_submit :: proc(
 	kind: net.Async_Operation_Kind,
 	buffer: []u8,
 	deadline: time.Time,
-) -> net.Connection_Error {
+) -> net.Network_Error {
 	s := cast(^Server_Async_Conn)data
 	if !server_async_valid(s) {
-		return {kind = .Invalid_Connection}
+		return net.Connection_Error.Invalid_Connection
 	}
 	if kind != .Close {
 		if s._closing || s._transport_closed {
-			return {kind = .Closed}
+			return net.Connection_Error.Closed
 		}
-		if s._failure.kind != .None {
+		if s._failure != nil {
 			return s._failure
 		}
 		if s._phase != .Established {
-			return {kind = .Invalid_Connection}
+			return net.Connection_Error.Invalid_Connection
 		}
 	}
 	switch kind {
 	case .Read:
 		if s._read_op != nil {
-			return {kind = .Operation_Pending}
+			return net.Connection_Error.Operation_Pending
 		}
 		s._read_op, s._read_buffer, s._read_deadline, s._read_cancel = op, buffer, deadline, false
 	case .Write:
 		if s._write_op != nil {
-			return {kind = .Operation_Pending}
+			return net.Connection_Error.Operation_Pending
 		}
 		s._write_op, s._write_buffer, s._write_deadline, s._write_cancel = op, buffer, deadline, false
 	case .Close:
 		if s._close_op != nil {
-			return {kind = .Operation_Pending}
+			return net.Connection_Error.Operation_Pending
 		}
 		s._close_op, s._closing = op, true
 		s._close_deadline = time.time_add(time.now(), s._config.close_timeout)
-		s._notify_allowed = s._phase == .Established && s._failure.kind == .None && !s._tx.pending && !s._tx_done
+		s._notify_allowed = s._phase == .Established && s._failure == nil && !s._tx.pending && !s._tx_done
 	}
 	op.kind, op.pending, op.result, op._owner = kind, true, {}, s
 	server_async_queue(s)
@@ -511,16 +511,16 @@ server_async_submit :: proc(
 }
 
 @(private)
-server_async_cancel :: proc(data: rawptr, op: ^net.Async_Operation) -> net.Connection_Error {
+server_async_cancel :: proc(data: rawptr, op: ^net.Async_Operation) -> net.Network_Error {
 	s := cast(^Server_Async_Conn)data
 	if !server_async_valid(s) {
-		return {kind = .Invalid_Connection}
+		return net.Connection_Error.Invalid_Connection
 	}
 	if !op.pending {
 		return {}
 	}
 	if op._owner != s || op.kind == .Close {
-		return {kind = .Invalid_Operation}
+		return net.Connection_Error.Invalid_Operation
 	}
 	if op == s._read_op {
 		s._read_cancel = true
@@ -533,7 +533,7 @@ server_async_cancel :: proc(data: rawptr, op: ^net.Async_Operation) -> net.Conne
 			_ = net.async_cancel(s._transport, &s._tx)
 		}
 	} else {
-		return {kind = .Invalid_Operation}
+		return net.Connection_Error.Invalid_Operation
 	}
 	server_async_queue(s)
 	return {}
@@ -547,7 +547,7 @@ server_async_pump :: proc(data: rawptr) {
 		s._tx_done = false
 		server_async_send_process(s)
 	}
-	if s._closing || s._failure.kind != .None {
+	if s._closing || s._failure != nil {
 		server_async_shutdown_drive(s)
 		return
 	}
@@ -568,7 +568,7 @@ server_async_pump :: proc(data: rawptr) {
 server_async_shutdown_done :: proc(op: ^net.Async_Operation) {
 	s := cast(^Server_Async_Conn)op.user_data
 	s._transport_closed = true
-	if s._close_error.kind == .None {
+	if s._close_error == nil {
 		s._close_error = op.result.err
 	}
 	server_async_queue(s)
@@ -617,7 +617,7 @@ server_async_shutdown_drive :: proc(s: ^Server_Async_Conn) {
 	}
 	if s._notify_allowed &&
 	   !s._notify_sent &&
-	   s._failure.kind == .None &&
+	   s._failure == nil &&
 	   time.diff(time.now(), s._close_deadline) > 0 {
 		s._notify_allowed = false
 		if server_async_send_record(s, .Alert, []u8{1, 0}, .Notify, s._close_deadline) {
@@ -627,7 +627,7 @@ server_async_shutdown_drive :: proc(s: ^Server_Async_Conn) {
 	if !s._transport_closing {
 		s._transport_closing = true
 		e := net.async_close(s._transport, &s._shutdown)
-		if e.kind != .None {
+		if e != nil {
 			s._close_error = e
 			s._transport_closed = true
 		}
@@ -638,9 +638,7 @@ server_async_shutdown_drive :: proc(s: ^Server_Async_Conn) {
 	server_async_cleanup(s)
 	e := s._failure
 	if s._closing {
-		e = {
-			kind = .Closed,
-		}
+		e = net.Connection_Error.Closed
 	}
 	server_async_handshake_emit(s, e)
 	server_async_emit(s, .Read, e)

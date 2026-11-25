@@ -128,7 +128,7 @@ Record_Read_Error_Kind :: enum {
 Record_Read_Error :: struct {
 	kind:      Record_Read_Error_Kind,
 	record:    Record_Error,
-	transport: transport.Connection_Error,
+	transport: transport.Network_Error,
 	received:  int, // Bytes received during the failed header/body read.
 }
 
@@ -179,7 +179,7 @@ record_read_plaintext_conn :: proc(
 
 	header_received, header_err := transport.read_exact(conn, wire_header[:])
 
-	if header_err.kind != .None {
+	if header_err != nil {
 		return {}, nil, {
 			kind = .Header_Read_Failed,
 			transport = header_err,
@@ -203,7 +203,7 @@ record_read_plaintext_conn :: proc(
 
 	body_received, body_err := transport.read_exact(conn, body_buffer)
 
-	if body_err.kind != .None {
+	if body_err != nil {
 		return header, nil, {
 			kind = .Body_Read_Failed,
 			transport = body_err,
@@ -570,7 +570,7 @@ protection_fail :: proc(
 async_receive_start :: proc(conn: ^Async_Conn, deadline: time.Time) {
 	if conn.rx.pending do return
 	if conn.rx_expected == 0 do conn.rx_expected = RECORD_HEADER_SIZE
-	if conn.rx_error.kind != .None {
+	if conn.rx_error != nil {
 		async_queue(conn)
 		return
 	}
@@ -580,7 +580,7 @@ async_receive_start :: proc(conn: ^Async_Conn, deadline: time.Time) {
 		conn.rx_wire[conn.rx_used:conn.rx_expected],
 		deadline,
 	)
-	if error.kind != .None {
+	if error != nil {
 		conn.rx_error = error; async_queue(conn)
 	}
 }
@@ -590,15 +590,11 @@ async_receive_done :: proc(op: ^net.Async_Operation) {
 	conn := cast(^Async_Conn)op.user_data
 	n := op.result.count
 	if n < 0 || n > conn.rx_expected - conn.rx_used {
-		conn.rx_error = {
-			kind = .Invalid_Count,
-		}
+		conn.rx_error = transport.Connection_Error.Invalid_Count
 	} else {
 		conn.rx_used += n
 		conn.rx_error = op.result.err
-		if n == 0 && conn.rx_error.kind == .None do conn.rx_error = {
-			kind = .No_Progress,
-		}
+		if n == 0 && conn.rx_error == nil do conn.rx_error = transport.Connection_Error.No_Progress
 	}
 	async_queue(conn)
 }
@@ -615,7 +611,7 @@ async_receive_record :: proc(conn: ^Async_Conn, deadline: time.Time) -> (Record_
 		header, err := record_header_decode(header_bytes)
 		if err != .None || int(header.length) > MAX_CIPHERTEXT_SIZE {
 			if err == .None do err = .Record_Oversized
-			async_terminal(conn, {kind = .Protocol_Failed}, {kind = .Invalid_Record, record = err})
+			async_terminal(conn, transport.Connection_Error.Protocol_Failed, {kind = .Invalid_Record, record = err})
 			return {}, false
 		}
 		conn.rx_expected += int(header.length)
@@ -625,26 +621,26 @@ async_receive_record :: proc(conn: ^Async_Conn, deadline: time.Time) -> (Record_
 		copy(header_bytes[:], conn.rx_wire[:RECORD_HEADER_SIZE])
 		header, _ := record_header_decode(header_bytes)
 		// Full-record bytes win transient timeout/cancellation errors.
-		if conn.rx_error.kind == .Cancelled || conn.rx_error.kind == .Timeout do conn.rx_error = {}
+		if conn.rx_error == transport.Connection_Error.Cancelled || conn.rx_error == transport.Connection_Error.Timeout do conn.rx_error = nil
 		return header, true
 	}
-	if conn.rx_error.kind != .None {
+	if conn.rx_error != nil {
 		error := conn.rx_error
 		if conn.protocol.phase == .Established &&
-		   (error.kind == .Cancelled || error.kind == .Timeout) {
-			conn.rx_error = {}
+		   (error == transport.Connection_Error.Cancelled || error == transport.Connection_Error.Timeout) {
+			conn.rx_error = nil
 			async_emit(conn, .Read, error)
 		} else {
 			details := IO_Error {
 				kind      = .Transport_Read_Failed,
 				transport = error,
 			}
-			if error.kind == .Peer_Closed do details.kind = .Unexpected_EOF
+			if error == transport.Connection_Error.Peer_Closed do details.kind = .Unexpected_EOF
 			async_terminal(
 				conn,
 				error if \
-					error.kind != .Peer_Closed else \
-					net.Connection_Error{kind = .Protocol_Failed},
+					error != transport.Connection_Error.Peer_Closed else \
+					transport.Connection_Error.Protocol_Failed,
 				details,
 			)
 		}
@@ -669,7 +665,7 @@ async_send_start :: proc(
 ) {
 	conn.tx_kind, conn.tx_size = kind, size
 	error := net.async_write(conn.transport, &conn.tx, conn.tx_wire[:size], deadline)
-	if error.kind != .None {
+	if error != nil {
 		conn.tx.result = {
 			err = error,
 		}
@@ -690,11 +686,9 @@ async_send_process :: proc(conn: ^Async_Conn) {
 	kind := conn.tx_kind
 	conn.tx_kind = .None
 	error := conn.tx.result.err
-	if conn.tx.result.count == conn.tx_size && (error.kind == .Cancelled || error.kind == .Timeout) do error = {}
-	if conn.tx.result.count != conn.tx_size || error.kind != .None {
-		if error.kind == .None do error = {
-			kind = .Write_Failed,
-		}
+	if conn.tx.result.count == conn.tx_size && (error == transport.Connection_Error.Cancelled || error == transport.Connection_Error.Timeout) do error = nil
+	if conn.tx.result.count != conn.tx_size || error != nil {
+		if error == nil do error = net.TCP_Send_Error.Unknown
 		if kind == .Notify do conn.close_error = error
 		async_terminal(
 			conn,

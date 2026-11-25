@@ -247,6 +247,35 @@ UDP_Send_Error :: enum i32 {
 	Unknown,
 }
 
+// Errors of a `Connection` or an `Async_Connection` that are not an error of the socket beneath it.
+Connection_Error :: enum i32 {
+	None,
+	// The peer ended the connection in an orderly way: there is nothing more to read.
+	Peer_Closed,
+	// The connection was closed on this side.
+	Closed,
+	// The deadline passed before the operation finished.
+	Timeout,
+	// The operation was cancelled.
+	Cancelled,
+	// The connection does not implement deadlines.
+	Deadline_Unsupported,
+	// The connection, or one of the procedures it needs, is missing.
+	Invalid_Connection,
+	// The operation is missing, has no callback, or does not belong to this connection.
+	Invalid_Operation,
+	// An operation of this kind is already in flight.
+	Operation_Pending,
+	// A read or write procedure reported a count outside its buffer.
+	Invalid_Count,
+	// A read or write procedure transferred nothing and reported no error.
+	No_Progress,
+	// The connection could not be closed cleanly.
+	Close_Failed,
+	// A protocol layered on the connection failed; that layer has the details.
+	Protocol_Failed,
+}
+
 Shutdown_Error :: enum i32 {
 	None,
 	// No network connection, or the network stack is not initialized.

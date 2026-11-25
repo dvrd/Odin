@@ -15,13 +15,13 @@ Matrix_Loop :: struct {
 	taken:  int,
 }
 
-matrix_read :: proc(data: rawptr, dst: []u8) -> (int, net.Connection_Error) {
+matrix_read :: proc(data: rawptr, dst: []u8) -> (int, net.Network_Error) {
 	loop := cast(^Matrix_Loop)data
 	tcp_test_run(&loop.stream)
 
 	available := len(loop.stream.output) - loop.taken
 	if available == 0 {
-		return 0, {kind = .Peer_Closed}
+		return 0, net.Connection_Error.Peer_Closed
 	}
 
 	n := min(len(dst), available)
@@ -30,7 +30,7 @@ matrix_read :: proc(data: rawptr, dst: []u8) -> (int, net.Connection_Error) {
 	return n, {}
 }
 
-matrix_write :: proc(data: rawptr, src: []u8) -> (int, net.Connection_Error) {
+matrix_write :: proc(data: rawptr, src: []u8) -> (int, net.Network_Error) {
 	loop := cast(^Matrix_Loop)data
 	append(&loop.stream.input, ..src)
 	tcp_test_wake(&loop.stream)
@@ -38,7 +38,7 @@ matrix_write :: proc(data: rawptr, src: []u8) -> (int, net.Connection_Error) {
 	return len(src), {}
 }
 
-matrix_close :: proc(data: rawptr) -> net.Connection_Error {
+matrix_close :: proc(data: rawptr) -> net.Network_Error {
 	return {}
 }
 
@@ -100,7 +100,7 @@ matrix_connection :: proc(t: ^testing.T, entry: Matrix_Case, loc := #caller_loca
 
 	accepted: TCP_Test_Result
 	accept := Server_Async_Handshake_Operation{callback = tcp_test_handshake, user_data = &accepted}
-	testing.expect_value(t, engine_server_async_handshake(server, &accept).kind, net.Connection_Error_Kind.None, loc)
+	testing.expect_value(t, engine_server_async_handshake(server, &accept), nil, loc)
 
 	suites := [1]Cipher_Suite{entry.suite}
 	groups := [1]Named_Group{entry.group}
@@ -129,7 +129,7 @@ matrix_connection :: proc(t: ^testing.T, entry: Matrix_Case, loc := #caller_loca
 
 	tcp_test_run(&loop.stream)
 	testing.expect_value(t, accepted.calls, 1, loc)
-	testing.expect_value(t, accepted.error.kind, net.Connection_Error_Kind.None, loc)
+	testing.expect_value(t, accepted.error, nil, loc)
 
 	state := connection_state(conn)
 	testing.expect_value(t, state.handshake_complete, true, loc)
@@ -155,7 +155,7 @@ matrix_connection :: proc(t: ^testing.T, entry: Matrix_Case, loc := #caller_loca
 
 	closed: TCP_Test_Result
 	closing := tcp_test_op(&closed)
-	testing.expect_value(t, net.async_close(server_async_connection(server), &closing).kind, net.Connection_Error_Kind.None, loc)
+	testing.expect_value(t, net.async_close(server_async_connection(server), &closing), nil, loc)
 	tcp_test_run(&loop.stream)
 	testing.expect_value(t, closed.calls, 1, loc)
 	testing.expect_value(t, audit.live, 0, loc)
@@ -176,14 +176,14 @@ matrix_echo :: proc(
 	storage: [64]u8
 	received: TCP_Test_Result
 	reading := tcp_test_op(&received)
-	testing.expect_value(t, net.async_read(server_async_connection(server), &reading, storage[:]).kind, net.Connection_Error_Kind.None, loc)
+	testing.expect_value(t, net.async_read(server_async_connection(server), &reading, storage[:]), nil, loc)
 	tcp_test_run(&loop.stream)
 	testing.expect_value(t, received.calls, 1, loc)
 	testing.expect_value(t, string(storage[:received.count]), request, loc)
 
 	sent: TCP_Test_Result
 	sending := tcp_test_op(&sent)
-	testing.expect_value(t, net.async_write(server_async_connection(server), &sending, transmute([]u8)response).kind, net.Connection_Error_Kind.None, loc)
+	testing.expect_value(t, net.async_write(server_async_connection(server), &sending, transmute([]u8)response), nil, loc)
 	tcp_test_run(&loop.stream)
 	testing.expect_value(t, sent.calls, 1, loc)
 
@@ -249,7 +249,7 @@ matrix_pump :: proc(pipe: ^Matrix_Pipe) {
 
 Matrix_Async_Result :: struct {
 	calls: int,
-	error: net.Connection_Error,
+	error: net.Network_Error,
 	cause: Handshake_Error,
 }
 
@@ -266,11 +266,11 @@ matrix_async_transfer :: proc(t: ^testing.T, pipe: ^Matrix_Pipe, from, to: net.A
 	sending, receiving := tcp_test_op(&sent), tcp_test_op(&received)
 	storage: [64]u8
 
-	testing.expect_value(t, net.async_read(to, &receiving, storage[:]).kind, net.Connection_Error_Kind.None, loc)
-	testing.expect_value(t, net.async_write(from, &sending, transmute([]u8)text).kind, net.Connection_Error_Kind.None, loc)
+	testing.expect_value(t, net.async_read(to, &receiving, storage[:]), nil, loc)
+	testing.expect_value(t, net.async_write(from, &sending, transmute([]u8)text), nil, loc)
 	matrix_pump(pipe)
 	testing.expect_value(t, sent.calls, 1, loc)
-	testing.expect_value(t, sent.error.kind, net.Connection_Error_Kind.None, loc)
+	testing.expect_value(t, sent.error, nil, loc)
 	testing.expect_value(t, received.calls, 1, loc)
 	testing.expect_value(t, string(storage[:received.count]), text, loc)
 }
@@ -301,7 +301,7 @@ matrix_async_connection :: proc(t: ^testing.T, suite: Cipher_Suite, group: Named
 
 	accepted: TCP_Test_Result
 	accept := Server_Async_Handshake_Operation{callback = tcp_test_handshake, user_data = &accepted}
-	testing.expect_value(t, engine_server_async_handshake(server, &accept).kind, net.Connection_Error_Kind.None, loc)
+	testing.expect_value(t, engine_server_async_handshake(server, &accept), nil, loc)
 
 	suites := [1]Cipher_Suite{suite}
 	groups := [1]Named_Group{group}
@@ -321,14 +321,14 @@ matrix_async_connection :: proc(t: ^testing.T, suite: Cipher_Suite, group: Named
 
 	connected: Matrix_Async_Result
 	connect := Async_Handshake_Operation{callback = matrix_async_handshake_done, user_data = &connected}
-	testing.expect_value(t, engine_async_handshake(conn, &connect).kind, net.Connection_Error_Kind.None, loc)
+	testing.expect_value(t, engine_async_handshake(conn, &connect), nil, loc)
 	matrix_pump(pipe)
 
 	testing.expect_value(t, connected.calls, 1, loc)
-	testing.expectf(t, connected.error.kind == .None, "%v over %v: %v", suite, group, connected.cause, loc = loc)
+	testing.expectf(t, connected.error == nil, "%v over %v: %v", suite, group, connected.cause, loc = loc)
 	testing.expect_value(t, accepted.calls, 1, loc)
-	testing.expect_value(t, accepted.error.kind, net.Connection_Error_Kind.None, loc)
-	if connected.error.kind == .None && accepted.error.kind == .None {
+	testing.expect_value(t, accepted.error, nil, loc)
+	if connected.error == nil && accepted.error == nil {
 		testing.expect_value(t, connection_state(&conn.protocol).cipher_suite, suite, loc)
 		testing.expect_value(t, server_async_connection_state(server).cipher_suite, suite, loc)
 		testing.expect_value(t, conn.protocol.server_parameters.group, group, loc)
@@ -339,9 +339,9 @@ matrix_async_connection :: proc(t: ^testing.T, suite: Cipher_Suite, group: Named
 
 	client_closed, server_closed: TCP_Test_Result
 	client_closing, server_closing := tcp_test_op(&client_closed), tcp_test_op(&server_closed)
-	testing.expect_value(t, net.async_close(async_connection(conn), &client_closing).kind, net.Connection_Error_Kind.None, loc)
+	testing.expect_value(t, net.async_close(async_connection(conn), &client_closing), nil, loc)
 	matrix_pump(pipe)
-	testing.expect_value(t, net.async_close(server_async_connection(server), &server_closing).kind, net.Connection_Error_Kind.None, loc)
+	testing.expect_value(t, net.async_close(server_async_connection(server), &server_closing), nil, loc)
 	matrix_pump(pipe)
 	testing.expect_value(t, client_closed.calls, 1, loc)
 	testing.expect_value(t, server_closed.calls, 1, loc)

@@ -180,21 +180,26 @@ client_error :: proc(failure: Client_Error) -> Error {
 
 // A transport failure outside the handshake and the record layer.
 @(private, require_results)
-transport_error :: proc(failure: net.Connection_Error) -> Error {
-	#partial switch failure.kind {
-	case .None:
+transport_error :: proc(failure: net.Network_Error) -> Error {
+	if failure == nil {
 		return nil
-	case .Timeout:
-		if failure.write_cause != nil {
-			return failure.write_cause
+	}
+
+	#partial switch e in failure {
+	case net.Connection_Error:
+		#partial switch e {
+		case .Timeout:
+			return net.TCP_Recv_Error.Timeout
+		case .Cancelled:
+			return General_Error.Cancelled
+		case .Deadline_Unsupported:
+			return General_Error.Deadline_Unsupported
+		case .Invalid_Connection, .Invalid_Count, .Invalid_Operation, .Operation_Pending:
+			return General_Error.Invalid_State
 		}
-		return net.TCP_Recv_Error.Timeout
-	case .Cancelled:
-		return General_Error.Cancelled
-	case .Deadline_Unsupported, .Deadline_Failed:
+	case net.Socket_Option_Error:
+		// A deadline the transport could not set.
 		return General_Error.Deadline_Unsupported
-	case .Invalid_Connection, .Invalid_Count, .Invalid_Operation, .Operation_Pending:
-		return General_Error.Invalid_State
 	}
 	return failed(socket_transport_error(failure))
 }

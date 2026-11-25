@@ -19,8 +19,8 @@ Test_Stream :: struct {
 	destination:             []u8,
 	closed:                  bool,
 	fragment:                int,
-	read_error, write_error: net.Connection_Error,
-	cancel_error:            net.Connection_Error,
+	read_error, write_error: net.Network_Error,
+	cancel_error:            net.Network_Error,
 }
 
 test_schedule :: proc(data: rawptr, cb: proc(_: rawptr), arg: rawptr) {
@@ -34,17 +34,17 @@ test_submit :: proc(
 	kind: net.Async_Operation_Kind,
 	buffer: []u8,
 	deadline: time.Time,
-) -> net.Connection_Error {
+) -> net.Network_Error {
 	s := cast(^Test_Stream)data
 	op.kind, op.pending, op.result, op._owner = kind, true, {}, s
 	if kind == .Read {
 		assert(s.read == nil)
 		s.read, s.destination = op, buffer
-		if s.input_at < len(s.input) || s.read_error.kind != .None do test_schedule(s, test_receive, s)
+		if s.input_at < len(s.input) || s.read_error != nil do test_schedule(s, test_receive, s)
 	} else {
 		if kind == .Write {
 			n := len(buffer)
-			if s.write_error.kind != .None do n = min(n, 1)
+			if s.write_error != nil do n = min(n, 1)
 			append(&s.output, ..buffer[:n])
 			op.result.count, op.result.err = n, s.write_error
 		} else {
@@ -76,14 +76,12 @@ test_complete :: proc(data: rawptr) {
 	op.callback(op)
 }
 
-test_cancel :: proc(data: rawptr, op: ^net.Async_Operation) -> net.Connection_Error {
+test_cancel :: proc(data: rawptr, op: ^net.Async_Operation) -> net.Network_Error {
 	s := cast(^Test_Stream)data
 	if s.read == op {
 		s.read, s.destination = nil, nil
 		op.result.err = s.cancel_error
-		if op.result.err.kind == .None do op.result.err = {
-			kind = .Cancelled,
-		}
+		if op.result.err == nil do op.result.err = net.Connection_Error.Cancelled
 		test_schedule(s, test_complete, op)
 	}
 	return {}
@@ -118,14 +116,14 @@ test_client :: proc(t: ^testing.T, s: ^Test_Stream, pool: ^tls.Root_Pool, conn: 
 Result :: struct {
 	calls: int,
 	count: int,
-	error: net.Connection_Error_Kind,
+	error: net.Network_Error,
 }
 
 completed :: proc(op: ^net.Async_Operation) {
 	r := cast(^Result)op.user_data
 	r.calls += 1
 	r.count = op.result.count
-	r.error = op.result.err.kind
+	r.error = op.result.err
 }
 
 @(test)
@@ -144,7 +142,7 @@ async_handshake_cancel_and_close :: proc(t: ^testing.T) {
 		callback = proc(op: ^tls.Async_Handshake_Operation) {
 			calls := cast(^int)op.user_data
 			calls^ += 1
-			assert(op.err.kind == .Cancelled)
+			assert(op.err == net.Connection_Error.Cancelled)
 		},
 	}
 	testing.expect_value(t, tls.async_handshake(conn, &hs), nil)
@@ -159,7 +157,7 @@ async_handshake_cancel_and_close :: proc(t: ^testing.T) {
 		callback  = completed,
 		user_data = &result,
 	}
-	testing.expect_value(t, net.async_close(tls.async_connection(conn), &close).kind, .None)
+	testing.expect_value(t, net.async_close(tls.async_connection(conn), &close), nil)
 	test_run(&s)
 	testing.expect_value(t, result.calls, 1)
 	testing.expect(t, s.closed)
@@ -201,25 +199,25 @@ async_buffered_plaintext_is_deferred :: proc(t: ^testing.T) {
 		user_data = &r,
 	}
 	stream := tls.async_connection(conn)
-	testing.expect_value(t, net.async_read(stream, &op, buffer[:]).kind, .None)
+	testing.expect_value(t, net.async_read(stream, &op, buffer[:]), nil)
 	test_run(&s)
 	testing.expect_value(t, r.count, 2)
 	testing.expect_value(t, buffer, [2]u8{1, 2})
-	testing.expect_value(t, net.async_read(stream, &op, buffer[:]).kind, .None)
+	testing.expect_value(t, net.async_read(stream, &op, buffer[:]), nil)
 	testing.expect_value(t, r.calls, 1) // Buffered read must still defer.
 	test_run(&s)
 	testing.expect_value(t, r.calls, 2)
 	testing.expect_value(t, buffer, [2]u8{3, 4})
-	testing.expect_value(t, net.async_close(stream, &op).kind, .None)
+	testing.expect_value(t, net.async_close(stream, &op), nil)
 	test_run(&s)
 	testing.expect(t, s.closed)
 }
 
 @(test)
 async_partial_record_cancel_can_resume :: proc(t: ^testing.T) {
-	for cancellation_result in ([]net.Connection_Error_Kind{.Cancelled, .Timeout}) {
+	for cancellation_result in ([]net.Network_Error{net.Connection_Error.Cancelled, net.Connection_Error.Timeout}) {
 		s := Test_Stream {
-			cancel_error = {kind = cancellation_result},
+			cancel_error = cancellation_result,
 		}
 		defer test_destroy(&s)
 		pool := new(tls.Root_Pool)
@@ -239,19 +237,19 @@ async_partial_record_cancel_can_resume :: proc(t: ^testing.T) {
 			user_data = &r,
 		}
 		stream := tls.async_connection(conn)
-		testing.expect_value(t, net.async_read(stream, &op, buffer[:]).kind, .None)
+		testing.expect_value(t, net.async_read(stream, &op, buffer[:]), nil)
 		test_run(&s)
 		testing.expect_value(t, r.calls, 0)
-		testing.expect_value(t, net.async_cancel(stream, &op).kind, .None)
+		testing.expect_value(t, net.async_cancel(stream, &op), nil)
 		test_run(&s)
 		testing.expect_value(t, r.error, .Cancelled)
 		append(&s.input, ..wire[7:n])
-		testing.expect_value(t, net.async_read(stream, &op, buffer[:]).kind, .None)
+		testing.expect_value(t, net.async_read(stream, &op, buffer[:]), nil)
 		test_run(&s)
 		testing.expect_value(t, r.calls, 2)
-		testing.expect_value(t, r.error, .None)
+		testing.expect_value(t, r.error, nil)
 		testing.expect_value(t, buffer, [2]u8{7, 8})
-		testing.expect_value(t, net.async_close(stream, &op).kind, .None)
+		testing.expect_value(t, net.async_close(stream, &op), nil)
 		test_run(&s)
 	}
 }
@@ -280,7 +278,7 @@ async_tampered_record_never_releases_plaintext :: proc(t: ^testing.T) {
 	stream := tls.async_connection(conn)
 	net.async_read(stream, &op, buffer[:])
 	test_run(&s)
-	testing.expect_value(t, r.error, .Protocol_Failed)
+	testing.expect_value(t, r.error, net.Network_Error(net.Connection_Error.Protocol_Failed))
 	testing.expect_value(t, r.count, 0)
 	testing.expect_value(t, buffer, [3]u8{99, 99, 99})
 	testing.expect_value(t, tls.async_failure(conn), tls.Error(tls.Protocol_Error.Bad_Record_Mac))
@@ -293,7 +291,7 @@ async_tampered_record_never_releases_plaintext :: proc(t: ^testing.T) {
 async_authenticated_close_and_truncation :: proc(t: ^testing.T) {
 	for authenticated in ([]bool{false, true}) {
 		s := Test_Stream {
-			read_error = {kind = .Peer_Closed},
+			read_error = net.Connection_Error.Peer_Closed,
 		}
 		pool := new(tls.Root_Pool)
 		conn := new(tls.Async_Conn)
@@ -313,7 +311,7 @@ async_authenticated_close_and_truncation :: proc(t: ^testing.T) {
 		stream := tls.async_connection(conn)
 		net.async_read(stream, &op, buffer[:])
 		test_run(&s)
-		testing.expect_value(t, r.error, net.Connection_Error_Kind.Peer_Closed if authenticated else .Protocol_Failed)
+		testing.expect_value(t, r.error, net.Network_Error(net.Connection_Error.Peer_Closed) if authenticated else net.Network_Error(net.Connection_Error.Protocol_Failed))
 		if !authenticated do testing.expect_value(t, tls.async_failure(conn), tls.Error(net.TCP_Recv_Error.Connection_Closed))
 		net.async_close(stream, &op)
 		test_run(&s)
@@ -327,7 +325,7 @@ async_authenticated_close_and_truncation :: proc(t: ^testing.T) {
 @(test)
 async_failed_record_write_is_terminal :: proc(t: ^testing.T) {
 	s := Test_Stream {
-		write_error = {kind = .Write_Failed},
+		write_error = net.TCP_Send_Error.Unknown,
 	}
 	defer test_destroy(&s)
 	pool := new(tls.Root_Pool)
@@ -345,10 +343,10 @@ async_failed_record_write_is_terminal :: proc(t: ^testing.T) {
 	stream := tls.async_connection(conn)
 	net.async_write(stream, &op, []u8{1, 2, 3})
 	test_run(&s)
-	testing.expect_value(t, r.error, .Write_Failed)
+	testing.expect_value(t, r.error, net.Network_Error(net.TCP_Send_Error.Unknown))
 	testing.expect_value(t, r.count, 0)
 	testing.expect(t, s.closed && !conn.protocol.application.initialized)
-	testing.expect_value(t, net.async_write(stream, &op, []u8{4}).kind, .Closed)
+	testing.expect_value(t, net.async_write(stream, &op, []u8{4}), net.Network_Error(net.Connection_Error.Closed))
 	net.async_close(stream, &op)
 	test_run(&s)
 }
@@ -381,7 +379,7 @@ async_key_update_response_uses_old_key :: proc(t: ^testing.T) {
 	stream := tls.async_connection(conn)
 	net.async_read(stream, &op, buffer[:])
 	test_run(&s)
-	testing.expect_value(t, r.error, .None)
+	testing.expect_value(t, r.error, nil)
 	testing.expect_value(t, buffer[0], u8(9))
 	old: tls.Record_Protection
 	tls.record_protection_init(&old, [16]u8{}, [12]u8{})
@@ -399,7 +397,7 @@ async_key_update_response_uses_old_key :: proc(t: ^testing.T) {
 @(test)
 async_partial_record_timeout_can_resume :: proc(t: ^testing.T) {
 	s := Test_Stream {
-		read_error = {kind = .Timeout},
+		read_error = net.Connection_Error.Timeout,
 	}
 	defer test_destroy(&s)
 	pool := new(tls.Root_Pool)
@@ -421,13 +419,13 @@ async_partial_record_timeout_can_resume :: proc(t: ^testing.T) {
 	stream := tls.async_connection(conn)
 	net.async_read(stream, &op, buffer[:])
 	test_run(&s)
-	testing.expect_value(t, r.error, .Timeout)
+	testing.expect_value(t, r.error, net.Network_Error(net.Connection_Error.Timeout))
 	testing.expect_value(t, r.count, 0)
 	s.read_error = {}
 	append(&s.input, ..wire[7:n])
 	net.async_read(stream, &op, buffer[:])
 	test_run(&s)
-	testing.expect_value(t, r.error, .None)
+	testing.expect_value(t, r.error, nil)
 	testing.expect_value(t, buffer, [2]u8{4, 5})
 	net.async_close(stream, &op)
 	test_run(&s)
@@ -456,7 +454,7 @@ async_close_drains_handshake_before_releasing_storage :: proc(t: ^testing.T) {
 		callback = proc(op: ^tls.Async_Handshake_Operation) {
 			s := cast(^State)op.user_data
 			s.handshake_calls += 1
-			assert(op.err.kind == .Closed)
+			assert(op.err == net.Connection_Error.Closed)
 			free(op)
 		},
 	}

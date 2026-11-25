@@ -90,7 +90,7 @@ handshake_done :: proc(op: ^tls.Async_Handshake_Operation) {
 IO_Completion :: struct {
 	done:  bool,
 	count: int,
-	error: net.Connection_Error,
+	error: net.Network_Error,
 }
 
 io_done :: proc(op: ^net.Async_Operation) {
@@ -152,10 +152,10 @@ async_case :: proc(c: Case) -> int {
 			user_data = &written,
 		}
 		assert(
-			net.async_write(tls.async_connection(conn), &write_op, transmute([]u8)string("ping\n"), time.time_add(time.now(), time.Second)).kind ==
-			.None,
+			net.async_write(tls.async_connection(conn), &write_op, transmute([]u8)string("ping\n"), time.time_add(time.now(), time.Second)) ==
+			nil,
 		)
-		assert(nbio.run() == nil && written.done && written.error.kind == .None && written.count == 5)
+		assert(nbio.run() == nil && written.done && written.error == nil && written.count == 5)
 		buffer: [5]u8
 		used := 0
 		for used < len(buffer) {
@@ -165,10 +165,10 @@ async_case :: proc(c: Case) -> int {
 				user_data = &read,
 			}
 			assert(
-				net.async_read(tls.async_connection(conn), &read_op, buffer[used:], time.time_add(time.now(), time.Second)).kind ==
-				.None,
+				net.async_read(tls.async_connection(conn), &read_op, buffer[used:], time.time_add(time.now(), time.Second)) ==
+				nil,
 			)
-			assert(nbio.run() == nil && read.done && read.error.kind == .None && read.count > 0)
+			assert(nbio.run() == nil && read.done && read.error == nil && read.count > 0)
 			used += read.count
 		}
 		assert(string(buffer[:]) == "ping\n")
@@ -178,7 +178,7 @@ async_case :: proc(c: Case) -> int {
 		callback  = io_done,
 		user_data = &closed,
 	}
-	assert(net.async_close(tls.async_connection(conn), &close_op).kind == .None)
+	assert(net.async_close(tls.async_connection(conn), &close_op) == nil)
 	assert(nbio.run() == nil && closed.done)
 	assert(tls.async_connection_state(conn).negotiated_protocol == "")
 	free(conn)

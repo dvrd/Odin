@@ -10,9 +10,7 @@ server_async_receive_done :: proc(op: ^net.Async_Operation) {
 	remaining := 5 - s._rx_header_used if s._rx_into_header else s._rx_expected - s._rx_used
 	n := op.result.count
 	if n < 0 || n > remaining {
-		s._rx_error = {
-			kind = .Invalid_Count,
-		}
+		s._rx_error = net.Connection_Error.Invalid_Count
 	} else {
 		if s._rx_into_header {
 			s._rx_header_used += n
@@ -20,10 +18,8 @@ server_async_receive_done :: proc(op: ^net.Async_Operation) {
 			s._rx_used += n
 		}
 		s._rx_error = op.result.err
-		if n == 0 && s._rx_error.kind == .None {
-			s._rx_error = {
-				kind = .No_Progress,
-			}
+		if n == 0 && s._rx_error == nil {
+			s._rx_error = net.Connection_Error.No_Progress
 		}
 	}
 	server_async_queue(s)
@@ -32,24 +28,20 @@ server_async_receive_done :: proc(op: ^net.Async_Operation) {
 @(private)
 server_async_receive_error :: proc(s: ^Server_Async_Conn) -> bool {
 	e := s._rx_error
-	if e.kind == .None {
+	if e == nil {
 		return false
 	}
-	if s._phase == .Established && (e.kind == .Timeout || e.kind == .Cancelled) {
-		s._rx_error = {}
+	if s._phase == .Established && (e == net.Connection_Error.Timeout || e == net.Connection_Error.Cancelled) {
+		s._rx_error = nil
 		if s._read_cancel {
-			e = {
-				kind = .Cancelled,
-			}
+			e = net.Connection_Error.Cancelled
 		}
 		server_async_emit(s, .Read, e)
 	} else {
 		kind := Server_Async_Failure_Kind.Transport
-		if e.kind == .Peer_Closed {
+		if e == net.Connection_Error.Peer_Closed {
 			kind = .Unexpected_EOF
-			e = {
-				kind = .Protocol_Failed,
-			}
+			e = net.Connection_Error.Protocol_Failed
 		}
 		server_async_fail(s, e, {kind = kind, transport = s._rx_error})
 	}
@@ -64,7 +56,7 @@ server_async_receive_record :: proc(s: ^Server_Async_Conn, deadline: time.Time) 
 	if s._rx_header_used == 5 && s._rx_expected == 0 {
 		h, e := record_header_decode(s._rx_header)
 		if e != .None {
-			server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Record, record = e})
+			server_async_fail(s, net.Connection_Error.Protocol_Failed, {kind = .Record, record = e})
 			return {}, false
 		}
 		if h.legacy_version != LEGACY_TLS_1_2 &&
@@ -72,21 +64,21 @@ server_async_receive_record :: proc(s: ^Server_Async_Conn, deadline: time.Time) 
 				   !s._ccs_allowed &&
 				   h.content_type == .Handshake &&
 				   h.legacy_version == LEGACY_TLS_1_0) {
-			server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Record, protection = .Invalid_Legacy_Version})
+			server_async_fail(s, net.Connection_Error.Protocol_Failed, {kind = .Record, protection = .Invalid_Legacy_Version})
 			return {}, false
 		}
 		if h.content_type == .Application_Data {
 			if !s._read_keys {
-				server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Record, protection = .Invalid_State})
+				server_async_fail(s, net.Connection_Error.Protocol_Failed, {kind = .Record, protection = .Invalid_State})
 				return {}, false
 			}
 			if int(h.length) > MAX_CIPHERTEXT_SIZE || int(h.length) < GCM_TAG_SIZE + 1 {
-				server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Record, protection = .Record_Oversized})
+				server_async_fail(s, net.Connection_Error.Protocol_Failed, {kind = .Record, protection = .Record_Oversized})
 				return {}, false
 			}
 		} else {
 			if error := record_header_validate_plaintext(h); error != .None {
-				server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Record, record = error})
+				server_async_fail(s, net.Connection_Error.Protocol_Failed, {kind = .Record, record = error})
 				return {}, false
 			}
 		}
@@ -101,8 +93,8 @@ server_async_receive_record :: proc(s: ^Server_Async_Conn, deadline: time.Time) 
 		h, _ := record_header_decode(s._rx_header)
 		// Complete authenticated records win transient cancellation/deadline
 		// races. Other trailing transport errors stay visible at the next read.
-		if s._rx_error.kind == .Timeout || s._rx_error.kind == .Cancelled {
-			s._rx_error = {}
+		if s._rx_error == net.Connection_Error.Timeout || s._rx_error == net.Connection_Error.Cancelled {
+			s._rx_error = nil
 		}
 		return h, true
 	}
@@ -110,14 +102,14 @@ server_async_receive_record :: proc(s: ^Server_Async_Conn, deadline: time.Time) 
 		return {}, false
 	}
 	if s._phase == .Established && s._read_cancel {
-		server_async_emit(s, .Read, {kind = .Cancelled})
+		server_async_emit(s, .Read, net.Connection_Error.Cancelled)
 		return {}, false
 	}
 	if deadline != (time.Time{}) && time.diff(time.now(), deadline) <= 0 {
 		if s._phase == .Established {
-			server_async_emit(s, .Read, {kind = .Timeout})
+			server_async_emit(s, .Read, net.Connection_Error.Timeout)
 		} else {
-			server_async_fail(s, {kind = .Timeout}, {kind = .Handshake})
+			server_async_fail(s, net.Connection_Error.Timeout, {kind = .Handshake})
 		}
 		return {}, false
 	}
@@ -127,7 +119,7 @@ server_async_receive_record :: proc(s: ^Server_Async_Conn, deadline: time.Time) 
 		dst = s._rx_wire[s._rx_used:s._rx_expected]
 	}
 	e := net.async_read(s._transport, &s._rx, dst, deadline)
-	if e.kind != .None {
+	if e != nil {
 		s._rx_error = e
 		server_async_queue(s)
 	}
@@ -164,7 +156,7 @@ server_async_open :: proc(s: ^Server_Async_Conn) -> (TLS_Content_Type, []u8, boo
 	}
 	kind, body, e := engine_record_open(&server_async_keys(s).read, s._rx_plain, s._rx_wire[:s._rx_expected])
 	if e != .None {
-		server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Record, protection = e})
+		server_async_fail(s, net.Connection_Error.Protocol_Failed, {kind = .Record, protection = e})
 		return {}, nil, false
 	}
 	return kind, body, true
@@ -185,13 +177,13 @@ server_async_send_record :: proc(
 	if s._write_keys {
 		size, e := engine_record_seal(&server_async_keys(s).write, s._tx_wire, content, body)
 		if e != .None {
-			server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Record, protection = e})
+			server_async_fail(s, net.Connection_Error.Protocol_Failed, {kind = .Record, protection = e})
 			return false
 		}
 		n = size
 	} else {
 		if len(body) > MAX_PLAINTEXT_SIZE {
-			server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Limit})
+			server_async_fail(s, net.Connection_Error.Protocol_Failed, {kind = .Limit})
 			return false
 		}
 		header := record_header_encode(
@@ -203,7 +195,7 @@ server_async_send_record :: proc(
 	}
 	s._tx_kind, s._tx_size = kind, n
 	e := net.async_write(s._transport, &s._tx, s._tx_wire[:n], deadline)
-	if e.kind != .None {
+	if e != nil {
 		s._tx.result = {
 			err = e,
 		}
@@ -226,18 +218,14 @@ server_async_send_process :: proc(s: ^Server_Async_Conn) {
 	s._tx_kind = .None
 	n, e := s._tx.result.count, s._tx.result.err
 	if n < 0 || n > s._tx_size {
-		e = {
-			kind = .Invalid_Count,
-		}
+		e = net.Connection_Error.Invalid_Count
 	}
-	if n == s._tx_size && (e.kind == .Cancelled || e.kind == .Timeout) {
+	if n == s._tx_size && (e == net.Connection_Error.Cancelled || e == net.Connection_Error.Timeout) {
 		e = {}
 	}
-	if n != s._tx_size || e.kind != .None {
-		if e.kind == .None {
-			e = {
-				kind = .Write_Failed,
-			}
+	if n != s._tx_size || e != nil {
+		if e == nil {
+			e = net.TCP_Send_Error.Unknown
 		}
 		if kind == .Notify {
 			s._close_error = e
@@ -256,7 +244,7 @@ server_async_send_process :: proc(s: ^Server_Async_Conn) {
 		e := engine_server_handshake_accept(&s._engine, s._engine_event)
 		s._engine_event = 0
 		if e != .None {
-			server_async_fail(s, {kind = .Protocol_Failed}, {kind = .Handshake, engine = e})
+			server_async_fail(s, net.Connection_Error.Protocol_Failed, {kind = .Handshake, engine = e})
 		}
 	case .Data:
 		if s._write_op != nil {

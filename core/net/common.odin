@@ -69,6 +69,7 @@ Network_Error :: union #shared_nil {
 	Parse_Endpoint_Error,
 	Resolve_Error,
 	DNS_Error,
+	Connection_Error,
 }
 
 #assert(size_of(Network_Error) == 8)

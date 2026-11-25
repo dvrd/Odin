@@ -79,7 +79,7 @@ async_go_interoperability :: proc(t: ^testing.T) {
 		stream: net.Async_Connection,
 		buffer: []u8,
 		used:   int,
-		error:  net.Connection_Error,
+		error:  net.Network_Error,
 		calls:  int,
 	}
 	reader := Reader {
@@ -93,10 +93,10 @@ async_go_interoperability :: proc(t: ^testing.T) {
 			s.calls += 1
 			s.used += op.result.count
 			s.error = op.result.err
-			if s.error.kind == .None && s.used < len(s.buffer) {
+			if s.error == nil && s.used < len(s.buffer) {
 				assert(
-					net.async_read(s.stream, op, s.buffer[s.used:], time.time_add(time.now(), time.Second)).kind ==
-					.None,
+					net.async_read(s.stream, op, s.buffer[s.used:], time.time_add(time.now(), time.Second)) ==
+					nil,
 				)
 			}
 		},
@@ -107,12 +107,12 @@ async_go_interoperability :: proc(t: ^testing.T) {
 		user_data = &written,
 	}
 	deadline := time.time_add(time.now(), 2 * time.Second)
-	testing.expect_value(t, net.async_read(stream, &read_op, destination, deadline).kind, .None)
-	testing.expect_value(t, net.async_write(stream, &write_op, payload, deadline).kind, .None)
+	testing.expect_value(t, net.async_read(stream, &read_op, destination, deadline), nil)
+	testing.expect_value(t, net.async_write(stream, &write_op, payload, deadline), nil)
 	testing.expect(t, nbio.run() == nil)
-	testing.expect_value(t, written.error, .None)
+	testing.expect_value(t, written.error, nil)
 	testing.expect_value(t, written.count, len(payload))
-	testing.expect_value(t, reader.error.kind, .None)
+	testing.expect_value(t, reader.error, nil)
 	testing.expect_value(t, reader.used, len(payload))
 	testing.expect(t, bytes.equal(payload, destination))
 	closed: Result
@@ -120,10 +120,10 @@ async_go_interoperability :: proc(t: ^testing.T) {
 		callback  = completed,
 		user_data = &closed,
 	}
-	testing.expect_value(t, net.async_close(stream, &close_op).kind, .None)
+	testing.expect_value(t, net.async_close(stream, &close_op), nil)
 	testing.expect(t, nbio.run() == nil)
 	testing.expect_value(t, closed.calls, 1)
-	testing.expect_value(t, closed.error, .None)
+	testing.expect_value(t, closed.error, nil)
 }
 
 @(test)

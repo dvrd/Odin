@@ -42,7 +42,7 @@ IO_Error_Kind :: enum {
 IO_Error :: struct {
 	kind:                           IO_Error_Kind,
 	handshake:                      Handshake_Error,
-	transport:                      transport.Connection_Error,
+	transport:                      transport.Network_Error,
 	protection:                     Record_Protection_Error,
 	record:                         Record_Error,
 	transferred:                    int,
@@ -320,7 +320,7 @@ engine_close :: proc(conn: ^Conn) -> IO_Error {
 	application_clear(&conn.application)
 	handshake_keys_clear(conn)
 	transport_err := conn.transport.close(conn.transport.data)
-	if err.kind == .None && transport_err.kind != .None {
+	if err.kind == .None && transport_err != nil {
 		err = {
 			kind      = .Transport_Close_Failed,
 			transport = transport_err,
@@ -370,7 +370,7 @@ application_record_write :: proc(
 	}
 
 	written, transport_err := transport.write_all(conn.transport, wire[:size])
-	if transport_err.kind != .None {
+	if transport_err != nil {
 		return {kind = .Transport_Write_Failed, transport = transport_err, transferred = written}
 	}
 
@@ -397,9 +397,9 @@ application_record_read :: proc(conn: ^Conn) -> (TLS_Content_Type, []u8, IO_Erro
 @(private)
 application_record_wire_read :: proc(conn: ^Conn, wire: []u8) -> (int, IO_Error) {
 	header_count, header_err := transport.read_exact(conn.transport, wire[:RECORD_HEADER_SIZE])
-	if header_err.kind != .None {
+	if header_err != nil {
 		kind: IO_Error_Kind = .Transport_Read_Failed
-		if header_err.kind == .Peer_Closed {
+		if header_err == transport.Connection_Error.Peer_Closed {
 			kind = .Unexpected_EOF
 		}
 
@@ -425,9 +425,9 @@ application_record_wire_read :: proc(conn: ^Conn, wire: []u8) -> (int, IO_Error)
 		conn.transport,
 		wire[RECORD_HEADER_SIZE:][:cast(int)header.length],
 	)
-	if body_err.kind != .None {
+	if body_err != nil {
 		kind: IO_Error_Kind = .Transport_Read_Failed
-		if body_err.kind == .Peer_Closed {
+		if body_err == transport.Connection_Error.Peer_Closed {
 			kind = .Unexpected_EOF
 		}
 
@@ -647,21 +647,21 @@ async_application_drive :: proc(conn: ^Async_Conn) {
 			conn.read_op.result.count = n
 			async_emit(conn, .Read, {})
 		} else if state.peer_closed {
-			async_emit(conn, .Read, {kind = .Peer_Closed})
+			async_emit(conn, .Read, transport.Connection_Error.Peer_Closed)
 		} else if conn.read_cancel &&
 		   !conn.rx.pending &&
 		   (conn.rx_expected == 0 || conn.rx_used < conn.rx_expected) {
 			// A transport timeout may win its cancellation race. Both errors
 			// belong to this read; preserve only the partial record for retry.
-			if conn.rx_error.kind == .Cancelled || conn.rx_error.kind == .Timeout do conn.rx_error = {}
-			async_emit(conn, .Read, {kind = .Cancelled})
+			if conn.rx_error == transport.Connection_Error.Cancelled || conn.rx_error == transport.Connection_Error.Timeout do conn.rx_error = nil
+			async_emit(conn, .Read, transport.Connection_Error.Cancelled)
 		} else {
 			header, ready := async_receive_record(conn, conn.read_deadline)
 			if ready {
 				if header.content_type != .Application_Data {
 					async_terminal(
 						conn,
-						{kind = .Protocol_Failed},
+						transport.Connection_Error.Protocol_Failed,
 						{kind = .Unexpected_Content_Type},
 					); return
 				}
@@ -673,13 +673,13 @@ async_application_drive :: proc(conn: ^Async_Conn) {
 				if err != .None {
 					async_terminal(
 						conn,
-						{kind = .Protocol_Failed},
+						transport.Connection_Error.Protocol_Failed,
 						{kind = .Decryption_Failed, protection = err},
 					)
 					return
 				}
 				if state.post_used > 0 && content_type != .Handshake {
-					async_terminal(conn, {kind = .Protocol_Failed}, {kind = .Interleaved_Record})
+					async_terminal(conn, transport.Connection_Error.Protocol_Failed, {kind = .Interleaved_Record})
 					return
 				}
 				#partial switch content_type {
@@ -689,19 +689,19 @@ async_application_drive :: proc(conn: ^Async_Conn) {
 				case .Alert:
 					alert_error := application_alert_read(p, content)
 					if alert_error.kind != .None && alert_error.kind != .EOF {
-						async_terminal(conn, {kind = .Protocol_Failed}, alert_error)
+						async_terminal(conn, transport.Connection_Error.Protocol_Failed, alert_error)
 						return
 					}
 				case .Handshake:
 					if post_error := application_post_handshake(p, content);
 					   post_error.kind != .None {
-						async_terminal(conn, {kind = .Protocol_Failed}, post_error)
+						async_terminal(conn, transport.Connection_Error.Protocol_Failed, post_error)
 						return
 					}
 				case:
 					async_terminal(
 						conn,
-						{kind = .Protocol_Failed},
+						transport.Connection_Error.Protocol_Failed,
 						{kind = .Unexpected_Content_Type},
 					); return
 				}
@@ -710,14 +710,14 @@ async_application_drive :: proc(conn: ^Async_Conn) {
 			}
 		}
 	}
-	if conn.closing || conn.failure.kind != .None || conn.tx.pending || conn.tx_done do return
+	if conn.closing || conn.failure != nil || conn.tx.pending || conn.tx_done do return
 	if state.key_update_pending ||
 	   conn.write_op != nil && application_send_key_exhausted(state) {
 		size, err := engine_record_seal(&state.send, conn.tx_wire[:], .Handshake, []u8{24, 0, 0, 1, 0})
 		if err != .None {
 			async_terminal(
 				conn,
-				{kind = .Protocol_Failed},
+				transport.Connection_Error.Protocol_Failed,
 				{kind = .Encryption_Failed, protection = err},
 			)
 			return
@@ -730,11 +730,11 @@ async_application_drive :: proc(conn: ^Async_Conn) {
 	}
 	if conn.write_op == nil do return
 	if conn.write_cancel {
-		async_emit(conn, .Write, {kind = .Cancelled})
+		async_emit(conn, .Write, transport.Connection_Error.Cancelled)
 		return
 	}
 	if conn.write_deadline != (time.Time{}) && time.diff(time.now(), conn.write_deadline) <= 0 {
-		async_emit(conn, .Write, {kind = .Timeout}); return
+		async_emit(conn, .Write, transport.Connection_Error.Timeout); return
 	}
 	written := conn.write_op.result.count
 	if written == len(conn.write_buffer) {
@@ -751,7 +751,7 @@ async_application_drive :: proc(conn: ^Async_Conn) {
 	if err != .None {
 		async_terminal(
 			conn,
-			{kind = .Protocol_Failed},
+			transport.Connection_Error.Protocol_Failed,
 			{kind = .Encryption_Failed, protection = err},
 		)
 		return

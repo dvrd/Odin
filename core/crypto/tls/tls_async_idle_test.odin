@@ -11,9 +11,9 @@ idle_test_submit :: proc(
 	_: net.Async_Operation_Kind,
 	_: []u8,
 	_: time.Time,
-) -> net.Connection_Error {panic("classification performed IO")}
+) -> net.Network_Error {panic("classification performed IO")}
 
-idle_test_cancel :: proc(_: rawptr, _: ^net.Async_Operation) -> net.Connection_Error {
+idle_test_cancel :: proc(_: rawptr, _: ^net.Async_Operation) -> net.Network_Error {
 	panic("classification cancelled IO")
 }
 
@@ -66,13 +66,13 @@ async_idle_local_ready_is_pure_and_ignores_consumed_history :: proc(t: ^testing.
 	}
 	c.rx.result = {
 		count = 5,
-		err = {kind = .Cancelled},
+		err = net.Connection_Error.Cancelled,
 	}
 	c.tx.result = {
 		count = 7,
 	}
 	c.shutdown.result = {
-		err = {kind = .Timeout},
+		err = net.Connection_Error.Timeout,
 	}
 	c.protocol.application.inbound_at = 13
 	c.protocol.application.inbound_size = 13
@@ -180,7 +180,7 @@ async_idle_partial_plaintext_records_control_and_key_update_are_buffered :: proc
 		case 5:
 			c.rx_expected = 5
 		case 6:
-			c.rx_error.kind = .Cancelled
+			c.rx_error = net.Connection_Error.Cancelled
 		case 7:
 			c.tx_kind = .Key_Update
 		case 8:
@@ -222,9 +222,9 @@ async_idle_terminal_state_precedes_busy_and_never_means_callbacks_drained :: pro
 		case 4:
 			c.protocol.application.peer_closed = true
 		case 5:
-			c.failure.kind = .Cancelled
+			c.failure = net.Connection_Error.Cancelled
 		case 6:
-			c.close_error.kind = .Timeout
+			c.close_error = net.Connection_Error.Timeout
 		case 7:
 			c.protocol.application.send.seq = AEAD_REKEY_SEQ[.AES_GCM_128]
 		case 8:

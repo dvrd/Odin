@@ -42,7 +42,7 @@ hook_submit :: proc(
 	kind: net.Async_Operation_Kind,
 	buffer: []u8,
 	deadline: time.Time,
-) -> net.Connection_Error {
+) -> net.Network_Error {
 	h := cast(^Hook)data
 	if kind == .Write &&
 	   h.rotation != nil &&
@@ -58,7 +58,7 @@ hook_submit :: proc(
 	return h.underlying.submit(h.underlying.data, op, kind, buffer, deadline)
 }
 
-hook_cancel :: proc(data: rawptr, op: ^net.Async_Operation) -> net.Connection_Error {
+hook_cancel :: proc(data: rawptr, op: ^net.Async_Operation) -> net.Network_Error {
 	h := cast(^Hook)data
 	return h.underlying.cancel(h.underlying.data, op)
 }
@@ -67,7 +67,7 @@ closed :: proc(op: ^net.Async_Operation) {
 	s := cast(^Session)op.user_data
 	s.close_calls += 1
 	s.closed = true
-	assert(op.result.err.kind == .None)
+	assert(op.result.err == nil)
 	assert(tls.server_async_stats(&s.server).live_bytes == 0)
 }
 
@@ -80,7 +80,7 @@ close_session :: proc(s: ^Session) {
 		callback  = closed,
 		user_data = s,
 	}
-	assert(net.async_close(tls.server_async_connection(&s.server), &s.close).kind == .None)
+	assert(net.async_close(tls.server_async_connection(&s.server), &s.close) == nil)
 }
 
 finish_check :: proc(op: ^nbio.Operation, s: ^Session) {
@@ -112,7 +112,7 @@ finish :: proc(s: ^Session) {
 read_done :: proc(op: ^net.Async_Operation) {
 	s := cast(^Session)op.user_data
 	s.read_calls += 1
-	assert(op.result.err.kind == .None && op.result.count > 0)
+	assert(op.result.err == nil && op.result.count > 0)
 	for b, i in s.input[s.used:s.used + op.result.count] {assert(b == u8(s.used + i))}
 	s.used += op.result.count
 	if s.used == PAYLOAD {
@@ -120,8 +120,8 @@ read_done :: proc(op: ^net.Async_Operation) {
 		finish(s)
 	} else {
 		assert(
-			net.async_read(tls.server_async_connection(&s.server), &s.read, s.input[s.used:], time.time_add(time.now(), 10 * time.Second)).kind ==
-			.None,
+			net.async_read(tls.server_async_connection(&s.server), &s.read, s.input[s.used:], time.time_add(time.now(), 10 * time.Second)) ==
+			nil,
 		)
 	}
 }
@@ -129,7 +129,7 @@ read_done :: proc(op: ^net.Async_Operation) {
 write_done :: proc(op: ^net.Async_Operation) {
 	s := cast(^Session)op.user_data
 	s.write_calls += 1
-	assert(op.result.err.kind == .None && op.result.count == PAYLOAD)
+	assert(op.result.err == nil && op.result.count == PAYLOAD)
 	s.write_done = true
 	finish(s)
 }
@@ -137,15 +137,15 @@ write_done :: proc(op: ^net.Async_Operation) {
 handshake_done :: proc(op: ^tls.Server_Async_Handshake_Operation) {
 	s := cast(^Session)op.user_data
 	s.hs_calls += 1
-	if op.err.kind != .None {
+	if op.err != nil {
 		fmt.eprintf(
 			"handshake failure: mode=%s transport=%v kind=%v engine=%v protection=%v cause=%v\n",
 			s.mode,
-			op.err.kind,
+			op.err,
 			op.result.kind,
 			op.result.engine,
 			op.result.protection,
-			op.result.transport.kind,
+			op.result.transport,
 		)
 		assert(
 			s.mode == "reject" ||
@@ -180,12 +180,12 @@ handshake_done :: proc(op: ^tls.Server_Async_Handshake_Operation) {
 		user_data = s,
 	}
 	assert(
-		net.async_read(tls.server_async_connection(&s.server), &s.read, s.input[:], time.time_add(time.now(), 10 * time.Second)).kind ==
-		.None,
+		net.async_read(tls.server_async_connection(&s.server), &s.read, s.input[:], time.time_add(time.now(), 10 * time.Second)) ==
+		nil,
 	)
 	assert(
-		net.async_write(tls.server_async_connection(&s.server), &s.write, s.output[:], time.time_add(time.now(), 10 * time.Second)).kind ==
-		.None,
+		net.async_write(tls.server_async_connection(&s.server), &s.write, s.output[:], time.time_add(time.now(), 10 * time.Second)) ==
+		nil,
 	)
 }
 

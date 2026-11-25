@@ -43,7 +43,7 @@ Handshake_Error :: struct {
 	authentication: Authentication_Error,
 	finished:       Finished_Error,
 	protection:     Record_Protection_Error,
-	transport:      transport.Connection_Error,
+	transport:      transport.Network_Error,
 	message_type:   u8,
 	allocation:     mem.Allocator_Error,
 	// Socket facade only: an extension of EncryptedExtensions overran the
@@ -163,23 +163,23 @@ handshake_deadline_start_until :: proc(conn: ^Conn, deadline: time.Time) -> (boo
 			// Only the legacy path establishes a relative deadline here.
 			selected = time.time_add(now, timeout)
 		} else if time.diff(now, deadline) <= 0 {
-			return false, handshake_fail(conn, {kind = .Deadline_Failed, transport = {kind = .Timeout}})
+			return false, handshake_fail(conn, {kind = .Deadline_Failed, transport = transport.Connection_Error.Timeout})
 		}
 		if err := transport.set_deadline(conn.transport, selected);
-		   err.kind != .None {
+		   err != nil {
 			transport.set_deadline(conn.transport, {})
 			return false, handshake_fail(conn, {kind = .Deadline_Failed, transport = err})
 		}
 
 		if deadline != (time.Time{}) && time.diff(time.now(), selected) <= 0 {
 			transport.set_deadline(conn.transport, {})
-			return false, handshake_fail(conn, {kind = .Deadline_Failed, transport = {kind = .Timeout}})
+			return false, handshake_fail(conn, {kind = .Deadline_Failed, transport = transport.Connection_Error.Timeout})
 		}
 		deadlines_set = true
 	} else if conn.config.handshake_timeout > 0 || deadline != (time.Time{}) {
 		return false, handshake_fail(
 			conn,
-			{kind = .Deadline_Failed, transport = {kind = .Deadline_Unsupported}},
+			{kind = .Deadline_Failed, transport = transport.Connection_Error.Deadline_Unsupported},
 		)
 	}
 
@@ -501,7 +501,7 @@ handshake_client_finished_send :: proc(conn: ^Conn) -> Handshake_Error {
 
 	wire: [RECORD_HEADER_SIZE + MAX_CIPHERTEXT_SIZE]u8
 	if size := handshake_ccs_encode(conn, wire[:]); size > 0 {
-		if _, write_error := transport.write_all(conn.transport, wire[:size]); write_error.kind != .None {
+		if _, write_error := transport.write_all(conn.transport, wire[:size]); write_error != nil {
 			return handshake_fail(conn, {kind = .Finished_Write_Failed, transport = write_error})
 		}
 	}
@@ -514,7 +514,7 @@ handshake_client_finished_send :: proc(conn: ^Conn) -> Handshake_Error {
 			return handshake_fail(conn, {kind = .Finished_Write_Failed, protection = e})
 		}
 
-		if _, write_error := transport.write_all(conn.transport, wire[:n]); write_error.kind != .None {
+		if _, write_error := transport.write_all(conn.transport, wire[:n]); write_error != nil {
 			return handshake_fail(conn, {kind = .Finished_Write_Failed, transport = write_error})
 		}
 
@@ -527,7 +527,7 @@ handshake_client_finished_send :: proc(conn: ^Conn) -> Handshake_Error {
 	}
 
 	_, send_err := transport.write_all(conn.transport, wire[:written])
-	if send_err.kind != .None {
+	if send_err != nil {
 		return handshake_fail(conn, {kind = .Finished_Write_Failed, transport = send_err})
 	}
 
@@ -547,7 +547,7 @@ handshake_application_activate :: proc(
 	}
 
 	if deadlines_set {
-		if err := transport.set_deadline(conn.transport, {}); err.kind != .None {
+		if err := transport.set_deadline(conn.transport, {}); err != nil {
 			return handshake_fail(conn, {kind = .Deadline_Failed, transport = err})
 		}
 	}
@@ -797,7 +797,7 @@ Client_Hello_Send_Error :: struct {
 	kind:      Client_Hello_Send_Error_Kind,
 	encode:    Client_Hello_Error,
 	retry:     Server_Hello_Error,
-	transport: transport.Connection_Error,
+	transport: transport.Network_Error,
 	written:   int,
 }
 
@@ -933,7 +933,7 @@ client_hello_send :: proc(conn: ^Conn) -> Client_Hello_Send_Error {
 	copy(wire[:RECORD_HEADER_SIZE], header[:])
 	copy(wire[RECORD_HEADER_SIZE:], conn.client_hello[:size])
 	written, write_err := transport.write_all(conn.transport, wire[:RECORD_HEADER_SIZE + size])
-	if write_err.kind != .None {
+	if write_err != nil {
 		return client_hello_fail(
 			conn,
 			{kind = .Write_Failed, transport = write_err, written = written},
@@ -1608,7 +1608,7 @@ client_hello_retry_send :: proc(conn: ^Conn) -> Client_Hello_Send_Error {
 	copy(wire[:RECORD_HEADER_SIZE], header[:])
 	copy(wire[RECORD_HEADER_SIZE:], conn.retry_client_hello[:size])
 	written, err := transport.write_all(conn.transport, wire[:RECORD_HEADER_SIZE + size])
-	if err.kind != .None {
+	if err != nil {
 		return client_hello_fail(conn, {kind = .Write_Failed, transport = err, written = written})
 	}
 
@@ -1763,7 +1763,7 @@ Handshake_Record_Read_Error_Kind :: enum {
 @(private)
 Handshake_Record_Read_Error :: struct {
 	kind:              Handshake_Record_Read_Error_Kind,
-	transport:         transport.Connection_Error,
+	transport:         transport.Network_Error,
 	record:            Record_Error,
 	protection:        Record_Protection_Error,
 	received:          int,
@@ -1865,7 +1865,7 @@ handshake_record_wire_read :: proc(
 	Handshake_Record_Read_Error,
 ) {
 	count, header_err := transport.read_exact(conn.transport, wire[:RECORD_HEADER_SIZE])
-	if header_err.kind != .None {
+	if header_err != nil {
 		return {}, {kind = .Header_Read_Failed, transport = header_err, received = count}
 	}
 
@@ -1881,7 +1881,7 @@ handshake_record_wire_read :: proc(
 		conn.transport,
 		wire[RECORD_HEADER_SIZE:][:cast(int)header.length],
 	)
-	if body_err.kind != .None {
+	if body_err != nil {
 		return {}, {kind = .Body_Read_Failed, transport = body_err, received = body_count}
 	}
 
@@ -2018,7 +2018,7 @@ async_handshake_fail :: proc(conn: ^Async_Conn, error: Handshake_Error) {
 	}
 
 	conn.protocol.handshake_error = error
-	async_terminal(conn, {kind = .Protocol_Failed}, {kind = .Handshake_Failed, handshake = error})
+	async_terminal(conn, transport.Connection_Error.Protocol_Failed, {kind = .Handshake_Failed, handshake = error})
 }
 
 @(private)
@@ -2250,7 +2250,7 @@ async_handshake_drive :: proc(conn: ^Async_Conn) {
 handshake_until_check :: proc(conn: ^Conn, deadline: time.Time) -> Handshake_Error {
 	if deadline != (time.Time{}) && time.diff(time.now(), deadline) <= 0 {
 		conn.handshake_complete = false
-		return handshake_fail(conn, {kind = .Deadline_Failed, transport = {kind = .Timeout}})
+		return handshake_fail(conn, {kind = .Deadline_Failed, transport = transport.Connection_Error.Timeout})
 	}
 	return {}
 }

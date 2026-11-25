@@ -32,9 +32,9 @@ async_idle_state :: proc(conn: ^Async_Conn) -> Async_Idle_State {
 	   p.phase == .Failed ||
 	   state.peer_closed ||
 	   conn.notify_sent ||
-	   conn.failure.kind != .None ||
+	   conn.failure != nil ||
 	   conn.io_error.kind != .None ||
-	   conn.close_error.kind != .None ||
+	   conn.close_error != nil ||
 	   p.handshake_error.kind != .None ||
 	   state.failure.kind != .None ||
 	   state.send.failure != .None ||
@@ -108,7 +108,7 @@ async_idle_state :: proc(conn: ^Async_Conn) -> Async_Idle_State {
 	   application_send_key_exhausted(state) ||
 	   conn.rx_used != 0 ||
 	   conn.rx_expected != 0 ||
-	   conn.rx_error.kind != .None ||
+	   conn.rx_error != nil ||
 	   conn.tx_kind != .None ||
 	   conn.notify_allowed ||
 	   raw_data(conn.read_buffer) != nil ||

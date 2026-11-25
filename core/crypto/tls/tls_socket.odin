@@ -363,36 +363,36 @@ socket_lock_within :: proc(lock: ^sync.Mutex, wait: time.Duration) -> bool {
 // The engine's blocking transport over the socket's descriptor.
 
 @(private)
-socket_transport_read :: proc(data: rawptr, dst: []u8) -> (int, net.Connection_Error) {
+socket_transport_read :: proc(data: rawptr, dst: []u8) -> (int, net.Network_Error) {
 	socket := cast(^Socket)data
 	n, err := net.recv_tcp(socket.fd, dst)
 	if err != nil {
-		return n, {kind = .Read_Failed, read_cause = err}
+		return n, err
 	}
 
 	if n == 0 && len(dst) > 0 {
-		return 0, {kind = .Peer_Closed}
+		return 0, net.Connection_Error.Peer_Closed
 	}
-	return n, {}
+	return n, nil
 }
 
 @(private)
-socket_transport_write :: proc(data: rawptr, src: []u8) -> (int, net.Connection_Error) {
+socket_transport_write :: proc(data: rawptr, src: []u8) -> (int, net.Network_Error) {
 	socket := cast(^Socket)data
 	n, err := net.send_tcp(socket.fd, src)
 	if err != nil {
-		return n, {kind = .Write_Failed, write_cause = err}
+		return n, err
 	}
-	return n, {}
+	return n, nil
 }
 
 // Reached through conn_close only: a failed handshake releases the engine
 // without closing, and the descriptor stays the caller's until close.
 @(private)
-socket_transport_close :: proc(data: rawptr) -> net.Connection_Error {
+socket_transport_close :: proc(data: rawptr) -> net.Network_Error {
 	socket := cast(^Socket)data
 	net.close(socket.fd)
-	return {}
+	return nil
 }
 
 // The engine's failures as upstream's client reports them: the Error it
@@ -400,17 +400,16 @@ socket_transport_close :: proc(data: rawptr) -> net.Connection_Error {
 // and sends nothing.
 
 @(private, require_results)
-socket_transport_error :: proc(failure: net.Connection_Error) -> Error {
-	if failure.write_cause != nil {
-		return failure.write_cause
-	}
-
-	if failure.read_cause != nil {
-		return failure.read_cause
-	}
-
-	if failure.kind == .Peer_Closed {
-		return net.TCP_Recv_Error.Connection_Closed
+socket_transport_error :: proc(failure: net.Network_Error) -> Error {
+	#partial switch e in failure {
+	case net.TCP_Send_Error:
+		return e
+	case net.TCP_Recv_Error:
+		return e
+	case net.Connection_Error:
+		if e == .Peer_Closed {
+			return net.TCP_Recv_Error.Connection_Closed
+		}
 	}
 	return io.Error.Unknown
 }
@@ -595,7 +594,7 @@ socket_handshake_alert :: proc(failure: Handshake_Error) -> (alert: Alert_Descri
 	case .None, .Invalid_State, .Client_Hello_Failed, .Finished_Write_Failed, .Deadline_Failed:
 		return
 	case .Server_Hello_Failed:
-		if failure.server_hello.kind == .Record_Read_Failed && failure.server_hello.record.transport.kind != .None {
+		if failure.server_hello.kind == .Record_Read_Failed && failure.server_hello.record.transport != nil {
 			return
 		}
 	case .Server_Flight_Read_Failed:
@@ -682,7 +681,7 @@ socket_server_hello_error :: proc(failure: Server_Hello_Read_Error) -> Error {
 
 	switch failure.kind {
 	case .Record_Read_Failed:
-		if failure.record.transport.kind != .None {
+		if failure.record.transport != nil {
 			return socket_transport_error(failure.record.transport)
 		}
 
