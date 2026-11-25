@@ -49,7 +49,7 @@ tcp_conn_read :: proc(data: rawptr, dst: []u8) -> (n: int, err: Network_Error) {
 			if recv_err == .Would_Block && !tcp_deadline_expired(tcp.read_deadline) {
 				continue
 			}
-			return count, Connection_Error.Timeout
+			return count, TCP_Recv_Error.Timeout
 		}
 
 		if recv_err != nil {
@@ -86,7 +86,7 @@ tcp_conn_write :: proc(data: rawptr, src: []u8) -> (n: int, err: Network_Error) 
 			if send_err == .Would_Block && !tcp_deadline_expired(tcp.write_deadline) {
 				continue
 			}
-			return count, Connection_Error.Timeout
+			return count, TCP_Send_Error.Timeout
 		}
 		return count, send_err
 	}
@@ -192,7 +192,10 @@ tcp_deadline_apply :: proc(tcp: ^TCP_Connection, option: Socket_Option, deadline
 
 	current := time.now()
 	if deadline._nsec <= current._nsec {
-		return Connection_Error.Timeout
+		if option == .Send_Timeout {
+			return TCP_Send_Error.Timeout
+		}
+		return TCP_Recv_Error.Timeout
 	}
 	return set_option(tcp.socket, option, max(time.diff(current, deadline), time.Millisecond))
 }

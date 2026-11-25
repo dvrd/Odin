@@ -66,10 +66,10 @@ connection_io_copy_and_errors :: proc(t: ^testing.T) {
 	testing.expect_value(t, seek_err, .Unsupported)
 
 	buffer: [4]u8
-	source.read_error = net.Connection_Error.Timeout
+	source.read_error = net.TCP_Recv_Error.Timeout
 	_, err = io.read(r, buffer[:])
 	testing.expect_value(t, err, .Unknown)
-	testing.expect_value(t, reader.last_error, net.Network_Error(net.Connection_Error.Timeout))
+	testing.expect_value(t, reader.last_error, net.Network_Error(net.TCP_Recv_Error.Timeout))
 	destination.write_limit = 1
 	written, write_err := io.write(w, []u8{1, 2})
 	testing.expect_value(t, written, 1)
@@ -146,7 +146,7 @@ connection_tcp_loopback :: proc(t: ^testing.T) {
 		deadline_err := net.set_read_deadline(conn, time.time_add(time.now(), -time.Second))
 		testing.expect_value(t, deadline_err, nil)
 		_, err = io.read(stream, buffer[:])
-		testing.expect_value(t, adapter.last_error, net.Network_Error(net.Connection_Error.Timeout))
+		testing.expect_value(t, adapter.last_error, net.Network_Error(net.TCP_Recv_Error.Timeout))
 		testing.expect_value(t, err, .Unknown)
 	}
 	testing.expect(t, io.close(stream) == nil)

@@ -171,7 +171,7 @@ async_connection_deadline_and_admission :: proc(t: ^testing.T) {
 		e(t, !other.pending)
 		ev(t, nbio.run(), nil)
 		ev(t, r.calls, 1)
-		ev(t, r.err, net.Network_Error(net.Connection_Error.Timeout))
+		ev(t, r.err, net.Network_Error(net.TCP_Recv_Error.Timeout))
 		ev(t, net.async_close(conn, &close_op), nil)
 		ev(t, nbio.run(), nil)
 	}

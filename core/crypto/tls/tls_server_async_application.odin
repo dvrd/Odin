@@ -141,7 +141,7 @@ server_async_application_drive :: proc(s: ^Server_Async_Conn) {
 		return
 	}
 	if s._write_deadline != (time.Time{}) && time.diff(time.now(), s._write_deadline) <= 0 {
-		server_async_emit(s, .Write, net.Connection_Error.Timeout)
+		server_async_emit(s, .Write, net.TCP_Send_Error.Timeout)
 		return
 	}
 	count := min(MAX_PLAINTEXT_SIZE, len(s._write_buffer) - written)

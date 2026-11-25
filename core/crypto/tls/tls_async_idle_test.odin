@@ -72,7 +72,7 @@ async_idle_local_ready_is_pure_and_ignores_consumed_history :: proc(t: ^testing.
 		count = 7,
 	}
 	c.shutdown.result = {
-		err = net.Connection_Error.Timeout,
+		err = net.TCP_Send_Error.Timeout,
 	}
 	c.protocol.application.inbound_at = 13
 	c.protocol.application.inbound_size = 13
@@ -224,7 +224,7 @@ async_idle_terminal_state_precedes_busy_and_never_means_callbacks_drained :: pro
 		case 5:
 			c.failure = net.Connection_Error.Cancelled
 		case 6:
-			c.close_error = net.Connection_Error.Timeout
+			c.close_error = net.TCP_Send_Error.Timeout
 		case 7:
 			c.protocol.application.send.seq = AEAD_REKEY_SEQ[.AES_GCM_128]
 		case 8:

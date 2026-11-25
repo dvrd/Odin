@@ -76,7 +76,13 @@ tcp_async_submit :: proc(
 	// Empty operations and already-expired deadlines still complete later.
 	if len(buffer) == 0 || deadline != (time.Time{}) && time.diff(time.now(), deadline) <= 0 {
 		op = prep_next_tick(tcp_async_io_done, tcp.loop)
-		if len(buffer) > 0 do request.result.err = net.Connection_Error.Timeout
+		if len(buffer) > 0 {
+			if kind == .Read {
+				request.result.err = net.TCP_Recv_Error.Timeout
+			} else {
+				request.result.err = net.TCP_Send_Error.Timeout
+			}
+		}
 	} else if kind == .Read {
 		op = prep_recv(tcp.socket, buffers^[:], tcp_async_io_done, l = tcp.loop)
 		op.recv.expires = deadline
@@ -108,9 +114,7 @@ tcp_async_io_done :: proc(op: ^Operation) {
 	if op.type == .Recv {
 		request.result.count = op.recv.received
 		err, _ := op.recv.err.(net.TCP_Recv_Error)
-		if err == .Timeout {
-			request.result.err = net.Connection_Error.Timeout
-		} else if err != nil {
+		if err != nil {
 			request.result.err = err
 		} else if op.recv.received == 0 {
 			request.result.err = net.Connection_Error.Peer_Closed
@@ -118,9 +122,7 @@ tcp_async_io_done :: proc(op: ^Operation) {
 	} else if op.type == .Send {
 		request.result.count = op.send.sent
 		err, _ := op.send.err.(net.TCP_Send_Error)
-		if err == .Timeout {
-			request.result.err = net.Connection_Error.Timeout
-		} else if err != nil {
+		if err != nil {
 			request.result.err = err
 		}
 	}

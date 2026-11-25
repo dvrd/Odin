@@ -10,7 +10,7 @@ server_async_handshake_drive :: proc(s: ^Server_Async_Conn) {
 	}
 	for _ in 0 ..< 32 {
 		if time.diff(time.now(), s._handshake_deadline) <= 0 {
-			server_async_fail(s, net.Connection_Error.Timeout, {kind = .Handshake})
+			server_async_fail(s, net.TCP_Recv_Error.Timeout, {kind = .Handshake})
 			return
 		}
 		event, event_error := engine_server_handshake_peek(&s._engine)

@@ -31,7 +31,7 @@ server_async_receive_error :: proc(s: ^Server_Async_Conn) -> bool {
 	if e == nil {
 		return false
 	}
-	if s._phase == .Established && (e == net.Connection_Error.Timeout || e == net.Connection_Error.Cancelled) {
+	if s._phase == .Established && (e == net.TCP_Recv_Error.Timeout || e == net.Connection_Error.Cancelled) {
 		s._rx_error = nil
 		if s._read_cancel {
 			e = net.Connection_Error.Cancelled
@@ -93,7 +93,7 @@ server_async_receive_record :: proc(s: ^Server_Async_Conn, deadline: time.Time) 
 		h, _ := record_header_decode(s._rx_header)
 		// Complete authenticated records win transient cancellation/deadline
 		// races. Other trailing transport errors stay visible at the next read.
-		if s._rx_error == net.Connection_Error.Timeout || s._rx_error == net.Connection_Error.Cancelled {
+		if s._rx_error == net.TCP_Recv_Error.Timeout || s._rx_error == net.Connection_Error.Cancelled {
 			s._rx_error = nil
 		}
 		return h, true
@@ -107,9 +107,9 @@ server_async_receive_record :: proc(s: ^Server_Async_Conn, deadline: time.Time) 
 	}
 	if deadline != (time.Time{}) && time.diff(time.now(), deadline) <= 0 {
 		if s._phase == .Established {
-			server_async_emit(s, .Read, net.Connection_Error.Timeout)
+			server_async_emit(s, .Read, net.TCP_Recv_Error.Timeout)
 		} else {
-			server_async_fail(s, net.Connection_Error.Timeout, {kind = .Handshake})
+			server_async_fail(s, net.TCP_Recv_Error.Timeout, {kind = .Handshake})
 		}
 		return {}, false
 	}
@@ -220,7 +220,7 @@ server_async_send_process :: proc(s: ^Server_Async_Conn) {
 	if n < 0 || n > s._tx_size {
 		e = net.Connection_Error.Invalid_Count
 	}
-	if n == s._tx_size && (e == net.Connection_Error.Cancelled || e == net.Connection_Error.Timeout) {
+	if n == s._tx_size && (e == net.Connection_Error.Cancelled || e == net.TCP_Send_Error.Timeout) {
 		e = {}
 	}
 	if n != s._tx_size || e != nil {

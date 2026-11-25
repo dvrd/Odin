@@ -215,7 +215,7 @@ async_buffered_plaintext_is_deferred :: proc(t: ^testing.T) {
 
 @(test)
 async_partial_record_cancel_can_resume :: proc(t: ^testing.T) {
-	for cancellation_result in ([]net.Network_Error{net.Connection_Error.Cancelled, net.Connection_Error.Timeout}) {
+	for cancellation_result in ([]net.Network_Error{net.Connection_Error.Cancelled, net.TCP_Recv_Error.Timeout}) {
 		s := Test_Stream {
 			cancel_error = cancellation_result,
 		}
@@ -397,7 +397,7 @@ async_key_update_response_uses_old_key :: proc(t: ^testing.T) {
 @(test)
 async_partial_record_timeout_can_resume :: proc(t: ^testing.T) {
 	s := Test_Stream {
-		read_error = net.Connection_Error.Timeout,
+		read_error = net.TCP_Recv_Error.Timeout,
 	}
 	defer test_destroy(&s)
 	pool := new(tls.Root_Pool)
@@ -419,7 +419,7 @@ async_partial_record_timeout_can_resume :: proc(t: ^testing.T) {
 	stream := tls.async_connection(conn)
 	net.async_read(stream, &op, buffer[:])
 	test_run(&s)
-	testing.expect_value(t, r.error, net.Network_Error(net.Connection_Error.Timeout))
+	testing.expect_value(t, r.error, net.Network_Error(net.TCP_Recv_Error.Timeout))
 	testing.expect_value(t, r.count, 0)
 	s.read_error = {}
 	append(&s.input, ..wire[7:n])

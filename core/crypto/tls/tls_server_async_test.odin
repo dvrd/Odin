@@ -468,14 +468,14 @@ server_async_partial_record_cancel_timeout_and_resume :: proc(t: ^testing.T) {
 		net.async_read(server_async_connection(&s), &op, buffer[:])
 		tcp_test_run(&stream)
 		if mode == 2 {
-			stream.read_error = net.Connection_Error.Timeout
+			stream.read_error = net.TCP_Recv_Error.Timeout
 			tcp_test_wake(&stream)
 		} else {
 			net.async_cancel(server_async_connection(&s), &op)
 		}
 		tcp_test_run(&stream)
 		testing.expect_value(t, r.calls, 1)
-		testing.expect_value(t, r.error, net.Network_Error(net.Connection_Error.Timeout) if mode == 2 else net.Network_Error(net.Connection_Error.Cancelled))
+		testing.expect_value(t, r.error, net.Network_Error(net.TCP_Recv_Error.Timeout) if mode == 2 else net.Network_Error(net.Connection_Error.Cancelled))
 		stream.read_error = {}
 		append(&stream.input, ..wire[prefix:n])
 		tcp_test_wake(&stream)
@@ -719,7 +719,7 @@ server_async_handshake_policy_budget_deadline_and_bad_finished :: proc(t: ^testi
 		testing.expect_value(t, r.calls, 1)
 		testing.expect(t, r.error != nil)
 		if mode == 2 {
-			testing.expect_value(t, r.error, net.Network_Error(net.Connection_Error.Timeout))
+			testing.expect_value(t, r.error, net.Network_Error(net.TCP_Recv_Error.Timeout))
 		}
 		if mode == 3 {
 			testing.expect_value(t, server_async_stats(&s).engine.allocation_attempts, 0)

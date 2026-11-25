@@ -74,6 +74,6 @@ error_mappings_name_the_conditions_callers_branch_on :: proc(t: ^testing.T) {
 	testing.expect_value(t, server_handshake_error(.Limit), Error(General_Error.Limit_Exceeded))
 	testing.expect_value(t, anti_replay_error(.Replayed), Error(General_Error.Early_Data_Rejected))
 	testing.expect_value(t, handshake_error({kind = .Unsupported_Extension}), Error(Protocol_Error.Unsupported_Extension))
-	testing.expect_value(t, transport_error(net.Connection_Error.Timeout), Error(net.TCP_Recv_Error.Timeout))
+	testing.expect_value(t, transport_error(net.TCP_Recv_Error.Timeout), Error(net.TCP_Recv_Error.Timeout))
 	testing.expect_value(t, transport_error(net.Connection_Error.Cancelled), Error(General_Error.Cancelled))
 }

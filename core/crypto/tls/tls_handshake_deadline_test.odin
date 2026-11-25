@@ -60,7 +60,7 @@ handshake_slow_deadline_callback_cannot_start_io_after_expiry :: proc(t: ^testin
 	conn := deadline_test_conn(&state)
 	error := engine_handshake_until(&conn,time.time_add(time.now(),time.Millisecond))
 	testing.expect_value(t,error.kind,.Deadline_Failed)
-	testing.expect_value(t,error.transport,net.Network_Error(net.Connection_Error.Timeout))
+	testing.expect_value(t,error.transport,net.Network_Error(net.TCP_Recv_Error.Timeout))
 	testing.expect_value(t,state.writes,0)
 }
 

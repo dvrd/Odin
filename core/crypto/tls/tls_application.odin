@@ -653,7 +653,7 @@ async_application_drive :: proc(conn: ^Async_Conn) {
 		   (conn.rx_expected == 0 || conn.rx_used < conn.rx_expected) {
 			// A transport timeout may win its cancellation race. Both errors
 			// belong to this read; preserve only the partial record for retry.
-			if conn.rx_error == transport.Connection_Error.Cancelled || conn.rx_error == transport.Connection_Error.Timeout do conn.rx_error = nil
+			if conn.rx_error == transport.Connection_Error.Cancelled || conn.rx_error == transport.TCP_Recv_Error.Timeout do conn.rx_error = nil
 			async_emit(conn, .Read, transport.Connection_Error.Cancelled)
 		} else {
 			header, ready := async_receive_record(conn, conn.read_deadline)
@@ -734,7 +734,7 @@ async_application_drive :: proc(conn: ^Async_Conn) {
 		return
 	}
 	if conn.write_deadline != (time.Time{}) && time.diff(time.now(), conn.write_deadline) <= 0 {
-		async_emit(conn, .Write, transport.Connection_Error.Timeout); return
+		async_emit(conn, .Write, transport.TCP_Send_Error.Timeout); return
 	}
 	written := conn.write_op.result.count
 	if written == len(conn.write_buffer) {

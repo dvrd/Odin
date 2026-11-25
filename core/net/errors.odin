@@ -254,8 +254,6 @@ Connection_Error :: enum i32 {
 	Peer_Closed,
 	// The connection was closed on this side.
 	Closed,
-	// The deadline passed before the operation finished.
-	Timeout,
 	// The operation was cancelled.
 	Cancelled,
 	// The connection does not implement deadlines.

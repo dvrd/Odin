@@ -163,7 +163,7 @@ handshake_deadline_start_until :: proc(conn: ^Conn, deadline: time.Time) -> (boo
 			// Only the legacy path establishes a relative deadline here.
 			selected = time.time_add(now, timeout)
 		} else if time.diff(now, deadline) <= 0 {
-			return false, handshake_fail(conn, {kind = .Deadline_Failed, transport = transport.Connection_Error.Timeout})
+			return false, handshake_fail(conn, {kind = .Deadline_Failed, transport = transport.TCP_Recv_Error.Timeout})
 		}
 		if err := transport.set_deadline(conn.transport, selected);
 		   err != nil {
@@ -173,7 +173,7 @@ handshake_deadline_start_until :: proc(conn: ^Conn, deadline: time.Time) -> (boo
 
 		if deadline != (time.Time{}) && time.diff(time.now(), selected) <= 0 {
 			transport.set_deadline(conn.transport, {})
-			return false, handshake_fail(conn, {kind = .Deadline_Failed, transport = transport.Connection_Error.Timeout})
+			return false, handshake_fail(conn, {kind = .Deadline_Failed, transport = transport.TCP_Recv_Error.Timeout})
 		}
 		deadlines_set = true
 	} else if conn.config.handshake_timeout > 0 || deadline != (time.Time{}) {
@@ -2250,7 +2250,7 @@ async_handshake_drive :: proc(conn: ^Async_Conn) {
 handshake_until_check :: proc(conn: ^Conn, deadline: time.Time) -> Handshake_Error {
 	if deadline != (time.Time{}) && time.diff(time.now(), deadline) <= 0 {
 		conn.handshake_complete = false
-		return handshake_fail(conn, {kind = .Deadline_Failed, transport = transport.Connection_Error.Timeout})
+		return handshake_fail(conn, {kind = .Deadline_Failed, transport = transport.TCP_Recv_Error.Timeout})
 	}
 	return {}
 }

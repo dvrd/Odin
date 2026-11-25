@@ -188,8 +188,6 @@ transport_error :: proc(failure: net.Network_Error) -> Error {
 	#partial switch e in failure {
 	case net.Connection_Error:
 		#partial switch e {
-		case .Timeout:
-			return net.TCP_Recv_Error.Timeout
 		case .Cancelled:
 			return General_Error.Cancelled
 		case .Deadline_Unsupported:

@@ -621,13 +621,13 @@ async_receive_record :: proc(conn: ^Async_Conn, deadline: time.Time) -> (Record_
 		copy(header_bytes[:], conn.rx_wire[:RECORD_HEADER_SIZE])
 		header, _ := record_header_decode(header_bytes)
 		// Full-record bytes win transient timeout/cancellation errors.
-		if conn.rx_error == transport.Connection_Error.Cancelled || conn.rx_error == transport.Connection_Error.Timeout do conn.rx_error = nil
+		if conn.rx_error == transport.Connection_Error.Cancelled || conn.rx_error == transport.TCP_Recv_Error.Timeout do conn.rx_error = nil
 		return header, true
 	}
 	if conn.rx_error != nil {
 		error := conn.rx_error
 		if conn.protocol.phase == .Established &&
-		   (error == transport.Connection_Error.Cancelled || error == transport.Connection_Error.Timeout) {
+		   (error == transport.Connection_Error.Cancelled || error == transport.TCP_Recv_Error.Timeout) {
 			conn.rx_error = nil
 			async_emit(conn, .Read, error)
 		} else {
@@ -686,7 +686,7 @@ async_send_process :: proc(conn: ^Async_Conn) {
 	kind := conn.tx_kind
 	conn.tx_kind = .None
 	error := conn.tx.result.err
-	if conn.tx.result.count == conn.tx_size && (error == transport.Connection_Error.Cancelled || error == transport.Connection_Error.Timeout) do error = nil
+	if conn.tx.result.count == conn.tx_size && (error == transport.Connection_Error.Cancelled || error == transport.TCP_Send_Error.Timeout) do error = nil
 	if conn.tx.result.count != conn.tx_size || error != nil {
 		if error == nil do error = net.TCP_Send_Error.Unknown
 		if kind == .Notify do conn.close_error = error
