@@ -49,8 +49,8 @@ snapshot_explicit_servers_clone_and_bypass_files :: proc(t: ^testing.T) {
 	options.name_servers = input[:]
 	owner: Resolver_Snapshot
 	error := resolver_snapshot_prepare(&owner, options, context.allocator)
-	testing.expect_value(t, error, .None)
-	if error != .None do return
+	testing.expect_value(t, error, nil)
+	if error != nil do return
 	defer resolver_snapshot_destroy(&owner)
 	input[0] = {IP4_Address{10, 0, 0, 1}, 999}
 	servers, valid := resolver_snapshot_name_servers(&owner)
@@ -65,7 +65,7 @@ snapshot_explicit_servers_clone_and_bypass_files :: proc(t: ^testing.T) {
 	count, found, cause := resolver_snapshot_lookup(&owner, "unknown.example", destination[:], 443)
 	testing.expect_value(t, count, 0)
 	testing.expect_value(t, found, false)
-	testing.expect_value(t, cause, .None)
+	testing.expect_value(t, cause, nil)
 }
 
 @(test)
@@ -103,8 +103,8 @@ snapshot_literal_files_lookup_alias_case_dot_and_atomic_short_output :: proc(t: 
 	defer snapshot_test_remove(hosts)
 	owner: Resolver_Snapshot
 	error := resolver_snapshot_prepare(&owner, snapshot_test_options(resolv, hosts), context.allocator)
-	testing.expect_value(t, error, .None)
-	if error != .None do return
+	testing.expect_value(t, error, nil)
+	if error != nil do return
 	defer resolver_snapshot_destroy(&owner)
 	// Destroy the source contents before observing the copied snapshot.
 	testing.expect_value(t, os.write_entire_file(resolv, "broken"), nil)
@@ -120,12 +120,12 @@ snapshot_literal_files_lookup_alias_case_dot_and_atomic_short_output :: proc(t: 
 	count, found, cause = resolver_snapshot_lookup(&owner, "eXaMpLe.TeSt", out[:], 8443)
 	testing.expect_value(t, count, 3)
 	testing.expect_value(t, found, true)
-	testing.expect_value(t, cause, .None)
+	testing.expect_value(t, cause, nil)
 	testing.expect_value(t, out, expected)
 	count, found, cause = resolver_snapshot_lookup(&owner, "ALIAS.TEST.", out[:], 9443)
 	testing.expect_value(t, count, 1)
 	testing.expect_value(t, found, true)
-	testing.expect_value(t, cause, .None)
+	testing.expect_value(t, cause, nil)
 	testing.expect_value(t, out[0], Endpoint{IP4_Address{127, 0, 0, 2}, 9443})
 }
 
@@ -162,7 +162,8 @@ snapshot_failed_file_and_limits_do_not_publish_partial_policy :: proc(t: ^testin
 	owner: Resolver_Snapshot
 	options = snapshot_test_options("/nonexistent/webtools101", hosts)
 	error := resolver_snapshot_prepare(&owner, options, context.allocator)
-	testing.expect_value(t, error, .Read_Failed)
+	_, unreadable := error.(os.Error)
+	testing.expect(t, unreadable)
 	_, valid := resolver_snapshot_name_servers(&owner)
 	testing.expect(t, !valid)
 	resolver_snapshot_destroy(&owner)
@@ -304,8 +305,8 @@ snapshot_all_backing_grants_fail_atomically_with_exact_physical_rollback :: proc
 	healthy: Snapshot_Test_Allocator
 	owner: Resolver_Snapshot
 	error := resolver_snapshot_prepare(&owner, options, {snapshot_test_allocator, &healthy})
-	testing.expect_value(t, error, .None)
-	if error != .None do return
+	testing.expect_value(t, error, nil)
+	if error != nil do return
 	points := healthy.calls
 	testing.expect(t, points > 0 && points < 64)
 	resolver_snapshot_destroy(&owner)
@@ -320,7 +321,7 @@ snapshot_all_backing_grants_fail_atomically_with_exact_physical_rollback :: proc
 			}
 			failed: Resolver_Snapshot
 			cause := resolver_snapshot_prepare(&failed, options, {snapshot_test_allocator, &probe})
-			testing.expect(t, cause != .None)
+			testing.expect(t, cause != nil)
 			_, valid := resolver_snapshot_name_servers(&failed)
 			testing.expect(t, !valid)
 			// Observe rollback before fixture cleanup; cleanup must not conceal a leak.
@@ -343,8 +344,8 @@ snapshot_destroy_invalidates_owner_before_callback_can_free_header :: proc(t: ^t
 	options := snapshot_test_options("/nonexistent/101", "/nonexistent/101")
 	options.name_servers = endpoints[:]
 	error := resolver_snapshot_prepare(owner, options, {snapshot_test_allocator, &probe})
-	testing.expect_value(t, error, .None)
-	if error != .None {
+	testing.expect_value(t, error, nil)
+	if error != nil {
 		free(owner, rt.heap_allocator())
 		return
 	}
@@ -409,7 +410,7 @@ snapshot_every_legacy_parser_allocation_failure_is_latched_without_partial_polic
 				DEFAULT_RESOLVER_SNAPSHOT_LIMITS,
 				{snapshot_test_parser_allocator, &healthy},
 			)
-			testing.expect_value(t, error, .None)
+			testing.expect_value(t, error, nil)
 			testing.expect_value(t, len(servers), 2)
 			testing.expect_value(t, len(entries), 3 if index == 0 else 80)
 			testing.expect(t, healthy.calls > 3)
@@ -448,7 +449,7 @@ snapshot_every_legacy_parser_allocation_failure_is_latched_without_partial_polic
 					DEFAULT_RESOLVER_SNAPSHOT_LIMITS,
 					{snapshot_test_parser_allocator, &probe},
 				)
-				testing.expect_value(t, cause, .Allocation_Failed)
+				testing.expect_value(t, cause, Resolver_Snapshot_Error(mem.Allocator_Error.Out_Of_Memory))
 				testing.expect_value(t, len(result_servers), 0)
 				testing.expect_value(t, len(result_hosts), 0)
 			}
@@ -463,8 +464,8 @@ snapshot_lookup_rejects_aliases_and_moved_headers_without_mutating_inputs :: pro
 	options.name_servers = endpoints[:]
 	owner: Resolver_Snapshot
 	cause := resolver_snapshot_prepare(&owner, options, context.allocator)
-	testing.expect_value(t, cause, .None)
-	if cause != .None do return
+	testing.expect_value(t, cause, nil)
+	if cause != nil do return
 	defer resolver_snapshot_destroy(&owner)
 	servers, valid := resolver_snapshot_name_servers(&owner)
 	testing.expect(t, valid)
@@ -503,7 +504,7 @@ snapshot_exact_file_caps_and_no_server_policy_are_explicit :: proc(t: ^testing.T
 	options.limits.host_name_bytes = 0
 	owner: Resolver_Snapshot
 	cause := resolver_snapshot_prepare(&owner, options, context.allocator)
-	testing.expect_value(t, cause, .None)
+	testing.expect_value(t, cause, nil)
 	resolver_snapshot_destroy(&owner)
 	options.limits.file_bytes = len(data) - 1
 	cause = resolver_snapshot_prepare(&owner, options, context.allocator)
@@ -552,7 +553,7 @@ snapshot_nonregular_and_embedded_nul_paths_fail_without_policy_or_backing :: pro
 	owner: Resolver_Snapshot
 	options := snapshot_test_options("/tmp", "/nonexistent/101")
 	cause := resolver_snapshot_prepare(&owner, options, mem.Allocator{snapshot_test_forbid_alloc, nil})
-	testing.expect_value(t, cause, .Read_Failed)
+	testing.expect_value(t, cause, Resolver_Snapshot_Error(os.Error(os.General_Error.Invalid_File)))
 	options.resolv_conf_path = "/tmp/invalid\x00suffix"
 	cause = resolver_snapshot_prepare(&owner, options, mem.Allocator{snapshot_test_forbid_alloc, nil})
 	testing.expect_value(t, cause, .Invalid_Config)

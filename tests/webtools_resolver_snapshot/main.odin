@@ -14,7 +14,7 @@ main :: proc() {
 	mem.tracking_allocator_init(&tracker, rt.heap_allocator(), rt.heap_allocator())
 	backing := mem.tracking_allocator(&tracker)
 	scope, error := scopes.create_root({bytes = 4 << 20}, backing)
-	assert(error == .None)
+	assert(error == nil)
 	observer, error2 := scopes.retain_scope(scope)
 	assert(error2 == .None)
 	binding, cause := charged.create(scope, {backing = backing, metadata_allocator = backing})
@@ -26,7 +26,7 @@ main :: proc() {
 		{resolv_conf_path = os.args[1], hosts_file_path = os.args[2], limits = net.DEFAULT_RESOLVER_SNAPSHOT_LIMITS},
 		allocator,
 	)
-	assert(prepared == .None)
+	assert(prepared == nil)
 	// Allocation provenance retains the Binding/Scope after caller owners retire.
 	charged.release(&binding)
 	scopes.release_scope(&scope)
@@ -34,7 +34,7 @@ main :: proc() {
 	assert(valid && len(endpoints) == 2)
 	addresses: [3]net.Endpoint
 	count, found, lookup := net.resolver_snapshot_lookup(&owner, "EXAMPLE.TEST.", addresses[:], 8443)
-	assert(lookup == .None && found && count == 3)
+	assert(lookup == nil && found && count == 3)
 	assert(addresses[0] == net.Endpoint{net.IP4_Address{127, 0, 0, 2}, 8443})
 	assert(addresses[1] == net.Endpoint{net.IP6_Loopback, 8443})
 	assert(addresses[2] == net.Endpoint{net.IP4_Address{127, 0, 0, 3}, 8443})

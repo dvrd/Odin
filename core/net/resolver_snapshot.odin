@@ -2,6 +2,7 @@ package net
 
 import "core:bytes"
 import "core:mem"
+import "core:os"
 
 Resolver_Snapshot_Limits :: struct {
 	file_bytes, line_bytes, host_entries, host_name_bytes, name_servers: int,
@@ -33,20 +34,25 @@ Resolver_Snapshot_Options :: struct {
 	limits:                            Resolver_Snapshot_Limits,
 }
 
-Resolver_Snapshot_Error :: enum u32 {
+Resolver_Snapshot_General_Error :: enum u32 {
 	None,
 	Invalid_Config,
 	Invalid_State,
 	Invalid_Hostname,
 	No_Servers,
 	Unsupported,
-	// A configuration file could not be read.
-	Read_Failed,
 	Parse_Failed,
 	Limit_Exceeded,
-	Allocation_Failed,
 	Destination_Undersized,
 	Overlapping_Buffers,
+}
+
+// What went wrong, or the allocator's or the operating system's own error
+// when the snapshot could not be allocated or a configuration file not read.
+Resolver_Snapshot_Error :: union #shared_nil {
+	Resolver_Snapshot_General_Error,
+	mem.Allocator_Error,
+	os.Error,
 }
 
 // Stable, serialized owner; do not copy or mutate its fields. All published
@@ -87,7 +93,7 @@ resolver_snapshot_endpoint_valid :: proc(e: Endpoint) -> bool {
 @(private)
 resolver_snapshot_grant :: proc(size: int, allocator: mem.Allocator) -> ([]u8, Resolver_Snapshot_Error) {
 	if size == 0 {
-		return nil, .None
+		return nil, nil
 	}
 	if size < 0 || allocator.procedure == nil {
 		return nil, .Invalid_Config
@@ -107,9 +113,9 @@ resolver_snapshot_grant :: proc(size: int, allocator: mem.Allocator) -> ([]u8, R
 				len(data),
 			)
 		}
-		return nil, .Allocation_Failed
+		return nil, error if error != nil else mem.Allocator_Error.Out_Of_Memory
 	}
-	return data, .None
+	return data, nil
 }
 
 @(private)
@@ -167,7 +173,7 @@ resolver_snapshot_pack :: proc(
 		}
 		at += len(host.name)
 	}
-	return result, .None
+	return result, nil
 }
 
 // Synchronous preparation only: no DNS query, entropy, OS resolver call or global
@@ -211,7 +217,7 @@ resolver_snapshot_prepare :: proc(
 		}
 		prepared._self = s
 		s^ = prepared
-		return .None
+		return nil
 	}
 	when ODIN_OS == .Darwin || ODIN_OS == .Linux || ODIN_OS == .FreeBSD || ODIN_OS == .OpenBSD || ODIN_OS == .NetBSD {
 		prepared, error := resolver_snapshot_prepare_system(options, allocator)
@@ -220,9 +226,9 @@ resolver_snapshot_prepare :: proc(
 		}
 		prepared._self = s
 		s^ = prepared
-		return .None
+		return nil
 	} else {
-		return .Unsupported
+		return Resolver_Snapshot_General_Error.Unsupported
 	}
 }
 
@@ -300,7 +306,7 @@ resolver_snapshot_lookup :: proc(
 		}
 	}
 	if needed == 0 {
-		return 0, false, .None
+		return 0, false, nil
 	}
 	if needed > len(dst) {
 		return needed, true, .Destination_Undersized
@@ -315,7 +321,7 @@ resolver_snapshot_lookup :: proc(
 			at += 1
 		}
 	}
-	return needed, true, .None
+	return needed, true, nil
 }
 
 resolver_snapshot_destroy :: proc(s: ^Resolver_Snapshot) {

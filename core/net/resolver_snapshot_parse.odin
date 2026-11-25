@@ -2,6 +2,7 @@
 package net
 
 import "core:mem"
+import "core:os"
 import "core:strings"
 import posix "core:sys/posix"
 
@@ -105,7 +106,7 @@ resolver_snapshot_parse :: proc(
 	allocator := mem.Allocator{resolver_snapshot_parse_allocator, &state}
 	servers := parse_resolv_conf(string(resolv), allocator)
 	if state.failed {
-		return nil, nil, .Allocation_Failed
+		return nil, nil, state.cause
 	}
 	if len(servers) == 0 {
 		return nil, nil, .No_Servers
@@ -122,7 +123,7 @@ resolver_snapshot_parse :: proc(
 	strings.reader_init(&reader, string(hosts))
 	entries, ok := parse_hosts(strings.reader_to_stream(&reader), allocator)
 	if state.failed {
-		return nil, nil, .Allocation_Failed
+		return nil, nil, state.cause
 	}
 	if !ok {
 		return nil, nil, .Parse_Failed
@@ -137,7 +138,7 @@ resolver_snapshot_parse :: proc(
 		}
 		names += len(entry.name)
 	}
-	return servers, entries, .None
+	return servers, entries, nil
 }
 
 @(private)
@@ -164,15 +165,15 @@ resolver_snapshot_read_file :: proc(
 	// then rejects every nonregular source. Normal resolv.conf symlinks still work.
 	descriptor := posix.open(cast(cstring)&name[0], {.CLOEXEC, .NONBLOCK})
 	if descriptor < 0 {
-		return nil, 0, .Read_Failed
+		return nil, 0, os.Error(os.Platform_Error(posix.errno()))
 	}
 	defer _ = posix.close(descriptor)
 	metadata: posix.stat_t
 	if posix.fstat(descriptor, &metadata) != .OK {
-		return nil, 0, .Read_Failed
+		return nil, 0, os.Error(os.Platform_Error(posix.errno()))
 	}
 	if !posix.S_ISREG(metadata.st_mode) || metadata.st_size < 0 {
-		return nil, 0, .Read_Failed
+		return nil, 0, os.Error(os.General_Error.Invalid_File)
 	}
 	if metadata.st_size > posix.off_t(limit) {
 		return nil, 0, .Limit_Exceeded
@@ -195,13 +196,13 @@ resolver_snapshot_read_file :: proc(
 				retries += 1
 				continue
 			}
-			return nil, 0, .Read_Failed
+			return nil, 0, os.Error(os.Platform_Error(cause))
 		}
 		if n == 0 {
 			break
 		}
 		if n > len(storage) - at {
-			return nil, 0, .Read_Failed
+			return nil, 0, os.Error(os.General_Error.Invalid_File)
 		}
 		at += int(n)
 		if at > limit {
@@ -209,7 +210,7 @@ resolver_snapshot_read_file :: proc(
 		}
 	}
 	success = true
-	return storage, at, .None
+	return storage, at, nil
 }
 
 @(private)
@@ -271,7 +272,7 @@ resolver_snapshot_prepare_system :: proc(
 	}
 	servers := parse_resolv_conf(string(resolv[:resolv_count]), {resolver_snapshot_parse_allocator, &first})
 	if first.failed {
-		return {}, .Allocation_Failed
+		return {}, first.cause
 	}
 	if len(servers) == 0 {
 		return {}, .No_Servers
