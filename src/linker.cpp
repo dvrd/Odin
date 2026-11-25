@@ -1249,10 +1249,6 @@ try_cross_linking:;
 				link_command_line = gb_string_appendc(link_command_line, clang_path);
 			}
 			link_command_line = gb_string_appendc(link_command_line, " -Wno-unused-command-line-argument ");
-			if (build_context.metrics.os == TargetOs_darwin &&
-			    string_starts_with(build_context.metrics.target_triplet, str_lit("arm64e-"))) {
-				link_command_line = gb_string_appendc(link_command_line, " -arch arm64e ");
-			}
 
 			if (build_context.lto_kind != LTO_None) {
 				link_command_line = gb_string_appendc(link_command_line, " -flto=thin");
