@@ -226,7 +226,9 @@ _get_absolute_path :: proc(path: string, allocator: runtime.Allocator) -> (absol
 
 	temp_allocator := TEMP_ALLOCATOR_GUARD({ allocator })
 
-	fd, errno := linux.open(clone_to_cstring(path, temp_allocator) or_return, {})
+	// O_PATH names the file without opening it: no read permission is needed,
+	// a FIFO does not wait for a writer and a device is not touched.
+	fd, errno := linux.open(clone_to_cstring(rel, temp_allocator) or_return, {.PATH, .CLOEXEC})
 	if errno != nil {
 		err = _get_platform_error(errno)
 		return
