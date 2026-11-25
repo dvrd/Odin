@@ -145,6 +145,17 @@ _accept_error :: proc(errno: linux.Errno) -> Accept_Error {
 		return .Would_Block
 	case .EINTR:
 		return .Interrupted
+	// Linux reports an error already pending on the connection being accepted
+	// as the error of `accept` itself. accept(2) says to treat these like
+	// EAGAIN and try again: the listening socket is fine.
+	case .ENETDOWN, .ENETUNREACH, .EHOSTDOWN, .EHOSTUNREACH, .ENONET:
+		return .Network_Unreachable
+	case .EPROTO, .ENOPROTOOPT:
+		return .Aborted
+	case .ETIMEDOUT:
+		return .Timeout
+	case .EOPNOTSUPP:
+		return .Unsupported_Socket
 	case:
 		return .Unknown
 	}
