@@ -25,12 +25,12 @@ _FULLY_SUPPORTED :: true
 // the record stays put until reap, after every in-flight result has been handled.
 // Closing the descriptor retires it; the next user of that number gets a new one.
 Interest :: struct {
-	ident:         uintptr,
-	filter:        kq.Filter,
-	head:          ^Operation,
-	closed:        bool,
-	dispatching:   bool,
-	retired_next:  ^Interest,
+	ident:        uintptr,
+	filter:       kq.Filter,
+	head:         ^Operation,
+	closed:       bool,
+	dispatching:  bool,
+	retired_next: ^Interest,
 }
 
 @(private="package")

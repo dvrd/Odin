@@ -45,7 +45,7 @@ Operation :: struct {
 	detached:        bool,
 	// Terminal cancellation result. Inspect before operation-specific errors;
 	// transferred byte counts remain valid. Never implies rollback.
-	cancelled: bool,
+	cancelled:       bool,
 	_cancel_requested: bool,
 	type:            Operation_Type,
 	using specifics: Specifics,
