@@ -23,8 +23,7 @@ udp_fragmentation_policy_sets_queries_and_preserves_ecn :: proc(t: ^testing.T) {
 		when ODIN_OS == .Linux {
 			if family == .IP6 {
 				option = 23
-			}
-			else {
+			} else {
 				option = 10
 			}
 		}

@@ -8,13 +8,13 @@ import "core:time"
 // the close callback. Socket ownership transfers only when init succeeds.
 // Do not mix direct socket operations with this adapter after initialization.
 TCP_Async_Connection :: struct {
-	socket: TCP_Socket,
-	loop: ^Event_Loop,
-	initialized: bool,
-	closing, closed: bool,
+	socket:                                           TCP_Socket,
+	loop:                                             ^Event_Loop,
+	initialized:                                      bool,
+	closing, closed:                                  bool,
 	read_operation, write_operation, close_operation: ^net.Async_Operation,
-	close_started: bool,
-	_read_buffers, _write_buffers: [1][]byte,
+	close_started:                                    bool,
+	_read_buffers, _write_buffers:                    [1][]byte,
 }
 
 tcp_async_connection_init :: proc(tcp: ^TCP_Async_Connection, socket: TCP_Socket) -> Association_Error {
@@ -22,7 +22,11 @@ tcp_async_connection_init :: proc(tcp: ^TCP_Async_Connection, socket: TCP_Socket
 	loop := current_thread_event_loop()
 	assert(loop != nil, "acquire the event loop before initializing a connection")
 	associate_socket(socket, loop) or_return
-	tcp^ = {socket = socket, loop = loop, initialized = true}
+	tcp^ = {
+		socket      = socket,
+		loop        = loop,
+		initialized = true,
+	}
 	return nil
 }
 
@@ -32,7 +36,13 @@ tcp_async_connection :: proc(tcp: ^TCP_Async_Connection) -> net.Async_Connection
 }
 
 @(private)
-tcp_async_submit :: proc(data: rawptr, request: ^net.Async_Operation, kind: net.Async_Operation_Kind, buffer: []u8, deadline: time.Time) -> net.Connection_Error {
+tcp_async_submit :: proc(
+	data: rawptr,
+	request: ^net.Async_Operation,
+	kind: net.Async_Operation_Kind,
+	buffer: []u8,
+	deadline: time.Time,
+) -> net.Connection_Error {
 	tcp := cast(^TCP_Async_Connection)data
 	assert(tcp.loop == current_thread_event_loop(), "connection used from a different event loop")
 	if tcp.closing || tcp.closed do return {kind = .Closed}
@@ -66,12 +76,14 @@ tcp_async_submit :: proc(data: rawptr, request: ^net.Async_Operation, kind: net.
 	// Empty operations and already-expired deadlines still complete later.
 	if len(buffer) == 0 || deadline != (time.Time{}) && time.diff(time.now(), deadline) <= 0 {
 		op = prep_next_tick(tcp_async_io_done, tcp.loop)
-		if len(buffer) > 0 do request.result.err = {kind = .Timeout}
+		if len(buffer) > 0 do request.result.err = {
+			kind = .Timeout,
+		}
 	} else if kind == .Read {
-		op = prep_recv(tcp.socket, buffers^[:], tcp_async_io_done, l=tcp.loop)
+		op = prep_recv(tcp.socket, buffers^[:], tcp_async_io_done, l = tcp.loop)
 		op.recv.expires = deadline
 	} else {
-		op = prep_send(tcp.socket, buffers^[:], tcp_async_io_done, all=true, l=tcp.loop)
+		op = prep_send(tcp.socket, buffers^[:], tcp_async_io_done, all = true, l = tcp.loop)
 		op.send.expires = deadline
 	}
 	op.user_data[0] = request
@@ -99,23 +111,39 @@ tcp_async_io_done :: proc(op: ^Operation) {
 		request.result.count = op.recv.received
 		err, _ := op.recv.err.(net.TCP_Recv_Error)
 		if err == .Timeout {
-			request.result.err = {kind = .Timeout, read_cause = err}
+			request.result.err = {
+				kind       = .Timeout,
+				read_cause = err,
+			}
 		} else if err != nil {
-			request.result.err = {kind = .Read_Failed, read_cause = err}
+			request.result.err = {
+				kind       = .Read_Failed,
+				read_cause = err,
+			}
 		} else if op.recv.received == 0 {
-			request.result.err = {kind = .Peer_Closed}
+			request.result.err = {
+				kind = .Peer_Closed,
+			}
 		}
 	} else if op.type == .Send {
 		request.result.count = op.send.sent
 		err, _ := op.send.err.(net.TCP_Send_Error)
 		if err == .Timeout {
-			request.result.err = {kind = .Timeout, write_cause = err}
+			request.result.err = {
+				kind        = .Timeout,
+				write_cause = err,
+			}
 		} else if err != nil {
-			request.result.err = {kind = .Write_Failed, write_cause = err}
+			request.result.err = {
+				kind        = .Write_Failed,
+				write_cause = err,
+			}
 		}
 	}
 	if op.cancelled {
-		request.result.err = {kind = .Closed if tcp.closing else .Cancelled}
+		request.result.err = {
+			kind = .Closed if tcp.closing else .Cancelled,
+		}
 	}
 	if request.kind == .Read {
 		tcp.read_operation = nil
@@ -135,7 +163,7 @@ tcp_async_io_done :: proc(op: ^Operation) {
 tcp_async_finish_close :: proc(tcp: ^TCP_Async_Connection) {
 	if !tcp.closing || tcp.close_started || tcp.read_operation != nil || tcp.write_operation != nil do return
 	tcp.close_started = true
-	close_poly(tcp.socket, tcp, tcp_async_close_done, l=tcp.loop)
+	close_poly(tcp.socket, tcp, tcp_async_close_done, l = tcp.loop)
 }
 
 @(private)
@@ -145,7 +173,9 @@ tcp_async_close_done :: proc(op: ^Operation, tcp: ^TCP_Async_Connection) {
 	tcp.closed = true
 	request.pending = false
 	request._owner = nil
-	if op.close.err != nil do request.result.err = {kind = .Close_Failed}
+	if op.close.err != nil do request.result.err = {
+		kind = .Close_Failed,
+	}
 	request.callback(request)
 	// Both request and tcp can have been freed by callback.
 }

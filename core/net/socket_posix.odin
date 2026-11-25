@@ -225,7 +225,9 @@ _recv_udp :: proc(skt: UDP_Socket, buf: []byte) -> (bytes_read: int, remote_endp
 
 	bytes_read = int(res)
 	remote_endpoint = _sockaddr_to_endpoint(&from)
-	if .TRUNC in message.msg_flags {err = .Excess_Truncated}
+	if .TRUNC in message.msg_flags {
+		err = .Excess_Truncated
+	}
 	return
 }
 
@@ -251,7 +253,9 @@ _send_udp :: proc(skt: UDP_Socket, buf: []byte, to: Endpoint) -> (bytes_written:
 	// One call is one datagram, including an empty payload. Never split or
 	// silently omit messages by treating UDP like a stream write loop.
 	res := posix.sendto(posix.FD(skt), raw_data(buf), len(buf), {.NOSIGNAL}, (^posix.sockaddr)(&toaddr), posix.socklen_t(toaddr.ss_len))
-	if res < 0 {return 0, _udp_send_error()}
+	if res < 0 {
+		return 0, _udp_send_error()
+	}
 	bytes_written = int(res)
 	return
 }

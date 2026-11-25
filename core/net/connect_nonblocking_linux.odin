@@ -3,14 +3,7 @@ package net
 import "core:sys/linux"
 
 @(private)
-_begin_tcp_connect :: proc(
-	endpoint: Endpoint,
-	options: TCP_Options,
-) -> (
-	TCP_Socket,
-	bool,
-	Network_Error,
-) {
+_begin_tcp_connect :: proc(endpoint: Endpoint, options: TCP_Options) -> (TCP_Socket, bool, Network_Error) {
 	any_socket, create_error := create_socket(family_from_endpoint(endpoint), .TCP)
 	if create_error != .None {
 		return 0, false, create_error
@@ -27,10 +20,12 @@ _begin_tcp_connect :: proc(
 	address := _unwrap_os_addr(endpoint)
 	cause := linux.connect(linux.Fd(socket), &address)
 	if cause == .NONE {
-		success = true; return socket, true, nil
+		success = true
+		return socket, true, nil
 	}
 	if cause == .EINPROGRESS || cause == .EINTR || cause == .EALREADY {
-		success = true; return socket, false, nil
+		success = true
+		return socket, false, nil
 	}
 	return 0, false, _dial_error(cause)
 }

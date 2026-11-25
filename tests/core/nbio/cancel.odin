@@ -8,8 +8,11 @@ import "core:time"
 @(test)
 cancel_pending_and_completed_timeout :: proc(t: ^testing.T) {
 	if event_loop_guard(t) {
-		testing.set_fail_timeout(t, 5*time.Second)
-		State :: struct { calls: int, cancelled: bool }
+		testing.set_fail_timeout(t, 5 * time.Second)
+		State :: struct {
+			calls:     int,
+			cancelled: bool,
+		}
 		pending, completed: State
 		callback :: proc(op: ^nbio.Operation, s: ^State) {
 			s.calls += 1
@@ -32,7 +35,7 @@ cancel_pending_and_completed_timeout :: proc(t: ^testing.T) {
 @(test)
 cancel_accept_delivers_completion :: proc(t: ^testing.T) {
 	if event_loop_guard(t) {
-		testing.set_fail_timeout(t, 5*time.Second)
+		testing.set_fail_timeout(t, 5 * time.Second)
 		server, listen_err := nbio.listen_tcp({net.IP4_Loopback, 0})
 		ev(t, listen_err, nil)
 		if listen_err != nil do return
@@ -51,7 +54,7 @@ cancel_accept_delivers_completion :: proc(t: ^testing.T) {
 @(test)
 cancel_partial_receive_preserves_count :: proc(t: ^testing.T) {
 	if event_loop_guard(t) {
-		testing.set_fail_timeout(t, 5*time.Second)
+		testing.set_fail_timeout(t, 5 * time.Second)
 		server, listen_err := net.listen_tcp({net.IP4_Loopback, 0})
 		ev(t, listen_err, nil)
 		if listen_err != nil do return
@@ -69,16 +72,19 @@ cancel_partial_receive_preserves_count :: proc(t: ^testing.T) {
 		ev(t, nbio.associate_socket(peer), nil)
 		_, send_err := net.send_tcp(client, []u8{7, 8})
 		ev(t, send_err, nil)
-		State :: struct { buffer: [4]u8, calls: int }
+		State :: struct {
+			buffer: [4]u8,
+			calls:  int,
+		}
 		state: State
 		op := nbio.recv_poly(peer, {state.buffer[:]}, &state, proc(op: ^nbio.Operation, s: ^State) {
-			s.calls += 1
-			assert(op.cancelled)
-			assert(op.recv.received == 2)
-			assert(s.buffer[0] == 7 && s.buffer[1] == 8)
-		}, all=true)
+				s.calls += 1
+				assert(op.cancelled)
+				assert(op.recv.received == 2)
+				assert(s.buffer[0] == 7 && s.buffer[1] == 8)
+			}, all = true)
 		// Tick until the first fragment has been consumed, then cancel the remainder.
-		for op.recv.received < 2 { ev(t, nbio.tick(0), nil) }
+		for op.recv.received < 2 {ev(t, nbio.tick(0), nil)}
 		ev(t, nbio.cancel(op), nil)
 		ev(t, nbio.run(), nil)
 		ev(t, state.calls, 1)

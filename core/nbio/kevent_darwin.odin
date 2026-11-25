@@ -17,6 +17,7 @@ Darwin_KEvent64 :: struct {
 }
 
 foreign import darwin_kqueue "system:System"
+
 foreign darwin_kqueue {
 	@(link_name = "kevent64")
 	darwin_kevent64 :: proc(fd: posix.FD, changes: [^]Darwin_KEvent64, n_changes: c.int, events: [^]Darwin_KEvent64, n_events: c.int, flags: c.uint, timeout: ^posix.timespec) -> c.int ---

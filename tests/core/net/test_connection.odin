@@ -6,12 +6,12 @@ import "core:testing"
 import "core:time"
 
 Connection_Test_State :: struct {
-	input: []u8,
-	output: [32]u8,
-	used: int,
-	closed: bool,
+	input:       []u8,
+	output:      [32]u8,
+	used:        int,
+	closed:      bool,
 	write_limit: int,
-	read_error: net.Connection_Error,
+	read_error:  net.Connection_Error,
 }
 
 connection_test_read :: proc(data: rawptr, dst: []u8) -> (int, net.Connection_Error) {
@@ -45,10 +45,16 @@ connection_test_wrap :: proc(s: ^Connection_Test_State) -> net.Connection {
 
 @(test)
 connection_io_copy_and_errors :: proc(t: ^testing.T) {
-	source := Connection_Test_State{input = []u8{'h', 'e', 'l', 'l', 'o'}}
+	source := Connection_Test_State {
+		input = []u8{'h', 'e', 'l', 'l', 'o'},
+	}
 	destination: Connection_Test_State
-	reader := net.Connection_Stream{connection = connection_test_wrap(&source)}
-	writer := net.Connection_Stream{connection = connection_test_wrap(&destination)}
+	reader := net.Connection_Stream {
+		connection = connection_test_wrap(&source),
+	}
+	writer := net.Connection_Stream {
+		connection = connection_test_wrap(&destination),
+	}
 	r, w := net.connection_stream(&reader), net.connection_stream(&writer)
 	testing.expect(t, io.query(r) == io.Stream_Mode_Set{.Read, .Write, .Close, .Query})
 	n, err := io.copy(w, r)
@@ -60,7 +66,10 @@ connection_io_copy_and_errors :: proc(t: ^testing.T) {
 	testing.expect_value(t, seek_err, .Unsupported)
 
 	buffer: [4]u8
-	source.read_error = {kind = .Timeout, read_cause = .Timeout}
+	source.read_error = {
+		kind       = .Timeout,
+		read_cause = .Timeout,
+	}
 	_, err = io.read(r, buffer[:])
 	testing.expect_value(t, err, .Unknown)
 	testing.expect_value(t, reader.last_error.kind, .Timeout)
@@ -77,7 +86,10 @@ connection_io_copy_and_errors :: proc(t: ^testing.T) {
 
 @(test)
 connection_exact_partial_io :: proc(t: ^testing.T) {
-	s := Connection_Test_State{input = []u8{'h', 'e', 'l', 'l', 'o'}, write_limit = 2}
+	s := Connection_Test_State {
+		input       = []u8{'h', 'e', 'l', 'l', 'o'},
+		write_limit = 2,
+	}
 	conn := connection_test_wrap(&s)
 	buffer: [5]u8
 	n, err := net.read_exact(conn, buffer[:])
@@ -111,11 +123,13 @@ connection_tcp_loopback :: proc(t: ^testing.T) {
 	peer, _, accept_err := net.accept_tcp(listener)
 	testing.expect(t, accept_err == nil)
 	if accept_err != nil do return
-	tcp := net.TCP_Connection{socket = peer}
+	tcp := net.TCP_Connection {
+		socket = peer,
+	}
 	conn := net.tcp_connection(&tcp)
 	defer conn.close(conn.data)
 	when net.TCP_DEADLINES_SUPPORTED {
-		setup_err := net.set_deadline(conn, time.time_add(time.now(), 2*time.Second))
+		setup_err := net.set_deadline(conn, time.time_add(time.now(), 2 * time.Second))
 		testing.expect_value(t, setup_err.kind, .None)
 	}
 	_, send_err := net.send_tcp(socket, []u8{1, 2, 3})
@@ -125,7 +139,9 @@ connection_tcp_loopback :: proc(t: ^testing.T) {
 	n, read_err := net.tcp_read_exact(peer, buffer[:2])
 	testing.expect_value(t, n, 2)
 	testing.expect_value(t, read_err.kind, .None)
-	adapter := net.Connection_Stream{connection = conn}
+	adapter := net.Connection_Stream {
+		connection = conn,
+	}
 	stream := net.connection_stream(&adapter)
 	remaining, err := io.read_full(stream, buffer[2:])
 	testing.expect_value(t, remaining, 1)

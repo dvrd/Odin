@@ -199,9 +199,13 @@ get_dns_records_from_nameservers_until :: proc(hostname: string, type: DNS_Recor
 
 @(private)
 dns_records_from_nameservers_until :: proc(hostname: string, type: DNS_Record_Type, name_servers: []Endpoint, host_overrides: []DNS_Record, deadline: time.Time, allocator := context.allocator) -> (records: []DNS_Record, err: DNS_Error) {
-	if deadline != (time.Time{}) && time.diff(time.now(), deadline) <= 0 {return nil, .Timeout}
+	if deadline != (time.Time{}) && time.diff(time.now(), deadline) <= 0 {
+		return nil, .Timeout
+	}
 	when ODIN_OS != .Darwin && ODIN_OS != .Linux && ODIN_OS != .FreeBSD && ODIN_OS != .OpenBSD && ODIN_OS != .NetBSD {
-		if deadline != (time.Time{}) {return nil, .Unsupported}
+		if deadline != (time.Time{}) {
+			return nil, .Unsupported
+		}
 	}
 	init_dns_configuration()
 	context.allocator = allocator
@@ -216,7 +220,9 @@ dns_records_from_nameservers_until :: proc(hostname: string, type: DNS_Record_Ty
 	dns_response_buf: [4096]u8 = ---
 	dns_response: []u8
 	for name_server in name_servers {
-		if deadline != (time.Time{}) && time.diff(time.now(), deadline) <= 0 {return nil, .Timeout}
+		if deadline != (time.Time{}) && time.diff(time.now(), deadline) <= 0 {
+			return nil, .Timeout
+		}
 		conn, sock_err := make_unbound_udp_socket(family_from_endpoint(name_server))
 		if sock_err != nil {
 			return nil, .Connection_Error
@@ -225,8 +231,12 @@ dns_records_from_nameservers_until :: proc(hostname: string, type: DNS_Record_Ty
 
 		if deadline != (time.Time{}) {
 			remaining := time.diff(time.now(), deadline)
-			if remaining <= 0 {return nil, .Timeout}
-			if set_option(conn, .Send_Timeout, dns_socket_timeout(remaining)) != nil {return nil, .Unsupported}
+			if remaining <= 0 {
+				return nil, .Timeout
+			}
+			if set_option(conn, .Send_Timeout, dns_socket_timeout(remaining)) != nil {
+				return nil, .Unsupported
+			}
 		}
 		_ = send(conn, dns_packet[:], name_server) or_continue
 
@@ -278,7 +288,9 @@ dns_records_from_nameservers_until :: proc(hostname: string, type: DNS_Record_Ty
 		}
 	}
 
-	if deadline != (time.Time{}) && time.diff(time.now(), deadline) <= 0 {return nil, .Timeout}
+	if deadline != (time.Time{}) && time.diff(time.now(), deadline) <= 0 {
+		return nil, .Timeout
+	}
 
 	return
 }
@@ -527,15 +539,7 @@ validate_hostname :: proc(hostname: string) -> (ok: bool) {
 	return true
 }
 
-parse_record :: proc(
-	packet: []u8,
-	cur_off: ^int,
-	filter: DNS_Record_Type = nil,
-	allocator := context.allocator,
-) -> (
-	record: DNS_Record,
-	ok: bool,
-) {
+parse_record :: proc(packet: []u8, cur_off: ^int, filter: DNS_Record_Type = nil, allocator := context.allocator) -> (record: DNS_Record, ok: bool) {
 	if cur_off == nil {
 		return nil, false
 	}
@@ -549,7 +553,8 @@ parse_record :: proc(
 		return nil, false
 	}
 	if header.type != u16be(filter) {
-		cur_off^ = finish; return nil, true
+		cur_off^ = finish
+		return nil, true
 	}
 	data := packet[data_start:finish]
 	kind := DNS_Record_Type(header.type)
@@ -603,7 +608,8 @@ parse_record :: proc(
 	owned_value: string
 	committed := false
 	defer if !committed {
-		delete(owned_name, allocator); delete(owned_value, allocator)
+		delete(owned_name, allocator)
+		delete(owned_value, allocator)
 	}
 	if kind == .TXT || kind == .CNAME || kind == .NS || kind == .MX || kind == .SRV {
 		value_ok: bool
@@ -659,7 +665,8 @@ parse_record :: proc(
 			port          = (int(data[4]) << 8) | int(data[5]),
 		}
 	}
-	cur_off^ = finish; committed = true
+	cur_off^ = finish
+	committed = true
 	return record, true
 }
 
@@ -686,15 +693,7 @@ parse_record :: proc(
 	- Data[]
 */
 
-parse_response :: proc(
-	response: []u8,
-	filter: DNS_Record_Type = nil,
-	allocator := context.allocator,
-) -> (
-	records: []DNS_Record,
-	xid: u16be,
-	ok: bool,
-) {
+parse_response :: proc(response: []u8, filter: DNS_Record_Type = nil, allocator := context.allocator) -> (records: []DNS_Record, xid: u16be, ok: bool) {
 	HEADER_SIZE_BYTES :: 12
 	if len(response) < HEADER_SIZE_BYTES {
 		return nil, 0, false
@@ -751,7 +750,8 @@ parse_response :: proc(
 			return nil, 0, false
 		}
 		if value != nil {
-			result[used] = value; used += 1
+			result[used] = value
+			used += 1
 		}
 	}
 	if used != matching {

@@ -38,44 +38,20 @@ Connection_Error :: struct {
 // interface does not provide asynchronous execution or concurrent cancellation.
 Connection :: struct {
 	data:               rawptr,
-	read:               proc(
-		data: rawptr,
-		dst: []u8,
-	) -> (
-		int,
-		Connection_Error,
-	),
-	write:              proc(
-		data: rawptr,
-		src: []u8,
-	) -> (
-		int,
-		Connection_Error,
-	),
+	read:               proc(data: rawptr, dst: []u8) -> (int, Connection_Error),
+	write:              proc(data: rawptr, src: []u8) -> (int, Connection_Error),
 	close:              proc(data: rawptr) -> Connection_Error,
 	// Optional. A zero time removes the deadline. As with other operations on
 	// this initial blocking transport, setters must be serialized with I/O.
-	set_read_deadline:  proc(
-		data: rawptr,
-		deadline: time.Time,
-	) -> Connection_Error,
-	set_write_deadline: proc(
-		data: rawptr,
-		deadline: time.Time,
-	) -> Connection_Error,
+	set_read_deadline:  proc(data: rawptr, deadline: time.Time) -> Connection_Error,
+	set_write_deadline: proc(data: rawptr, deadline: time.Time) -> Connection_Error,
 }
 
 connection_valid :: proc(conn: Connection) -> bool {
 	return conn.read != nil && conn.write != nil && conn.close != nil
 }
 
-read_exact :: proc(
-	conn: Connection,
-	dst: []u8,
-) -> (
-	received: int,
-	err: Connection_Error,
-) {
+read_exact :: proc(conn: Connection, dst: []u8) -> (received: int, err: Connection_Error) {
 	if !connection_valid(conn) {
 		return 0, {kind = .Invalid_Connection}
 	}
@@ -83,13 +59,7 @@ read_exact :: proc(
 	return read_exact_callback(Connection_Error, conn.data, dst, conn.read)
 }
 
-write_all :: proc(
-	conn: Connection,
-	src: []u8,
-) -> (
-	written: int,
-	err: Connection_Error,
-) {
+write_all :: proc(conn: Connection, src: []u8) -> (written: int, err: Connection_Error) {
 	if !connection_valid(conn) {
 		return 0, {kind = .Invalid_Connection}
 	}
@@ -109,10 +79,7 @@ set_read_deadline :: proc(conn: Connection, deadline: time.Time) -> Connection_E
 	return conn.set_read_deadline(conn.data, deadline)
 }
 
-set_write_deadline :: proc(
-	conn: Connection,
-	deadline: time.Time,
-) -> Connection_Error {
+set_write_deadline :: proc(conn: Connection, deadline: time.Time) -> Connection_Error {
 	if !connection_valid(conn) do return {kind = .Invalid_Connection}
 
 	if conn.set_write_deadline == nil {
@@ -127,13 +94,11 @@ set_write_deadline :: proc(
 set_deadline :: proc(conn: Connection, deadline: time.Time) -> Connection_Error {
 	if !connection_valid(conn) do return {kind = .Invalid_Connection}
 
-	if conn.set_read_deadline == nil ||
-	   conn.set_write_deadline == nil {
+	if conn.set_read_deadline == nil || conn.set_write_deadline == nil {
 		return {kind = .Deadline_Unsupported}
 	}
 
-	if err := conn.set_read_deadline(conn.data, deadline);
-	   err.kind != .None {
+	if err := conn.set_read_deadline(conn.data, deadline); err.kind != .None {
 		return err
 	}
 
@@ -150,7 +115,10 @@ read_exact_callback :: proc(
 	data: rawptr,
 	dst: []u8,
 	callback: proc(rawptr, []u8) -> (int, E),
-) -> (received: int, err: E) {
+) -> (
+	received: int,
+	err: E,
+) {
 	assert(callback != nil)
 	for received < len(dst) {
 		count, read_err := callback(data, dst[received:])
@@ -169,7 +137,6 @@ read_exact_callback :: proc(
 		if count == 0 {
 			return received, {kind = .No_Progress}
 		}
-
 	}
 	return received, {}
 }
@@ -181,7 +148,10 @@ write_all_callback :: proc(
 	data: rawptr,
 	src: []u8,
 	callback: proc(rawptr, []u8) -> (int, E),
-) -> (written: int, err: E) {
+) -> (
+	written: int,
+	err: E,
+) {
 	assert(callback != nil)
 	for written < len(src) {
 		count, write_err := callback(data, src[written:])
@@ -197,7 +167,6 @@ write_all_callback :: proc(
 		if count == 0 {
 			return written, {kind = .No_Progress}
 		}
-
 	}
 	return written, {}
 }
@@ -232,8 +201,15 @@ connection_stream :: proc(adapter: ^Connection_Stream) -> io.Stream {
 
 @(private)
 connection_stream_proc :: proc(
-	data: rawptr, mode: io.Stream_Mode, p: []byte, offset: i64, whence: io.Seek_From,
-) -> (n: i64, err: io.Error) {
+	data: rawptr,
+	mode: io.Stream_Mode,
+	p: []byte,
+	offset: i64,
+	whence: io.Seek_From,
+) -> (
+	n: i64,
+	err: io.Error,
+) {
 	adapter := cast(^Connection_Stream)data
 	conn := adapter.connection
 	#partial switch mode {
@@ -242,7 +218,9 @@ connection_stream_proc :: proc(
 	case .Read, .Write:
 		adapter.last_error = {}
 		if !connection_valid(conn) {
-			adapter.last_error = {kind = .Invalid_Connection}
+			adapter.last_error = {
+				kind = .Invalid_Connection,
+			}
 			return 0, .Unsupported
 		}
 		if len(p) == 0 do return 0, nil
@@ -253,7 +231,9 @@ connection_stream_proc :: proc(
 			count, adapter.last_error = conn.write(conn.data, p)
 		}
 		if count < 0 || count > len(p) {
-			adapter.last_error = {kind = .Invalid_Count}
+			adapter.last_error = {
+				kind = .Invalid_Count,
+			}
 			return 0, .Unknown if mode == .Read else .Invalid_Write
 		}
 		err = connection_io_error(adapter.last_error)
@@ -261,14 +241,18 @@ connection_stream_proc :: proc(
 			if mode == .Write && count < len(p) {
 				err = .Short_Write
 			} else if mode == .Read && count == 0 {
-				adapter.last_error = {kind = .No_Progress}
+				adapter.last_error = {
+					kind = .No_Progress,
+				}
 				err = .No_Progress
 			}
 		}
 		return i64(count), err
 	case .Close:
 		if !connection_valid(conn) {
-			adapter.last_error = {kind = .Invalid_Connection}
+			adapter.last_error = {
+				kind = .Invalid_Connection,
+			}
 		} else {
 			adapter.last_error = conn.close(conn.data)
 		}
@@ -281,37 +265,47 @@ connection_stream_proc :: proc(
 @(private)
 connection_io_error :: proc(err: Connection_Error) -> io.Error {
 	#partial switch err.kind {
-	case .None: return nil
-	case .Peer_Closed: return .EOF
-	case .Closed: return .Closed
-	case .Invalid_Connection, .Deadline_Unsupported: return .Unsupported
-	case .No_Progress: return .No_Progress
-	case: return .Unknown
+	case .None:
+		return nil
+	case .Peer_Closed:
+		return .EOF
+	case .Closed:
+		return .Closed
+	case .Invalid_Connection, .Deadline_Unsupported:
+		return .Unsupported
+	case .No_Progress:
+		return .No_Progress
+	case:
+		return .Unknown
 	}
 }
 
 
 // Asynchronous connections
 
-Async_Operation_Kind :: enum { Read, Write, Close }
+Async_Operation_Kind :: enum {
+	Read,
+	Write,
+	Close,
+}
 
 Async_Result :: struct {
 	count: int,
-	err: Connection_Error,
+	err:   Connection_Error,
 }
 
 // Caller-owned; keep the operation, its buffer and callback state alive until
 // callback. Result and kind are valid in callback. An operation can be reused
 // or freed there. Do not copy or mutate it while pending.
 Async_Operation :: struct {
-	callback: proc(operation: ^Async_Operation),
+	callback:  proc(operation: ^Async_Operation),
 	user_data: rawptr,
-	kind: Async_Operation_Kind,
-	result: Async_Result,
-	pending: bool,
+	kind:      Async_Operation_Kind,
+	result:    Async_Result,
+	pending:   bool,
 	// Implementation-owned while pending.
-	_owner: rawptr,
-	_backend: rawptr,
+	_owner:    rawptr,
+	_backend:  rawptr,
 }
 
 // Asynchronous byte stream. Calls and callbacks belong to one owning event-loop
@@ -329,18 +323,34 @@ Async_Operation :: struct {
 // then calls its callback. State may be freed in that callback. A completed
 // operation may succeed even when cancellation or close was requested.
 Async_Connection :: struct {
-	data: rawptr,
-	submit: proc(data: rawptr, op: ^Async_Operation, kind: Async_Operation_Kind, buffer: []u8, deadline: time.Time) -> Connection_Error,
+	data:   rawptr,
+	submit: proc(
+		data: rawptr,
+		op: ^Async_Operation,
+		kind: Async_Operation_Kind,
+		buffer: []u8,
+		deadline: time.Time,
+	) -> Connection_Error,
 	cancel: proc(data: rawptr, op: ^Async_Operation) -> Connection_Error,
 }
 
-async_read :: proc(conn: Async_Connection, op: ^Async_Operation, dst: []u8, deadline := time.Time{}) -> Connection_Error {
+async_read :: proc(
+	conn: Async_Connection,
+	op: ^Async_Operation,
+	dst: []u8,
+	deadline := time.Time{},
+) -> Connection_Error {
 	return async_submit(conn, op, .Read, dst, deadline)
 }
 
 // Completes when all bytes are written or a terminal error occurs. count
 // includes any bytes transferred before cancellation, close or timeout.
-async_write :: proc(conn: Async_Connection, op: ^Async_Operation, src: []u8, deadline := time.Time{}) -> Connection_Error {
+async_write :: proc(
+	conn: Async_Connection,
+	op: ^Async_Operation,
+	src: []u8,
+	deadline := time.Time{},
+) -> Connection_Error {
 	return async_submit(conn, op, .Write, src, deadline)
 }
 
@@ -358,7 +368,13 @@ async_cancel :: proc(conn: Async_Connection, op: ^Async_Operation) -> Connection
 }
 
 @(private)
-async_submit :: proc(conn: Async_Connection, op: ^Async_Operation, kind: Async_Operation_Kind, buffer: []u8, deadline: time.Time) -> Connection_Error {
+async_submit :: proc(
+	conn: Async_Connection,
+	op: ^Async_Operation,
+	kind: Async_Operation_Kind,
+	buffer: []u8,
+	deadline: time.Time,
+) -> Connection_Error {
 	if conn.submit == nil do return {kind = .Invalid_Connection}
 	if op == nil || op.callback == nil do return {kind = .Invalid_Operation}
 	if op.pending do return {kind = .Operation_Pending}
@@ -370,6 +386,6 @@ async_submit :: proc(conn: Async_Connection, op: ^Async_Operation, kind: Async_O
 // the loop is alive. It borrows callback state until invocation. Calls belong to
 // the loop's thread. Protocol adapters use this for buffered/local completions.
 Async_Executor :: struct {
-	data: rawptr,
+	data:     rawptr,
 	schedule: proc(data: rawptr, callback: proc(rawptr), user_data: rawptr),
 }

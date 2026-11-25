@@ -7,30 +7,13 @@ import "core:sys/posix"
 // OS timeout after each partial send. One syscall lets write_all refresh an
 // absolute deadline between partial sends. Keep core:net for socket setup.
 @(private)
-tcp_send_once :: proc(
-	socket: TCP_Socket,
-	src: []u8,
-) -> (
-	int,
-	TCP_Send_Error,
-) {
+tcp_send_once :: proc(socket: TCP_Socket, src: []u8) -> (int, TCP_Send_Error) {
 
-	count := posix.send(
-		cast(posix.FD)socket,
-		raw_data(src),
-		cast(uint)min(len(src), cast(int)max(i32)),
-		{.NOSIGNAL},
-	)
+	count := posix.send(cast(posix.FD)socket, raw_data(src), cast(uint)min(len(src), cast(int)max(i32)), {.NOSIGNAL})
 	if count >= 0 do return count, nil
 
 	#partial switch posix.errno() {
-	case .EACCES,
-	     .EBADF,
-	     .EFAULT,
-	     .EMSGSIZE,
-	     .ENOTSOCK,
-	     .EOPNOTSUPP,
-	     .EINVAL:
+	case .EACCES, .EBADF, .EFAULT, .EMSGSIZE, .ENOTSOCK, .EOPNOTSUPP, .EINVAL:
 		return 0, .Invalid_Argument
 	case .ENOBUFS, .ENOMEM:
 		return 0, .Insufficient_Resources

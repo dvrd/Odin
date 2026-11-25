@@ -15,13 +15,13 @@ deadline_socket_timeout_never_disables_positive_wait :: proc(t: ^testing.T) {
 @(test)
 deadline_expired_operations_fail_without_io :: proc(t: ^testing.T) {
 	past := time.time_add(time.now(), -time.Second)
-	_, dial_error := dial_tcp_until({address=IP4_Address{127,0,0,1},port=80},past)
-	testing.expect(t,dial_error == Network_Error(Dial_Error.Timeout))
-	_, dns_error := get_dns_records_from_nameservers_until("fixture.invalid",.IP4,nil,nil,past)
+	_, dial_error := dial_tcp_until({address = IP4_Address{127, 0, 0, 1}, port = 80}, past)
+	testing.expect(t, dial_error == Network_Error(Dial_Error.Timeout))
+	_, dns_error := get_dns_records_from_nameservers_until("fixture.invalid", .IP4, nil, nil, past)
 	// Empty nameserver list is valid but an expired caller deadline still wins.
-	testing.expect(t,dns_error == .Timeout)
-	_, resolve_error := resolve_endpoint_until("127.0.0.1",80,past)
-	testing.expect(t,resolve_error == Network_Error(DNS_Error.Timeout))
+	testing.expect(t, dns_error == .Timeout)
+	_, resolve_error := resolve_endpoint_until("127.0.0.1", 80, past)
+	testing.expect(t, resolve_error == Network_Error(DNS_Error.Timeout))
 }
 
 @(test)

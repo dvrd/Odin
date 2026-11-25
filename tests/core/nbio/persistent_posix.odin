@@ -65,15 +65,10 @@ socket_registrations_survive_changelist_overflow :: proc(t: ^testing.T) {
 		for &pair, i in pairs {
 			assert(posix.socketpair(.UNIX, .STREAM, posix.Protocol(0), &pair) == .OK)
 			assert(nbio.associate_socket(net.TCP_Socket(pair[0])) == nil)
-			nbio.recv_poly(
-				net.TCP_Socket(pair[0]),
-				{buffers[i][:]},
-				&calls,
-				proc(op: ^nbio.Operation, calls: ^int) {
-					assert(op.recv.err == nil && op.recv.received == 1)
-					calls^ += 1
-				},
-			)
+			nbio.recv_poly(net.TCP_Socket(pair[0]), {buffers[i][:]}, &calls, proc(op: ^nbio.Operation, calls: ^int) {
+				assert(op.recv.err == nil && op.recv.received == 1)
+				calls^ += 1
+			})
 		}
 		assert(nbio.tick(0) == nil)
 		value := byte(42)

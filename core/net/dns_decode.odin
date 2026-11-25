@@ -31,14 +31,7 @@ decode_hostname :: proc(
 }
 
 @(private)
-dns_name_read :: proc(
-	packet: []u8,
-	start: int,
-	output: []u8,
-) -> (
-	decoded, encoded: int,
-	ok: bool,
-) {
+dns_name_read :: proc(packet: []u8, start: int, output: []u8) -> (decoded, encoded: int, ok: bool) {
 	if start < 0 || start >= len(packet) {
 		return 0, 0, false
 	}
@@ -72,7 +65,8 @@ dns_name_read :: proc(
 			if !jumped {
 				encoded += 2
 			}
-			jumped = true; cursor = target
+			jumped = true
+			cursor = target
 			continue
 		}
 		if value > LABEL_MAX {
@@ -85,7 +79,7 @@ dns_name_read :: proc(
 		expanded += size + 1
 		if expanded >= NAME_MAX {
 			return 0, 0, false
-		} 	// Reserve the terminating zero.
+		} // Reserve the terminating zero.
 		separator := int(labels > 0)
 		if decoded > NAME_MAX - size - separator {
 			return 0, 0, false
@@ -103,7 +97,8 @@ dns_name_read :: proc(
 		if !jumped {
 			encoded += size + 1
 		}
-		cursor += size + 1; labels += 1
+		cursor += size + 1
+		labels += 1
 	}
 	return 0, 0, false
 }
