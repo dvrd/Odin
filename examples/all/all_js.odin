@@ -10,7 +10,6 @@ package all
 
 @(require) import "core:compress"
 @(require) import "core:compress/shoco"
-// @(require) import "core:compress/brotli"
 // @(require) import "core:compress/gzip"
 @(require) import "core:compress/zlib"
 @(require) import "core:compress/bzip2"
