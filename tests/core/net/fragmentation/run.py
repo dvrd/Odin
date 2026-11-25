@@ -7,7 +7,7 @@ CORE=HERE.parents[3]
 SHARED=CORE.parent/'shared'
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def sources():
-    roots=[CORE/'core',CORE/'base',CORE/'vendor',CORE/'tests/core/crypto/tls/testdata',SHARED/'async']
+    roots=[CORE/'core',CORE/'base',CORE/'vendor',SHARED/'async']
     return {str(p):sha(p) for root in roots for p in sorted(root.rglob('*')) if p.is_file() and (p.suffix in ('.odin','.py','.c','.h','.s','.S') or 'testdata' in p.parts) and '.git' not in p.parts and '__pycache__' not in p.parts}
 def main():
     p=argparse.ArgumentParser();p.add_argument('--odin',type=Path,required=True);p.add_argument('--cc',default='clang');p.add_argument('--sanitize',choices=['address','thread'],required=True);p.add_argument('--report',type=Path,required=True);a=p.parse_args()
@@ -23,7 +23,7 @@ def main():
     try:
         report['compiler_version']=run([a.odin,'version']).strip()
         names=['udp_fragmentation_policy_sets_queries_and_preserves_ecn','udp_fragmentation_ipv6_preserves_explicit_single_and_dual_stack','udp_fragmentation_rejects_invalid_family_descriptor_and_tcp','udp_fragmentation_mapped_ipv4_ecn_send_and_receive']
-        packages=[(CORE/'core/net',','.join(names)),(SHARED/'async','udp_fragmentation_borrow_checks_kind_generation_and_closure'),(CORE/'core/net/quic/sim/tests','conn_udp_facade_configures_each_borrowed_socket_generation')]
+        packages=[(CORE/'core/net',','.join(names)),(SHARED/'async','udp_fragmentation_borrow_checks_kind_generation_and_closure')]
         for index,(package,selection) in enumerate(packages):
             run([a.odin,'test',package,f'-collection:shared={SHARED}','-warnings-as-errors','-vet',f'-sanitize:{a.sanitize}',f'-define:ODIN_TEST_NAMES={selection}','-define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true','-keep-executable',f'-out:{prefix}.test{index}'])
         probe=Path(str(prefix)+'.probe');peer=Path(str(prefix)+'.peer')

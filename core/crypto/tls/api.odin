@@ -5,6 +5,7 @@ import "core:io"
 import "core:net"
 import "core:time"
 import "core:sync"
+import "core:sync/chan"
 
 // Error is the common error returned from all TLS calls.
 Error :: union #shared_nil {
@@ -12,7 +13,6 @@ Error :: union #shared_nil {
 	io.Error,
 	net.TCP_Send_Error,
 	net.TCP_Recv_Error,
-	net.Dial_Error,
 
 	General_Error,
 	Protocol_Error,
@@ -59,29 +59,6 @@ General_Error :: enum {
 	Invalid_SNI_Hostname,
 	Failed_Key_Share_Generation,
 	Unsupported_Client_Certificate_Requested,
-
-	// The connection is not in a state that allows the call.
-	Invalid_State,
-	// A setting in the Config is missing, malformed or contradicts another.
-	Invalid_Config,
-	// No trust roots were given, or one of them could not be used.
-	Invalid_Trust_Roots,
-	// The host name could not be resolved to an address.
-	Name_Resolution_Failed,
-	// The operation was cancelled before it completed.
-	Cancelled,
-	// The transport under the connection has no deadlines.
-	Deadline_Unsupported,
-	// A configured bound on memory, size or count was reached.
-	Limit_Exceeded,
-	// The system could not supply random bytes.
-	Entropy_Unavailable,
-	// The clock could not be read, or ran backwards.
-	Clock_Unavailable,
-	// Early data was refused: replayed, expired or not allowed here.
-	Early_Data_Rejected,
-	// The local certificate or its private key could not be used.
-	Credential_Failed,
 }
 
 // Socket is a TLS socket.  It MUST NOT be copied as the internal state
@@ -99,33 +76,16 @@ Socket_State :: struct {
 	err:      Error,
 	err_lock: sync.Benaphore,
 
-	// The client engine behind the socket, owned from a successful
-	// handshake until close.
-	conn: ^Conn,
+	secrets: Connection_Secrets,
 
 	rx_closed:  bool,
 	handshaked: bool,
-	// Set by close before it shuts the connection down: what a blocked
-	// send or recv then fails with is the close, not an error.
-	closing:    bool,
-	// The peer asked for new keys in the send direction: recv notes
-	// it here, and the sender answers before its next record.
-	key_update_owed: bool,
-	// The peer has used its key for too long without replacing it: recv
-	// notes it here, once for each generation of that key, and the sender
-	// asks the peer to rekey.
-	peer_key_update_owed:  bool,
-	peer_key_update_asked: bool,
-	peer_key_update_gen:   u64,
-	// A direction that ended without an error to report: its calls
-	// fail with `io.Error.Unknown`.
-	rx_dead: bool,
-	tx_dead: bool,
 
-	// send and recv may be called from two threads at once: each
-	// direction of the engine is serialized by its own lock.
-	tx_lock: sync.Mutex,
-	rx_lock: sync.Mutex,
+	done:         sync.Wait_Group,
+	tx_chan:      chan.Chan(Worker_Req),
+	tx_resp_chan: chan.Chan(Worker_Resp),
+	rx_chan:      chan.Chan(Worker_Req),
+	rx_resp_chan: chan.Chan(Worker_Resp),
 
 	allocator: runtime.Allocator,
 }
@@ -133,15 +93,12 @@ Socket_State :: struct {
 // Stream is a handshaked Socket wrapped in an `io.Stream`.
 Stream :: io.Stream
 
-// close closes a Socket (`socket_close`) or a Conn (`conn_close`).
-close :: proc{socket_close, conn_close}
-
 // close will close a Socket, and release related resources.  This will
 // also close the underlying TCP socket.
 //
 // Warning: Once a Socket is successfully initialized, close MUST be
 // called to free resources and sanitize secrets.
-socket_close :: proc(socket: ^Socket, max_close_wait := 100 * time.Millisecond) {
+close :: proc(socket: ^Socket, max_close_wait := 100 * time.Millisecond) {
 	orig_err := socket_error(socket)
 	switch orig_err {
 	case nil:
@@ -154,16 +111,40 @@ socket_close :: proc(socket: ^Socket, max_close_wait := 100 * time.Millisecond) 
 		net.close(socket.fd)
 
 		socket.fd = net.TCP_Socket{}
+		clear_connection_secrets(&socket._state.secrets)
 
 		socket_set_error(socket, orig_err)
 		return
 	}
 
-	// Wait for send/recv calls on other threads to leave the engine,
-	// then close it: Close_Notify, and the TCP socket.
-	socket_engine_close(socket, max_close_wait)
+	// Try to send a Close_Notify.
+	worker_send_alert(socket, .Close_Notify)
+
+	// Close the channels so the worker threads will terminate,
+	// assuming they are not blocked on send/recv.
+	chan.close(socket._state.tx_chan)
+	chan.close(socket._state.rx_chan)
+
+	// Wait for the workers to terminate.
+	ok := sync.wait_with_timeout(&socket._state.done, max_close_wait)
+
+	// Well, we waited, yeet the socket.
+	net.close(socket.fd)
+
+	if !ok {
+		// The threads did not terminate when we closed the channels,
+		// so they must have been blocked on send/recv.  Now that the
+		// socket got yeeted off to Narnia to chill with the Lion,
+		// we can wait, because the threads will error out.
+		sync.wait(&socket._state.done)
+	}
 
 	socket.fd = net.TCP_Socket{}
+	clear_connection_secrets(&socket._state.secrets)
+	chan.destroy(socket._state.tx_chan)
+	chan.destroy(socket._state.tx_resp_chan)
+	chan.destroy(socket._state.rx_chan)
+	chan.destroy(socket._state.rx_resp_chan)
 	socket._state.handshaked = false
 
 	// Restore the original error, or set it to Closed.
@@ -187,7 +168,29 @@ send :: proc(socket: ^Socket, buf: []byte) -> (n: int, err: Error) {
 		return
 	}
 
-	return socket_engine_send(socket, buf)
+	req := Worker_Req{
+		op = .Transfer,
+		data = buf,
+	}
+	if !chan.send(socket._state.tx_chan, req) {
+		err = socket_error(socket)
+		if err == nil {
+			err = io.Error.Unknown
+		}
+		return
+	}
+
+	resp, ok := chan.recv(socket._state.tx_resp_chan)
+	if !ok {
+		// Unlikely to happen.
+		err = socket_error(socket)
+		if err == nil {
+			err = io.Error.Unknown
+		}
+		return
+	}
+
+	return resp.n, resp.err
 }
 
 // recv receives data from an established Socket into the provided buffer,
@@ -214,12 +217,33 @@ recv :: proc(socket: ^Socket, buf: []byte) -> (n: int, err: Error) {
 		return 0, nil
 	}
 
-	n, err = socket_engine_recv(socket, buf)
-	if err == Protocol_Error.Close_Notify {
+	req := Worker_Req{
+		op = .Transfer,
+		data = buf,
+	}
+	if !chan.send(socket._state.rx_chan, req) {
+		err = socket_error(socket)
+		if err == nil {
+			err = io.Error.Unknown
+		}
+		return
+	}
+
+	resp, ok := chan.recv(socket._state.rx_resp_chan)
+	if !ok {
+		// Should NEVER happen.
+		err = socket_error(socket)
+		if err == nil {
+			err = io.Error.Unknown
+		}
+		return
+	}
+
+	if resp.err == Protocol_Error.Close_Notify {
 		socket._state.rx_closed = true
 	}
 
-	return
+	return resp.n, resp.err
 }
 
 // socket_error returns the error status of a Socket.
@@ -274,7 +298,7 @@ stream_proc :: proc(
 	case .Flush:
 		return 0, nil
 	case .Close, .Destroy:
-		socket_close(socket)
+		close(socket)
 		return 0, nil
 	case .Query:
 		return io.query_utility({.Read, .Write, .Flush, .Close, .Destroy, .Query})

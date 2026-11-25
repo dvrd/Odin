@@ -1,9 +1,12 @@
 #+private
 package tls
 
+import "base:intrinsics"
+import "core:bytes"
 import "core:crypto/aead"
 import "core:crypto/hash"
 import "core:crypto/x509"
+import "core:encoding/endian"
 
 TLS10_PROTOCOL_VERSION : u16 : 0x0301
 TLS12_PROTOCOL_VERSION : u16 : 0x0303
@@ -423,4 +426,454 @@ alert_to_level :: proc(alert: Alert_Description) -> Alert_Level {
 	case:
 		return .Fatal
 	}
+}
+
+@(require_results)
+buffer_recv_raw_record :: proc(
+	buf:                   ^Buffer,
+	socket:                ^Socket,
+	expected_content_type: Content_Type = .Application_Data,
+	protected:             bool = false,
+) -> (content_type: Content_Type, err: Error) {
+	buffer_clear(buf)
+
+	// Read the record header.
+	buffer_write_recv(buf, socket.fd, TLS_RECORD_HEADER_SIZE) or_return
+
+	// Validate the content_type.
+	content_type = Content_Type(buffer_unchecked_read_u8(buf))
+	#partial switch content_type {
+	case .Alert, .Change_Cipher_Spec, .Handshake, .Application_Data:
+	case:
+		content_type = .Invalid
+		return content_type, Protocol_Error.Unexpected_Message
+	}
+
+	// Ignore the legacy_protocol_version, till we support TLS 1.2,
+	// in which case we care about it for the ServerHello.
+	_ = buffer_unchecked_read_u16(buf)
+
+	// Parse the length.
+	length := int(buffer_unchecked_read_u16(buf))
+	max_len := protected ? TLS13_MAX_RECORD_SIZE + TLS13_MAX_AEAD_OVERHEAD : TLS13_MAX_RECORD_SIZE
+	if length > max_len {
+		return .Invalid, Protocol_Error.Record_Overflow
+	}
+
+	// Read the payload.
+	buffer_write_recv(buf, socket.fd, length) or_return
+
+	if content_type != expected_content_type {
+		err = Protocol_Error.Unexpected_Message
+	}
+
+	return
+}
+
+@(require_results)
+buffer_recv_unprotected_handshake_record :: proc(
+	buf:            ^Buffer,
+	socket:         ^Socket,
+	handshake_type: Handshake_Type,
+) -> (content_type: Content_Type, err: Error) {
+	tmp: [TLS13_MAX_RECORD_SIZE]byte
+	tmp_buf: Buffer
+	buffer_init(&tmp_buf, tmp[:])
+
+	content_type = buffer_recv_raw_record(buf, socket, .Handshake) or_return
+
+	// Ensure we have up to the length field.
+	if buffer_unread_len(buf) < 1 + 3 {
+		return .Invalid, Protocol_Error.Decode_Error
+	}
+
+	if Handshake_Type(buffer_unchecked_read_u8(buf)) != handshake_type {
+		return .Invalid, Protocol_Error.Unexpected_Message
+	}
+
+	// Fast path for non-fragmented responses.
+	payload_len := buffer_unchecked_read_u24(buf)
+	if buffer_unread_len(buf) == payload_len {
+		return
+	}
+
+	// We limit the size of unprotected records to that of a single
+	// maximum sized TLS 1.3 record.
+	if payload_len > buffer_available(buf) {
+		return content_type, Protocol_Error.Decode_Error
+	}
+
+	// Receive additional records.
+	for payload_len != 0 {
+		content_type_ := buffer_recv_raw_record(&tmp_buf, socket, .Handshake) or_return
+		if content_type_ != content_type {
+			return content_type_, Protocol_Error.Unexpected_Message
+		}
+
+		l := buffer_unread_len(&tmp_buf)
+		if l > payload_len {
+			return .Invalid, Protocol_Error.Decode_Error
+		}
+
+		buffer_pullup(buf, &tmp_buf) or_return
+
+		payload_len -= l
+	}
+
+	return
+}
+
+@(require_results)
+buffer_send_change_cipher_spec :: proc(socket: ^Socket) -> (err: Error) {
+	ccs_data: [TLS_RECORD_HEADER_SIZE+1]byte = ---
+	buf: Buffer
+
+	buffer_init(&buf, ccs_data[:])
+	buffer_unchecked_write_u8(&buf, u8(Content_Type.Change_Cipher_Spec))
+	buffer_unchecked_write_u16(&buf, TLS12_PROTOCOL_VERSION)
+	buffer_unchecked_write_u16(&buf, 1)
+
+	buffer_unchecked_write_u8(&buf, 0x01)
+
+	return buffer_send(&buf, socket.fd)
+}
+
+buffer_send_early_alert :: proc(
+	socket: ^Socket,
+	alert:  Alert_Description,
+) -> (err: Error) {
+	alert_data: [TLS_RECORD_HEADER_SIZE+2]byte = ---
+	buf: Buffer
+
+	buffer_init(&buf, alert_data[:])
+	buffer_unchecked_write_u8(&buf, u8(Content_Type.Alert))
+	buffer_unchecked_write_u16(&buf, TLS12_PROTOCOL_VERSION)
+	buffer_unchecked_write_u16(&buf, 2)
+
+	buffer_unchecked_write_u8(&buf, u8(alert_to_level(alert)))
+	buffer_unchecked_write_u8(&buf, u8(alert))
+
+	return buffer_send(&buf, socket.fd)
+}
+
+buffer_send_alert :: proc(
+	buf:    ^Buffer,
+	socket: ^Socket,
+	alert:  Alert_Description,
+) -> (err: Error) {
+	PAYLOAD_SIZE :: 2
+
+	buffer_clear(buf)
+	buffer_check_write(buf, TLS_RECORD_HEADER_SIZE + PAYLOAD_SIZE + TLS13_AEAD_OVERHEAD) or_return
+	buffer_unchecked_write_u8(buf, u8(Content_Type.Application_Data))
+	buffer_unchecked_write_u16(buf, TLS12_PROTOCOL_VERSION)
+	buffer_unchecked_write_u16(buf, PAYLOAD_SIZE + TLS13_AEAD_OVERHEAD)
+
+	buffer_unchecked_write_u8(buf, u8(alert_to_level(alert)))
+	buffer_unchecked_write_u8(buf, u8(alert))
+	buffer_unchecked_write_u8(buf, u8(Content_Type.Alert))
+
+	return buffer_send_record(buf, socket)
+}
+
+buffer_send_key_update :: proc(
+	buf:              ^Buffer,
+	socket:           ^Socket,
+	update_requested: Key_Update_Request,
+) -> (err: Error) {
+	PAYLOAD_SIZE :: 1 + 3 + 1
+
+	buffer_clear(buf)
+	buffer_check_write(buf, TLS_RECORD_HEADER_SIZE + PAYLOAD_SIZE + TLS13_AEAD_OVERHEAD) or_return
+	buffer_unchecked_write_u8(buf, u8(Content_Type.Application_Data))
+	buffer_unchecked_write_u16(buf, TLS12_PROTOCOL_VERSION)
+	buffer_unchecked_write_u16(buf, PAYLOAD_SIZE + TLS13_AEAD_OVERHEAD)
+
+	buffer_unchecked_write_u8(buf, u8(Handshake_Type.Key_Update))
+	buffer_unchecked_write_u24(buf, 1)
+	buffer_unchecked_write_u8(buf, u8(update_requested))
+	buffer_unchecked_write_u8(buf, u8(Content_Type.Handshake))
+
+	return buffer_send_record(buf, socket)
+}
+
+@(require_results)
+buffer_send_finished :: proc(
+	buf:             ^Buffer,
+	socket:          ^Socket,
+	transcript_hash: ^hash.Context,
+) -> (err: Error) {
+	tmp: [hash.MAX_DIGEST_SIZE]byte = ---
+	secrets := &socket._state.secrets
+
+	hash_len := hash.DIGEST_SIZES[secrets.hash]
+
+	verify_data := tmp[:hash_len]
+
+	derive_connection_finished(secrets, transcript_hash, verify_data, socket._state.secrets.is_client)
+
+	payload_size := 3 + 1 + hash_len
+
+	buffer_clear(buf)
+	buffer_check_write(buf, TLS_RECORD_HEADER_SIZE + payload_size + TLS13_AEAD_OVERHEAD) or_return
+	buffer_unchecked_write_u8(buf, u8(Content_Type.Application_Data))
+	buffer_unchecked_write_u16(buf, TLS12_PROTOCOL_VERSION)
+	buffer_unchecked_write_u16(buf, u16(payload_size + TLS13_AEAD_OVERHEAD))
+
+	buffer_unchecked_write_u8(buf, u8(Handshake_Type.Finished))
+	buffer_unchecked_write_u24(buf, hash_len)
+	buffer_unchecked_write_bytes(buf, verify_data)
+	buffer_unchecked_write_u8(buf, u8(Content_Type.Handshake))
+
+	return buffer_send_record(buf, socket)
+}
+
+@(require_results)
+buffer_send_empty_certificate :: proc(
+	buf:         ^Buffer,
+	socket:      ^Socket,
+	request_ctx: []byte,
+) -> (err: Error) {
+	payload_size := 1 + 1 + len(request_ctx) + 3
+
+	buffer_clear(buf)
+	buffer_check_write(buf, TLS_RECORD_HEADER_SIZE + payload_size + TLS13_AEAD_OVERHEAD) or_return
+	buffer_unchecked_write_u8(buf, u8(Content_Type.Application_Data))
+	buffer_unchecked_write_u16(buf, TLS12_PROTOCOL_VERSION)
+	buffer_unchecked_write_u16(buf, u16(payload_size + TLS13_AEAD_OVERHEAD))
+
+	buffer_unchecked_write_u8(buf, u8(Handshake_Type.Certificate))
+	buffer_unchecked_write_u8(buf, u8(len(request_ctx)))
+	buffer_unchecked_write_bytes(buf, request_ctx)
+	buffer_unchecked_write_u24(buf, 0)
+	buffer_unchecked_write_u8(buf, u8(Content_Type.Handshake))
+
+	return buffer_send_record(buf, socket)
+}
+
+@(require_results)
+buffer_read_handshake_msg :: proc(
+	buf:                      ^Buffer,
+	record_buf:               ^Buffer,
+	socket:                   ^Socket,
+	is_client:                bool,
+	allow_change_cipher_spec: ^bool,
+) -> (msg: []byte, err: Error) {
+	MSG_HDR_SIZE :: 4 // `HandshakeType` + `length`
+
+	for {
+		// The accumulator buffer has data.
+		if l := buffer_unread_len(buf); l >= MSG_HDR_SIZE {
+			msg = buffer_unread_bytes(buf)
+			// msg_type := msg[0]
+			msg_len := int(endian.unchecked_get_unsigned_be(msg[1:], 24))
+			n := MSG_HDR_SIZE + msg_len
+			if n >= msg_len {
+				return buffer_unchecked_read_skip(buf, n), nil
+			}
+		}
+
+		for {
+			content_type: Content_Type
+			send_alert: bool
+			content_type, err, send_alert = buffer_recv_handshake_record(
+				record_buf,
+				socket,
+				is_client,
+				allow_change_cipher_spec^,
+			)
+			if err != nil {
+				if send_alert {
+					buffer_send_alert(record_buf, socket, error_to_alert(err))
+				}
+				return
+			}
+			if content_type == .Change_Cipher_Spec {
+				allow_change_cipher_spec^ = false
+				continue
+			}
+			if err = buffer_pullup(buf, record_buf); err != nil {
+				buffer_send_alert(record_buf, socket, .Internal_Error)
+			}
+			break
+		}
+	}
+}
+
+@(require_results)
+buffer_recv_handshake_record :: proc(
+	buf:                      ^Buffer,
+	socket:                   ^Socket,
+	is_client:                bool,
+	allow_change_cipher_spec: bool,
+) -> (content_type: Content_Type, err: Error, send_alert: bool) {
+	content_type, err = buffer_recv_record(buf, socket, true, allow_change_cipher_spec)
+	if err != nil {
+		if content_type == .Alert {
+			return .Alert, err, false
+		}
+
+		return .Invalid, err, true
+	}
+	#partial switch content_type {
+	case .Handshake:
+	case .Change_Cipher_Spec:
+		return
+	case:
+		return content_type, Protocol_Error.Unexpected_Message, true
+	}
+
+	if buffer_unread_len(buf) < 1 {
+		return content_type, Protocol_Error.Decode_Error, true
+	}
+	_ = buffer_trim(buf, 1) // Trim off the `content_type`.
+
+	// RFC 9846 5.4
+	//
+	//  Implementations MUST NOT send Handshake and Alert records
+	//  that have a zero-length TLSInnerPlaintext.content; if such
+	//  a message is received, the receiving implementation MUST
+	//  terminate the connection with an "unexpected_message" alert.
+	if buffer_unread_len(buf) == 0 {
+		return content_type, Protocol_Error.Unexpected_Message, true
+	}
+
+	return
+}
+
+@(require_results)
+buffer_recv_record :: proc(
+	buf:                      ^Buffer,
+	socket:                   ^Socket,
+	is_client:                bool,
+	allow_change_cipher_spec: bool = false,
+) -> (content_type: Content_Type, err: Error) {
+	content_type, err = buffer_recv_raw_record(buf, socket, .Application_Data, true)
+	if err != nil {
+		// Each side is allowed to send a single ChangeCipherSpec
+		// between the ClientHello/ServerHello and Finished.
+		if intrinsics.unlikely(err == Protocol_Error.Unexpected_Message && content_type == .Change_Cipher_Spec && allow_change_cipher_spec) {
+			if buffer_unread_len(buf) != 1 {
+				return content_type, Protocol_Error.Decode_Error
+			}
+			if buffer_unchecked_read_u8(buf) != 0x01 {
+				return content_type, Protocol_Error.Illegal_Parameter
+			}
+
+			return content_type, nil
+		}
+
+		return
+	}
+
+	// Decrypt.
+	aead_state: ^Aead_State
+	switch is_client {
+	case true:
+		aead_state = &socket._state.secrets.server_aead
+	case false:
+		aead_state = &socket._state.secrets.client_aead
+	}
+
+	aad := buffer_bytes(buf)[:TLS_RECORD_HEADER_SIZE]
+	payload := buffer_bytes_at(buf, TLS_RECORD_HEADER_SIZE)
+	payload_len := len(payload) - AEAD_TAG_SIZE
+	if payload_len <= 0 {
+		// Need at least one payload byte for the content
+		// type.
+		return .Invalid, Protocol_Error.Decode_Error
+	}
+
+	tag := payload[payload_len:]
+	payload = payload[:payload_len]
+
+	iv: [AEAD_IV_SIZE]byte
+	endian.unchecked_put_u64be(iv[4:], aead_state.seq)
+	for v, i in aead_state.iv {
+		if i < 4 {
+			iv[i] = v
+		} else {
+			iv[i] ~= v
+		}
+	}
+
+	ok := aead.open(&aead_state.ctx, payload, iv[:], aad, payload, tag)
+	if !ok {
+		return .Invalid, Protocol_Error.Bad_Record_Mac
+	}
+
+	// See if we ran out of secure sequence number space.  This should
+	// not happen because we proactively request a re-key well in advance.
+	//
+	// Note: We do lose a record, but the amount of data transfered
+	// needed to hit this point is astronomical.
+	if aead_state.seq += 1; aead_state.seq == AEAD_ABORT_SEQ[socket._state.secrets.aead] {
+		return .Invalid, Protocol_Error.Internal_Error
+	}
+
+	// Trim the tag.
+	_ = buffer_trim(buf, AEAD_TAG_SIZE)
+
+	// Find the actual Content_Type (last non-zero byte in the
+	// protected payload), and trim off the padding.
+	payload = bytes.trim_right(payload, []byte{0x00})
+	l := len(payload)
+	if l == 0 {
+		return .Invalid, Protocol_Error.Bad_Record_Mac
+	}
+	_ = buffer_trim(buf, payload_len - l)
+
+	content_type = Content_Type(payload[l-1])
+	if content_type == .Alert {
+		if buffer_unread_len(buf) == 3 {
+			return .Alert, alert_to_error(
+				Alert_Level(buffer_unchecked_read_u8(buf)),
+				Alert_Description(buffer_unchecked_read_u8(buf)),
+			)
+		}
+		return .Invalid, Protocol_Error.Bad_Record_Mac
+	}
+
+	return
+}
+
+@(require_results)
+buffer_send_record :: proc(buf: ^Buffer, socket: ^Socket) -> (err: Error) {
+	// Encrypt.
+	aead_state: ^Aead_State
+	switch socket._state.secrets.is_client {
+	case true:
+		aead_state = &socket._state.secrets.client_aead
+	case false:
+		aead_state = &socket._state.secrets.server_aead
+	}
+
+	aad := buffer_bytes(buf)[:TLS_RECORD_HEADER_SIZE]
+	payload := buffer_bytes_at(buf, TLS_RECORD_HEADER_SIZE)
+
+	iv: [AEAD_IV_SIZE]byte
+	endian.unchecked_put_u64be(iv[4:], aead_state.seq)
+	for v, i in aead_state.iv {
+		if i < 4 {
+			iv[i] = v
+		} else {
+			iv[i] ~= v
+		}
+	}
+
+	tag: [AEAD_TAG_SIZE]byte = ---
+	aead.seal(&aead_state.ctx, payload, tag[:], iv[:], aad, payload)
+
+	// See if we ran out of secure sequence number space.  This should
+	// not happen because we proactively re-key well in advance.
+	//
+	// Note: We do lose a record, but the amount of data transfered
+	// needed to hit this point is astronomical.
+	if aead_state.seq += 1; aead_state.seq == AEAD_ABORT_SEQ[socket._state.secrets.aead] {
+		return Protocol_Error.Internal_Error
+	}
+
+	buffer_write_bytes(buf, tag[:]) or_return
+
+	return buffer_send(buf, socket.fd)
 }
