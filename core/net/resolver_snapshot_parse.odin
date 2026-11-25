@@ -2,7 +2,6 @@
 package net
 
 import "core:mem"
-import "core:os"
 import "core:strings"
 import posix "core:sys/posix"
 
@@ -94,11 +93,11 @@ resolver_snapshot_parse :: proc(
 	Resolver_Snapshot_Error,
 ) {
 	if temporary.procedure == nil {
-		return nil, nil, {kind = .Invalid_Config}
+		return nil, nil, .Invalid_Config
 	}
 	if !resolver_snapshot_lines_fit(resolv, limits.line_bytes) ||
 	   !resolver_snapshot_lines_fit(hosts, limits.line_bytes) {
-		return nil, nil, {kind = .Limit_Exceeded}
+		return nil, nil, .Limit_Exceeded
 	}
 	state := Resolver_Snapshot_Parse_Allocator {
 		backing = temporary,
@@ -106,39 +105,39 @@ resolver_snapshot_parse :: proc(
 	allocator := mem.Allocator{resolver_snapshot_parse_allocator, &state}
 	servers := parse_resolv_conf(string(resolv), allocator)
 	if state.failed {
-		return nil, nil, {kind = .Allocation_Failed, allocation = state.cause}
+		return nil, nil, .Allocation_Failed
 	}
 	if len(servers) == 0 {
-		return nil, nil, {kind = .No_Servers}
+		return nil, nil, .No_Servers
 	}
 	if len(servers) > limits.name_servers {
-		return nil, nil, {kind = .Limit_Exceeded}
+		return nil, nil, .Limit_Exceeded
 	}
 	for server in servers {
 		if !resolver_snapshot_endpoint_valid(server) {
-			return nil, nil, {kind = .Parse_Failed}
+			return nil, nil, .Parse_Failed
 		}
 	}
 	reader: strings.Reader
 	strings.reader_init(&reader, string(hosts))
 	entries, ok := parse_hosts(strings.reader_to_stream(&reader), allocator)
 	if state.failed {
-		return nil, nil, {kind = .Allocation_Failed, allocation = state.cause}
+		return nil, nil, .Allocation_Failed
 	}
 	if !ok {
-		return nil, nil, {kind = .Parse_Failed}
+		return nil, nil, .Parse_Failed
 	}
 	if len(entries) > limits.host_entries {
-		return nil, nil, {kind = .Limit_Exceeded}
+		return nil, nil, .Limit_Exceeded
 	}
 	names := 0
 	for entry in entries {
 		if len(entry.name) > limits.host_name_bytes - names {
-			return nil, nil, {kind = .Limit_Exceeded}
+			return nil, nil, .Limit_Exceeded
 		}
 		names += len(entry.name)
 	}
-	return servers, entries, {}
+	return servers, entries, .None
 }
 
 @(private)
@@ -152,12 +151,12 @@ resolver_snapshot_read_file :: proc(
 	Resolver_Snapshot_Error,
 ) {
 	if len(path) == 0 || len(path) > RESOLVER_SNAPSHOT_PATH_BYTES || raw_data(path) == nil {
-		return nil, 0, {kind = .Invalid_Config}
+		return nil, 0, .Invalid_Config
 	}
 	name: [RESOLVER_SNAPSHOT_PATH_BYTES + 1]u8
 	for char, index in transmute([]u8)path {
 		if char == 0 {
-			return nil, 0, {kind = .Invalid_Config}
+			return nil, 0, .Invalid_Config
 		}
 		name[index] = char
 	}
@@ -165,21 +164,21 @@ resolver_snapshot_read_file :: proc(
 	// then rejects every nonregular source. Normal resolv.conf symlinks still work.
 	descriptor := posix.open(cast(cstring)&name[0], {.CLOEXEC, .NONBLOCK})
 	if descriptor < 0 {
-		return nil, 0, {kind = .Read_Failed, io = os.Platform_Error(posix.errno())}
+		return nil, 0, .Read_Failed
 	}
 	defer _ = posix.close(descriptor)
 	metadata: posix.stat_t
 	if posix.fstat(descriptor, &metadata) != .OK {
-		return nil, 0, {kind = .Read_Failed, io = os.Platform_Error(posix.errno())}
+		return nil, 0, .Read_Failed
 	}
 	if !posix.S_ISREG(metadata.st_mode) || metadata.st_size < 0 {
-		return nil, 0, {kind = .Read_Failed, io = os.General_Error.Invalid_File}
+		return nil, 0, .Read_Failed
 	}
 	if metadata.st_size > posix.off_t(limit) {
-		return nil, 0, {kind = .Limit_Exceeded}
+		return nil, 0, .Limit_Exceeded
 	}
 	storage, error := resolver_snapshot_grant(limit + 1, allocator)
-	if error.kind != .None {
+	if error != nil {
 		return nil, 0, error
 	}
 	success := false
@@ -196,21 +195,21 @@ resolver_snapshot_read_file :: proc(
 				retries += 1
 				continue
 			}
-			return nil, 0, {kind = .Read_Failed, io = os.Platform_Error(cause)}
+			return nil, 0, .Read_Failed
 		}
 		if n == 0 {
 			break
 		}
 		if n > len(storage) - at {
-			return nil, 0, {kind = .Read_Failed, io = os.General_Error.Invalid_File}
+			return nil, 0, .Read_Failed
 		}
 		at += int(n)
 		if at > limit {
-			return nil, 0, {kind = .Limit_Exceeded}
+			return nil, 0, .Limit_Exceeded
 		}
 	}
 	success = true
-	return storage, at, {}
+	return storage, at, .None
 }
 
 @(private)
@@ -246,17 +245,17 @@ resolver_snapshot_prepare_system :: proc(
 		hosts_path = dns_configuration.hosts_file
 	}
 	resolv, resolv_count, error := resolver_snapshot_read_file(resolv_path, options.limits.file_bytes, allocator)
-	if error.kind != .None {
+	if error != nil {
 		return {}, error
 	}
 	defer resolver_snapshot_free(resolv, allocator)
 	// Scratch is fixed once, never grown and never retained by a prepared owner.
 	size, valid := resolver_snapshot_scratch_size(options.limits)
 	if !valid {
-		return {}, {kind = .Limit_Exceeded}
+		return {}, .Limit_Exceeded
 	}
 	scratch, failure := resolver_snapshot_grant(size, allocator)
-	if failure.kind != .None {
+	if failure != nil {
 		return {}, failure
 	}
 	defer resolver_snapshot_free(scratch, allocator)
@@ -265,23 +264,23 @@ resolver_snapshot_prepare_system :: proc(
 	// Preserve the old Unix no-server behavior: hosts is not opened or used when
 	// no valid server exists. Latch first-parser failure before touching hosts.
 	if !resolver_snapshot_lines_fit(resolv[:resolv_count], options.limits.line_bytes) {
-		return {}, {kind = .Limit_Exceeded}
+		return {}, .Limit_Exceeded
 	}
 	first := Resolver_Snapshot_Parse_Allocator {
 		backing = mem.arena_allocator(&arena),
 	}
 	servers := parse_resolv_conf(string(resolv[:resolv_count]), {resolver_snapshot_parse_allocator, &first})
 	if first.failed {
-		return {}, {kind = .Allocation_Failed, allocation = first.cause}
+		return {}, .Allocation_Failed
 	}
 	if len(servers) == 0 {
-		return {}, {kind = .No_Servers}
+		return {}, .No_Servers
 	}
 	if len(servers) > options.limits.name_servers {
-		return {}, {kind = .Limit_Exceeded}
+		return {}, .Limit_Exceeded
 	}
 	hosts, host_count, host_error := resolver_snapshot_read_file(hosts_path, options.limits.file_bytes, allocator)
-	if host_error.kind != .None {
+	if host_error != nil {
 		return {}, host_error
 	}
 	defer resolver_snapshot_free(hosts, allocator)
@@ -294,7 +293,7 @@ resolver_snapshot_prepare_system :: proc(
 		options.limits,
 		mem.arena_allocator(&arena),
 	)
-	if parse_error.kind != .None {
+	if parse_error != nil {
 		return {}, parse_error
 	}
 	return resolver_snapshot_pack(name_servers, entries, allocator)

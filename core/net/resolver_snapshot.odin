@@ -2,7 +2,6 @@ package net
 
 import "core:bytes"
 import "core:mem"
-import "core:os"
 
 Resolver_Snapshot_Limits :: struct {
 	file_bytes, line_bytes, host_entries, host_name_bytes, name_servers: int,
@@ -34,25 +33,20 @@ Resolver_Snapshot_Options :: struct {
 	limits:                            Resolver_Snapshot_Limits,
 }
 
-Resolver_Snapshot_Error_Kind :: enum {
+Resolver_Snapshot_Error :: enum u32 {
 	None,
 	Invalid_Config,
 	Invalid_State,
 	Invalid_Hostname,
 	No_Servers,
 	Unsupported,
+	// A configuration file could not be read.
 	Read_Failed,
 	Parse_Failed,
 	Limit_Exceeded,
 	Allocation_Failed,
 	Destination_Undersized,
 	Overlapping_Buffers,
-}
-
-Resolver_Snapshot_Error :: struct {
-	kind:       Resolver_Snapshot_Error_Kind,
-	allocation: mem.Allocator_Error,
-	io:         os.Error,
 }
 
 // Stable, serialized owner; do not copy or mutate its fields. All published
@@ -93,10 +87,10 @@ resolver_snapshot_endpoint_valid :: proc(e: Endpoint) -> bool {
 @(private)
 resolver_snapshot_grant :: proc(size: int, allocator: mem.Allocator) -> ([]u8, Resolver_Snapshot_Error) {
 	if size == 0 {
-		return nil, {}
+		return nil, .None
 	}
 	if size < 0 || allocator.procedure == nil {
-		return nil, {kind = .Invalid_Config}
+		return nil, .Invalid_Config
 	}
 	data, error := allocator.procedure(allocator.data, .Alloc, size, RESOLVER_SNAPSHOT_ALIGNMENT, nil, 0)
 	if error != nil ||
@@ -113,9 +107,9 @@ resolver_snapshot_grant :: proc(size: int, allocator: mem.Allocator) -> ([]u8, R
 				len(data),
 			)
 		}
-		return nil, {kind = .Allocation_Failed, allocation = error if error != nil else .Out_Of_Memory}
+		return nil, .Allocation_Failed
 	}
-	return data, {}
+	return data, .None
 }
 
 @(private)
@@ -137,22 +131,22 @@ resolver_snapshot_pack :: proc(
 	total := len(servers) * size_of(Endpoint)
 	align := align_of(DNS_Host_Entry)
 	if total > max(int) - (align - 1) {
-		return {}, {kind = .Limit_Exceeded}
+		return {}, .Limit_Exceeded
 	}
 	hosts_at := (total + align - 1) &~ (align - 1)
 	if len(hosts) > (max(int) - hosts_at) / size_of(DNS_Host_Entry) {
-		return {}, {kind = .Limit_Exceeded}
+		return {}, .Limit_Exceeded
 	}
 	names_at := hosts_at + len(hosts) * size_of(DNS_Host_Entry)
 	total = names_at
 	for host in hosts {
 		if len(host.name) > max(int) - total {
-			return {}, {kind = .Limit_Exceeded}
+			return {}, .Limit_Exceeded
 		}
 		total += len(host.name)
 	}
 	storage, error := resolver_snapshot_grant(total, allocator)
-	if error.kind != .None {
+	if error != nil {
 		return {}, error
 	}
 	result := Resolver_Snapshot {
@@ -173,7 +167,7 @@ resolver_snapshot_pack :: proc(
 		}
 		at += len(host.name)
 	}
-	return result, {}
+	return result, .None
 }
 
 // Synchronous preparation only: no DNS query, entropy, OS resolver call or global
@@ -186,48 +180,50 @@ resolver_snapshot_prepare :: proc(
 	allocator: mem.Allocator,
 ) -> Resolver_Snapshot_Error {
 	if s == nil {
-		return {kind = .Invalid_State}
+		return .Invalid_State
 	}
 	if s._self != nil || s._storage != nil || s._servers != nil || s._hosts != nil || s._allocator.procedure != nil {
-		return {kind = .Invalid_State}
+		return .Invalid_State
 	}
 	if options.name_servers != nil && len(options.name_servers) == 0 {
-		return {kind = .Invalid_Config}
+		return .Invalid_Config
 	}
 	if !resolver_snapshot_limits_valid(options.limits) ||
 	   allocator.procedure == nil ||
 	   .Free not_in mem.query_features(allocator) {
-		return {kind = .Invalid_Config}
+		return .Invalid_Config
 	}
 	if options.name_servers != nil {
 		if len(options.name_servers) > options.limits.name_servers {
-			return {kind = .Limit_Exceeded}
+			return .Limit_Exceeded
 		}
 		if raw_data(options.name_servers) == nil {
-			return {kind = .Invalid_Config}
+			return .Invalid_Config
 		}
 		for server in options.name_servers {
 			if !resolver_snapshot_endpoint_valid(server) {
-				return {kind = .Invalid_Config}
+				return .Invalid_Config
 			}
 		}
 		prepared, error := resolver_snapshot_pack(options.name_servers, nil, allocator)
-		if error.kind != .None {
+		if error != nil {
 			return error
 		}
 		prepared._self = s
 		s^ = prepared
-		return {}
+		return .None
 	}
 	when ODIN_OS == .Darwin || ODIN_OS == .Linux || ODIN_OS == .FreeBSD || ODIN_OS == .OpenBSD || ODIN_OS == .NetBSD {
 		prepared, error := resolver_snapshot_prepare_system(options, allocator)
-		if error.kind != .None {
+		if error != nil {
 			return error
 		}
 		prepared._self = s
 		s^ = prepared
-		return {}
-	} else {return {kind = .Unsupported}}
+		return .None
+	} else {
+		return .Unsupported
+	}
 }
 
 // Borrowed immutable view, valid only while the original snapshot owner lives.
@@ -283,19 +279,19 @@ resolver_snapshot_lookup :: proc(
 	error: Resolver_Snapshot_Error,
 ) {
 	if s == nil || s._self != s {
-		return 0, false, {kind = .Invalid_State}
+		return 0, false, .Invalid_State
 	}
 	if port < 1 || port > 65535 || len(dst) > max(int) / size_of(Endpoint) || len(dst) > 0 && raw_data(dst) == nil {
-		return 0, false, {kind = .Invalid_Config}
+		return 0, false, .Invalid_Config
 	}
 	if len(host) > 0 && raw_data(host) == nil || !validate_hostname(resolver_snapshot_without_dot(host)) {
-		return 0, false, {kind = .Invalid_Hostname}
+		return 0, false, .Invalid_Hostname
 	}
 	target := mem.byte_slice(raw_data(dst), len(dst) * size_of(Endpoint))
 	if bytes.alias(target, s._storage) ||
 	   bytes.alias(target, mem.byte_slice(s, size_of(Resolver_Snapshot))) ||
 	   bytes.alias(target, transmute([]u8)host) {
-		return 0, false, {kind = .Overlapping_Buffers}
+		return 0, false, .Overlapping_Buffers
 	}
 	needed := 0
 	for entry in s._hosts {
@@ -304,10 +300,10 @@ resolver_snapshot_lookup :: proc(
 		}
 	}
 	if needed == 0 {
-		return 0, false, {}
+		return 0, false, .None
 	}
 	if needed > len(dst) {
-		return needed, true, {kind = .Destination_Undersized}
+		return needed, true, .Destination_Undersized
 	}
 	at := 0
 	for entry in s._hosts {
@@ -319,7 +315,7 @@ resolver_snapshot_lookup :: proc(
 			at += 1
 		}
 	}
-	return needed, true, {}
+	return needed, true, .None
 }
 
 resolver_snapshot_destroy :: proc(s: ^Resolver_Snapshot) {
